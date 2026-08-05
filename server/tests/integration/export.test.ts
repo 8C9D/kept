@@ -273,23 +273,9 @@ describe("the export pipeline", () => {
       generateExport(
         { db: harness.db, storage: harness.storage },
         { jobId: "11111111-2222-3333-4444-555555555555", userId, period },
-        { maxReceipts: 10_000, maxTotalBytes: 10 },
+        { maxTotalBytes: 10 },
       ),
     ).rejects.toThrow(/size limit.*shorter period/);
-  });
-
-  it("refuses an export over the receipt-count limit", async () => {
-    await createReceiptWithImage(token, userId, "d2".repeat(32), {
-      status: "confirmed",
-    });
-    const period = { start: "2026-01-01", end: "2026-12-31" };
-    await expect(
-      generateExport(
-        { db: harness.db, storage: harness.storage },
-        { jobId: "11111111-2222-3333-4444-555555555555", userId, period },
-        { maxReceipts: 0, maxTotalBytes: 1024 },
-      ),
-    ).rejects.toThrow(/above the 0 limit/);
   });
 
   it("reports a completed job past the storage lifecycle as expired and re-runnable", async () => {
@@ -339,6 +325,50 @@ describe("the export pipeline", () => {
     const job = (await response.json()) as JobResponse;
     expect(job.status).toBe("stale");
     expect(job.downloadUrl).toBeNull();
+  });
+
+  it("reports a job stranded in running as stale on a longer clock", async () => {
+    // The crashed-mid-run case: claimed but never finished. Thirty-one
+    // minutes old is past the running threshold; a fresh running job is not.
+    const thirtyOneMinutesAgo = new Date(Date.now() - 31 * 60 * 1000);
+    const stranded = await harness.db
+      .insert(exportJobs)
+      .values({
+        userId,
+        status: "running",
+        periodStart: "2026-01-01",
+        periodEnd: "2026-12-31",
+        createdAt: thirtyOneMinutesAgo,
+      })
+      .returning({ id: exportJobs.id });
+    const fresh = await harness.db
+      .insert(exportJobs)
+      .values({
+        userId,
+        status: "running",
+        periodStart: "2026-01-01",
+        periodEnd: "2026-12-31",
+        createdAt: new Date(Date.now() - 6 * 60 * 1000), // past queued's 5 min, under running's 30
+      })
+      .returning({ id: exportJobs.id });
+
+    const strandedResponse = await harness.request(
+      token,
+      "GET",
+      `/api/export/${stranded[0]?.id}`,
+    );
+    expect(((await strandedResponse.json()) as JobResponse).status).toBe(
+      "stale",
+    );
+
+    const freshResponse = await harness.request(
+      token,
+      "GET",
+      `/api/export/${fresh[0]?.id}`,
+    );
+    expect(((await freshResponse.json()) as JobResponse).status).toBe(
+      "running",
+    );
   });
 
   it("lists the caller's own jobs, newest first, and nobody else's", async () => {

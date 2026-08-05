@@ -40,6 +40,13 @@ const DOWNLOAD_LIFETIME_DAYS = 30;
 const STALE_QUEUED_AFTER_MINUTES = 5;
 
 /**
+ * A crash mid-run strands a poller identically, so running jobs go stale
+ * too - on a far longer clock, since generation legitimately takes time.
+ * Thirty minutes is well above anything the size budget permits.
+ */
+const STALE_RUNNING_AFTER_MINUTES = 30;
+
+/**
  * What a client sees: the stored lifecycle states plus the two computed
  * ones. "expired" and "stale" both mean "re-run this period", not "wait".
  */
@@ -127,8 +134,13 @@ export function exportRoutes(deps: ExportRouteDependencies): Hono<AuthedEnv> {
 /**
  * The status a client should act on. Stored states pass through except
  * where time has changed their meaning: a completed job past the storage
- * lifecycle is "expired", a queued job nothing ever claimed is "stale".
- * Nothing is written back - the row stays the truthful history.
+ * lifecycle is "expired"; a queued job nothing ever claimed, or a running
+ * job whose process died mid-run, is "stale". Nothing is written back -
+ * the row stays the truthful history.
+ *
+ * Both stale clocks run from createdAt: there is no started_at column, and
+ * the claim follows creation within milliseconds, so createdAt is an
+ * honest proxy for when running began.
  */
 function reportedStatus(
   job: typeof exportJobs.$inferSelect,
@@ -141,9 +153,14 @@ function reportedStatus(
       return "expired";
     }
   }
-  if (job.status === "queued") {
-    const staleAt =
-      job.createdAt.getTime() + STALE_QUEUED_AFTER_MINUTES * 60 * 1000;
+  const staleAfterMinutes =
+    job.status === "queued"
+      ? STALE_QUEUED_AFTER_MINUTES
+      : job.status === "running"
+        ? STALE_RUNNING_AFTER_MINUTES
+        : null;
+  if (staleAfterMinutes !== null) {
+    const staleAt = job.createdAt.getTime() + staleAfterMinutes * 60 * 1000;
     if (now.getTime() > staleAt) {
       return "stale";
     }

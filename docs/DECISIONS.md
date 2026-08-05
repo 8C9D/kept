@@ -132,3 +132,13 @@ Why: the only problem was a client polling forever; a computed status solves exa
 Evidence: wave 1 predicted drizzle error-wrapping and zod message failures - all passed; the one failure was a jose API misuse in my own test.
 Wave 2 predicted CSV assertion and archiver behavioral failures - all 105 tests passed first run; the two stumbles were compile-time dependency changes (archiver 8 dropping its factory API, exceljs typings predating Node's generic Buffer).
 How to apply: spend prediction effort on dependency upgrade notes and API surfaces at the seams (read the changelog of a newly added or majored dependency before writing against it), and trust the tested-runtime paths more.
+
+## 2026-08-05 - Wave-2 gate review, second pass (the owner)
+
+**`stale` also covers `running` jobs older than 30 minutes.**
+Rejected: the first pass's queued-only rule (the owner's own, revised on my flag).
+Why: a crash mid-run strands a poller identically to a crash before the claim; both clocks run from `created_at` since the claim follows creation within milliseconds, and 30 minutes is far above anything the byte budget permits.
+
+**The export byte budget stands alone; `maxReceipts` removed.**
+Rejected: keeping a row-count limit alongside the byte cap.
+Why: row count is a worse-measured proxy for the same memory bound - ten thousand small receipts and two thousand large ones are the same problem, and only bytes see that - and it could refuse an export that would have fit, the wrong failure for the one artifact the accountant needs.

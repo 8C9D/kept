@@ -21,17 +21,19 @@ export interface ExportPeriod {
  * act on (export a shorter period), never an OOM crash. With the backlog
  * and six-year retention, a full year can genuinely reach gigabytes.
  *
+ * Bytes are the only limit: a row count would be a worse-measured proxy
+ * for the same memory bound, and could refuse an export that would have
+ * fit - the wrong failure for the one artifact the accountant needs.
+ *
  * The byte budget is deliberately well under available memory: during
  * assembly the images exist roughly twice (downloaded buffers plus the
  * archive's output).
  */
 export interface ExportLimits {
-  maxReceipts: number;
   maxTotalBytes: number;
 }
 
 export const DEFAULT_EXPORT_LIMITS: ExportLimits = {
-  maxReceipts: 10_000,
   maxTotalBytes: 256 * 1024 * 1024, // 256 MiB
 };
 
@@ -68,11 +70,6 @@ export async function generateExport(
     input.userId,
     input.period,
   );
-  if (receipts.length > limits.maxReceipts) {
-    throw new Error(
-      `Export covers ${receipts.length} receipts, above the ${limits.maxReceipts} limit; export a shorter period`,
-    );
-  }
 
   // Page-1 image per receipt, in one query. Every receipt is created with
   // an image, so a missing one is a data-integrity failure and the export
