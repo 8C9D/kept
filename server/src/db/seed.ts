@@ -1,10 +1,10 @@
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { LOCAL_DEV_DATABASE_URL } from "./client.js";
 import { receiptImages, receipts, users } from "./schema.js";
 
 const pool = new Pool({
-  connectionString:
-    process.env.DATABASE_URL ?? "postgres://kept:kept@localhost:5432/kept",
+  connectionString: process.env.DATABASE_URL ?? LOCAL_DEV_DATABASE_URL,
 });
 const db = drizzle(pool);
 

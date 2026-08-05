@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
   char,
@@ -10,6 +11,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -19,7 +21,10 @@ export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   appleSub: text("apple_sub").notNull().unique(),
   email: text("email"),
-  displayName: text("display_name").notNull(),
+  // Nullable for the same reason vendor is: Apple hands the client a name
+  // only on first authorization and may hand nothing; a placeholder would
+  // corrupt the field.
+  displayName: text("display_name"),
   fiscalYearEndMonth: smallint("fiscal_year_end_month").notNull().default(12),
   fiscalYearEndDay: smallint("fiscal_year_end_day").notNull().default(31),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -80,10 +85,18 @@ export const receiptImages = pgTable(
     page: smallint("page").notNull(),
     objectKey: text("object_key").notNull(),
     sha256: text("sha256").notNull(),
+    // Stamped when the owning receipt is soft-deleted. The row is kept for
+    // retention, exactly like the receipt's.
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     unique("receipt_images_receipt_id_page_uq").on(t.receiptId, t.page),
-    unique("receipt_images_user_id_sha256_uq").on(t.userId, t.sha256),
+    // Partial: only live images occupy a duplicate slot. Otherwise deleting
+    // a receipt and re-capturing the same file would 409 forever against a
+    // row the user can no longer see.
+    uniqueIndex("receipt_images_user_id_sha256_uq")
+      .on(t.userId, t.sha256)
+      .where(sql`deleted_at IS NULL`),
   ],
 );

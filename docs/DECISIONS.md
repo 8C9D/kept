@@ -25,3 +25,33 @@ Why: a field whose freshness depends on every future handler remembering it sile
 **`receipts.vendor` becomes nullable.**
 Rejected: NOT NULL with a placeholder string.
 Why: an illegible vendor is a real outcome; a forced placeholder corrupts the field for everyone reading it later.
+
+## 2026-08-05 - Wave 1
+
+**`users.display_name` becomes nullable.**
+Rejected: NOT NULL with an empty-string default at sign-in.
+Why: Apple provides the person's name only on first authorization, only client-side, and possibly not at all; an empty-string default is exactly the silently-defaulted-value anti-pattern the quality rules ban.
+
+**`receipt_images` gains `deleted_at`; the `(user_id, sha256)` unique becomes partial (`WHERE deleted_at IS NULL`); DELETE stamps image rows with the receipt in one transaction.**
+Rejected: hard-deleting image rows on receipt delete (breaks retention), and keeping the full unique (delete-then-recapture of the same file would 409 forever against an invisible row).
+Why: surfaced by the wave-1 reviewer pass; the partial index keeps rows for CRA retention while freeing the duplicate slot.
+
+**Validation with zod, JWTs with jose; no other new runtime dependencies.**
+Rejected: hand-rolled validators (verbose, and a second validation style would inevitably appear) and hand-rolled JWT handling (signature verification is not code to write oneself).
+Why: both are the boring standard choices; jose's remote JWK set also handles Apple's key rotation, which the kickoff explicitly required.
+
+**The Apple test bypass is injection-only.**
+Rejected: an env var or config flag selecting a fake verifier.
+Why: the kickoff demands the bypass be structurally impossible in production; `createApp` takes a verifier as a value, the production entrypoint always constructs the real one, and no configuration value can swap them - tests build their own app with a fake.
+
+**Export routes answer 501 until wave 2.**
+Rejected: an in-memory job store now.
+Why: §6 specifies job id + polling but §5 defines no job store; that design decision belongs to wave 2 (an `export_jobs` table is the likely answer, since losing job state on restart mid-year-end-export is the wrong failure mode), and an honest 501 keeps the auth surface final without pretending.
+
+**`GET /api/receipts` gained a `status` filter beyond §6's list.**
+Rejected: leaving the confirm queue to client-side filtering of full lists.
+Why: §6A's "next unconfirmed receipt" queue on both clients needs the server to answer "pending only" directly.
+
+**Object keys are prefixed `{userId}/` and creates reject keys outside the session user's prefix.**
+Rejected: accepting any object key (would let a receipt point at, and later presign a download for, another user's stored object).
+Why: closes the one path where client-supplied input could cross the isolation boundary.

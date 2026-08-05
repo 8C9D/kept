@@ -6,9 +6,9 @@ CREATE TABLE "receipt_images" (
 	"page" smallint NOT NULL,
 	"object_key" text NOT NULL,
 	"sha256" text NOT NULL,
+	"deleted_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "receipt_images_receipt_id_page_uq" UNIQUE("receipt_id","page"),
-	CONSTRAINT "receipt_images_user_id_sha256_uq" UNIQUE("user_id","sha256")
+	CONSTRAINT "receipt_images_receipt_id_page_uq" UNIQUE("receipt_id","page")
 );
 --> statement-breakpoint
 CREATE TABLE "receipts" (
@@ -38,7 +38,7 @@ CREATE TABLE "users" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"apple_sub" text NOT NULL,
 	"email" text,
-	"display_name" text NOT NULL,
+	"display_name" text,
 	"fiscal_year_end_month" smallint DEFAULT 12 NOT NULL,
 	"fiscal_year_end_day" smallint DEFAULT 31 NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -48,6 +48,7 @@ CREATE TABLE "users" (
 ALTER TABLE "receipt_images" ADD CONSTRAINT "receipt_images_receipt_id_receipts_id_fk" FOREIGN KEY ("receipt_id") REFERENCES "public"."receipts"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "receipt_images" ADD CONSTRAINT "receipt_images_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "receipts" ADD CONSTRAINT "receipts_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+CREATE UNIQUE INDEX "receipt_images_user_id_sha256_uq" ON "receipt_images" USING btree ("user_id","sha256") WHERE deleted_at IS NULL;--> statement-breakpoint
 CREATE INDEX "receipts_user_id_purchased_at_idx" ON "receipts" USING btree ("user_id","purchased_at");--> statement-breakpoint
 CREATE INDEX "receipts_user_id_is_business_idx" ON "receipts" USING btree ("user_id","is_business");--> statement-breakpoint
 CREATE INDEX "receipts_user_id_status_idx" ON "receipts" USING btree ("user_id","status");

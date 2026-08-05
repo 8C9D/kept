@@ -1,5 +1,5 @@
 {
-  "id": "167a15c2-705e-45ea-93e5-0ddfc08e646f",
+  "id": "84d451a8-ff44-494b-9cf6-562877d2c35f",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -45,6 +45,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -53,7 +59,30 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "receipt_images_user_id_sha256_uq": {
+          "name": "receipt_images_user_id_sha256_uq",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sha256",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "deleted_at IS NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "receipt_images_receipt_id_receipts_id_fk": {
           "name": "receipt_images_receipt_id_receipts_id_fk",
@@ -90,14 +119,6 @@
           "columns": [
             "receipt_id",
             "page"
-          ]
-        },
-        "receipt_images_user_id_sha256_uq": {
-          "name": "receipt_images_user_id_sha256_uq",
-          "nullsNotDistinct": false,
-          "columns": [
-            "user_id",
-            "sha256"
           ]
         }
       },
@@ -349,7 +370,7 @@
           "name": "display_name",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "fiscal_year_end_month": {
           "name": "fiscal_year_end_month",
