@@ -156,6 +156,26 @@ export const listCursorSchema = z.strictObject({
   id: z.uuid(),
 });
 
+/**
+ * Two ways to name an export period (spec §8, §12): a fiscal year - the
+ * server derives the dates from the user's configured year end at request
+ * time - or an explicit date range (the seam a future quarterly picker
+ * uses).
+ */
+export const exportRequestSchema = z.union([
+  z.strictObject({
+    fiscalYearEndingIn: z.number().int().min(2000).max(2100),
+  }),
+  z
+    .strictObject({
+      periodStart: isoDateSchema,
+      periodEnd: isoDateSchema,
+    })
+    .refine((period) => period.periodStart <= period.periodEnd, {
+      error: "periodStart must not be after periodEnd",
+    }),
+]);
+
 export const updateMeSchema = z
   .strictObject({
     displayName: z.string().min(1).max(200).nullable().optional(),

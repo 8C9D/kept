@@ -2,9 +2,17 @@ import type { Hono } from "hono";
 import { createApp } from "../../src/app.js";
 import { createSessionTokens } from "../../src/auth/session.js";
 import { LOCAL_DEV_DATABASE_URL, createDb } from "../../src/db/client.js";
-import { receiptImages, receipts, users } from "../../src/db/schema.js";
+import {
+  exportJobs,
+  receiptImages,
+  receipts,
+  users,
+} from "../../src/db/schema.js";
 import { fakeAppleVerifier } from "./fakeAppleVerifier.js";
-import { fakeObjectStorage } from "./fakeObjectStorage.js";
+import {
+  fakeObjectStorage,
+  type FakeObjectStorage,
+} from "./fakeObjectStorage.js";
 
 const TEST_DATABASE_URL = process.env.DATABASE_URL ?? LOCAL_DEV_DATABASE_URL;
 const TEST_SESSION_SECRET = "test-session-secret-0123456789abcdef";
@@ -12,6 +20,7 @@ const TEST_SESSION_SECRET = "test-session-secret-0123456789abcdef";
 export interface TestHarness {
   app: Hono;
   db: ReturnType<typeof createDb>["db"];
+  storage: FakeObjectStorage;
   /** Empties all tables; call before each test for a known-blank slate. */
   resetDatabase(): Promise<void>;
   /** Signs in through the real auth route. */
@@ -31,23 +40,27 @@ export interface TestHarness {
 
 export function createTestHarness(): TestHarness {
   const { db, pool } = createDb(TEST_DATABASE_URL);
+  const storage = fakeObjectStorage();
   const app = createApp({
     db,
     appleVerifier: fakeAppleVerifier(),
     sessionTokens: createSessionTokens(TEST_SESSION_SECRET),
-    storage: fakeObjectStorage(),
+    storage,
   });
 
   return {
     app,
     db,
+    storage,
 
     async resetDatabase() {
       // Child tables first; no CASCADE so an unexpected new table cannot be
       // silently emptied.
       await db.delete(receiptImages);
       await db.delete(receipts);
+      await db.delete(exportJobs);
       await db.delete(users);
+      storage.objects.clear();
     },
 
     async signIn(appleSub: string, displayName?: string) {

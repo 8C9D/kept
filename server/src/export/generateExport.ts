@@ -1,0 +1,181 @@
+import { ZipArchive, type Archiver } from "archiver";
+import { PassThrough } from "node:stream";
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import type { Db } from "../db/client.js";
+import { listExportableReceipts } from "../db/receiptQueries.js";
+import { receiptImages, users } from "../db/schema.js";
+import { exportImagePath } from "../domain/exportFilename.js";
+import { cents } from "../domain/money.js";
+import type { ObjectStorage } from "../storage/objectStorage.js";
+import type { ExportRow } from "./exportRows.js";
+import { writeCsv, writeXlsx } from "./writeFiles.js";
+
+export interface ExportPeriod {
+  start: string; // ISO yyyy-mm-dd, inclusive
+  end: string;
+}
+
+interface GenerateExportDependencies {
+  db: Db;
+  storage: ObjectStorage;
+}
+
+/**
+ * Build the complete export zip (spec §8) for one user and period and put
+ * it in object storage. Returns where it landed.
+ *
+ * Contents: the XLSX (what the accountant opens), the CSV (what imports),
+ * and every image under images/yyyy/mm/ with filenames the spreadsheets'
+ * image_filename column points at - the click-through from row to paper is
+ * the point of the folder.
+ */
+export async function generateExport(
+  deps: GenerateExportDependencies,
+  input: { jobId: string; userId: string; period: ExportPeriod },
+): Promise<{ objectKey: string; receiptCount: number }> {
+  const userRows = await deps.db
+    .select({ displayName: users.displayName })
+    .from(users)
+    .where(eq(users.id, input.userId));
+  const user = userRows[0];
+  if (user === undefined) {
+    throw new Error(`Export for nonexistent user ${input.userId}`);
+  }
+
+  const receipts = await listExportableReceipts(
+    deps.db,
+    input.userId,
+    input.period,
+  );
+
+  // Page-1 image per receipt, in one query. Every receipt is created with
+  // an image, so a missing one is a data-integrity failure and the export
+  // must fail loudly rather than ship an accountant a broken click-through.
+  const imagesByReceipt = new Map<string, string>();
+  if (receipts.length > 0) {
+    const imageRows = await deps.db
+      .select({
+        receiptId: receiptImages.receiptId,
+        objectKey: receiptImages.objectKey,
+      })
+      .from(receiptImages)
+      .where(
+        and(
+          inArray(
+            receiptImages.receiptId,
+            receipts.map((receipt) => receipt.id),
+          ),
+          eq(receiptImages.userId, input.userId),
+          eq(receiptImages.page, 1),
+          isNull(receiptImages.deletedAt),
+        ),
+      );
+    for (const image of imageRows) {
+      imagesByReceipt.set(image.receiptId, image.objectKey);
+    }
+  }
+
+  // Each entry pairs the spreadsheet row with where its image lives in
+  // storage; the storage key is transport detail, not export data, so it
+  // stays out of ExportRow itself.
+  const bundle = receipts.map((receipt) => {
+    const imageObjectKey = imagesByReceipt.get(receipt.id);
+    if (imageObjectKey === undefined) {
+      throw new Error(`Receipt ${receipt.id} has no page-1 image`);
+    }
+    const row: ExportRow = {
+      receiptId: receipt.id,
+      date: receipt.purchasedAt,
+      vendor: receipt.vendor,
+      vendorGstHstNumber: receipt.vendorTaxNumber,
+      subtotalCents:
+        receipt.subtotalCents === null ? null : cents(receipt.subtotalCents),
+      hstCents: receipt.hstCents === null ? null : cents(receipt.hstCents),
+      otherTaxCents:
+        receipt.otherTaxCents === null ? null : cents(receipt.otherTaxCents),
+      totalCents: cents(receipt.totalCents),
+      currency: receipt.currency,
+      category: receipt.category,
+      paymentMethod: receipt.paymentMethod,
+      businessOrPersonal: receipt.isBusiness ? "business" : "personal",
+      whose: user.displayName,
+      imageFilename: `images/${exportImagePath({
+        purchasedAt: receipt.purchasedAt,
+        vendor: receipt.vendor,
+        receiptId: receipt.id,
+        extension: extensionOf(imageObjectKey),
+      })}`,
+      notes: receipt.notes,
+    };
+    return { row, imageObjectKey };
+  });
+  const rows = bundle.map((entry) => entry.row);
+
+  const label = periodLabel(input.period);
+  const xlsx = await writeXlsx(rows);
+  const csv = writeCsv(rows);
+
+  const zip = await buildZip(async (archive) => {
+    archive.append(Buffer.from(xlsx), { name: `receipts-${label}.xlsx` });
+    archive.append(csv, { name: `receipts-${label}.csv` });
+    for (const { row, imageObjectKey } of bundle) {
+      const bytes = await deps.storage.download(imageObjectKey);
+      archive.append(Buffer.from(bytes), { name: row.imageFilename });
+    }
+  });
+
+  const objectKey = `${input.userId}/exports/${input.jobId}/Receipts-${label}.zip`;
+  await deps.storage.upload(objectKey, zip, "application/zip");
+  return { objectKey, receiptCount: rows.length };
+}
+
+/**
+ * "Receipts-2026" when the period is exactly calendar 2026; otherwise the
+ * explicit range, so a Mar-31 fiscal year or a quarterly slice names
+ * itself honestly.
+ */
+function periodLabel(period: ExportPeriod): string {
+  const calendarYear = period.start.slice(0, 4);
+  if (
+    period.start === `${calendarYear}-01-01` &&
+    period.end === `${calendarYear}-12-31`
+  ) {
+    return calendarYear;
+  }
+  return `${period.start}_to_${period.end}`;
+}
+
+function extensionOf(objectKey: string): string {
+  const lastDot = objectKey.lastIndexOf(".");
+  if (lastDot === -1 || lastDot === objectKey.length - 1) {
+    throw new Error(`Object key has no file extension: ${objectKey}`);
+  }
+  return objectKey.slice(lastDot + 1);
+}
+
+/**
+ * Run archiver into an in-memory buffer. Streaming to disk or storage
+ * would matter at gigabyte scale; at this project's scale the simple
+ * buffer wins on legibility, and the seam to change it is this one
+ * function.
+ */
+async function buildZip(
+  fill: (archive: Archiver) => Promise<void>,
+): Promise<Uint8Array> {
+  const archive = new ZipArchive();
+  const chunks: Buffer[] = [];
+  const output = new PassThrough();
+  output.on("data", (chunk: Buffer) => chunks.push(chunk));
+
+  const finished = new Promise<void>((resolve, reject) => {
+    output.on("finish", resolve);
+    archive.on("error", reject);
+    archive.on("warning", reject); // a warning is a corrupt-archive risk, not a log line
+  });
+
+  archive.pipe(output);
+  await fill(archive);
+  await archive.finalize();
+  await finished;
+  return new Uint8Array(Buffer.concat(chunks));
+}

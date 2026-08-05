@@ -14,7 +14,11 @@ import {
   updateReceiptSchema,
   uploadUrlSchema,
 } from "../http/schemas.js";
-import { parseOrThrow, readJsonBody } from "../http/validate.js";
+import {
+  parseOrThrow,
+  readJsonBody,
+  uuidParamOrNotFound,
+} from "../http/validate.js";
 import { sessionAuth, type AuthedEnv } from "../http/sessionAuth.js";
 import type { ObjectStorage } from "../storage/objectStorage.js";
 
@@ -22,21 +26,6 @@ interface ReceiptRouteDependencies {
   db: Db;
   sessionTokens: SessionTokens;
   storage: ObjectStorage;
-}
-
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * A malformed id cannot name any receipt, so it gets the same 404 a
- * missing or foreign receipt gets - one indistinguishable outcome for
- * "not yours to see" (spec §3 constraint 4).
- */
-function receiptIdOrNotFound(param: string): string {
-  if (!UUID_PATTERN.test(param)) {
-    throw notFoundError();
-  }
-  return param;
 }
 
 export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
@@ -206,7 +195,7 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
 
   /** GET /api/receipts/:id - one receipt plus presigned image downloads. */
   router.get("/:id", async (c) => {
-    const id = receiptIdOrNotFound(c.req.param("id"));
+    const id = uuidParamOrNotFound(c.req.param("id"));
     const userId = c.get("userId");
 
     const rows = await deps.db
@@ -248,7 +237,7 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
 
   /** PATCH /api/receipts/:id - edit fields; only provided keys change. */
   router.patch("/:id", async (c) => {
-    const id = receiptIdOrNotFound(c.req.param("id"));
+    const id = uuidParamOrNotFound(c.req.param("id"));
     const body = parseOrThrow(updateReceiptSchema, await readJsonBody(c));
     const userId = c.get("userId");
 
@@ -291,7 +280,7 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
 
   /** DELETE /api/receipts/:id - soft delete (spec §10B: retention). */
   router.delete("/:id", async (c) => {
-    const id = receiptIdOrNotFound(c.req.param("id"));
+    const id = uuidParamOrNotFound(c.req.param("id"));
     const userId = c.get("userId");
     const deletedAt = new Date();
 

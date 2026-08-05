@@ -21,3 +21,16 @@ export function cents(value: number): Cents {
   }
   return value as Cents;
 }
+
+/**
+ * Render cents as a decimal currency string ("11300" → "113.00") for the
+ * export files (spec §8). Pure integer arithmetic and string assembly - the
+ * value never passes through a float.
+ */
+export function centsToDecimalString(value: Cents): string {
+  const sign = value < 0 ? "-" : "";
+  const magnitude = Math.abs(value);
+  const dollars = Math.floor(magnitude / 100);
+  const remainder = String(magnitude % 100).padStart(2, "0");
+  return `${sign}${dollars}.${remainder}`;
+}

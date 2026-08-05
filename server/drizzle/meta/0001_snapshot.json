@@ -1,9 +1,116 @@
 {
-  "id": "d06ca123-9398-48b4-a07e-b138700b5909",
-  "prevId": "193246fa-36f7-4f80-90d7-38710ffe412d",
+  "id": "e57f1d85-fdf0-4560-b89f-6f9b61e811a7",
+  "prevId": "88e79d06-f385-47f4-b4e9-cd1bc9d6edcf",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
+    "public.export_jobs": {
+      "name": "export_jobs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "export_job_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queued'"
+        },
+        "period_start": {
+          "name": "period_start",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "period_end": {
+          "name": "period_end",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "object_key": {
+          "name": "object_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "export_jobs_user_id_created_at_idx": {
+          "name": "export_jobs_user_id_created_at_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "export_jobs_user_id_users_id_fk": {
+          "name": "export_jobs_user_id_users_id_fk",
+          "tableFrom": "export_jobs",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "tableTo": "users",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.receipt_images": {
       "name": "receipt_images",
       "schema": "",
@@ -419,6 +526,16 @@
     }
   },
   "enums": {
+    "public.export_job_status": {
+      "name": "export_job_status",
+      "schema": "public",
+      "values": [
+        "queued",
+        "running",
+        "complete",
+        "failed"
+      ]
+    },
     "public.receipt_status": {
       "name": "receipt_status",
       "schema": "public",

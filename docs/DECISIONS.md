@@ -73,3 +73,33 @@ Why: the §6A backlog import makes lists large on day one, and keyset cursors st
 **`users.token_version`, carried as the JWT `tv` claim, checked on every verify.**
 Rejected: unrevocable 30-day JWTs.
 Why: bumping the integer revokes all of a user's sessions at the cost of one indexed read per request; tokens without the claim are invalid by construction.
+
+## 2026-08-05 - Wave 2
+
+**Export jobs persist in an `export_jobs` table, not process memory.**
+Rejected: an in-memory job map.
+Why: a restart must not lose a running year-end export; rows also give the polling endpoint failure reasons for free.
+
+**The export request is `{fiscalYearEndingIn}` XOR `{periodStart, periodEnd}`.**
+Rejected: fiscal-only (blocks the §12 quarterly affordance) and range-only (pushes the fiscal derivation to clients, against §5.1's derive-at-request-time rule).
+Why: both spec statements are satisfied, and the range shape is the seam a quarterly picker plugs into.
+
+**Zip label: the calendar year when the period is exactly Jan 1 to Dec 31, otherwise the explicit range.**
+Rejected: always labelling with the period's end year.
+Why: calling a Mar-31 fiscal year "Receipts-2026" would mislabel nine months of 2025; a range names itself honestly.
+
+**XLSX money cells are numeric with a `0.00` format; CSV money is a decimal string; both derive from integer cents via string assembly.**
+Rejected: string money in the XLSX (does not sum in Excel) and cents÷100 floating-point division.
+Why: the accountant gets cells that behave like money while no value in the pipeline ever passes through a float.
+
+**A missing image fails the export loudly; the reason is recorded on the job.**
+Rejected: skipping the row or shipping the zip without the file.
+Why: a silent gap in an accountant's zip is the error-masking failure mode §10 exists to prevent.
+
+**Zip assembly is in-memory.**
+Rejected: streaming to storage.
+Why: legibility wins at this scale; the seam to change it is one function (`buildZip`), noted in place.
+
+**Dependencies: archiver 8 (class API) and exceljs at runtime; adm-zip as a test-only dependency for zip inspection.**
+Rejected: hand-rolling zip reading in tests.
+Why: the suite must open the artifact it produced; adm-zip stays out of the runtime dependency tree.

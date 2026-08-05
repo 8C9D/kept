@@ -1,6 +1,21 @@
 import type { Context } from "hono";
 import type { ZodType } from "zod";
-import { ApiError } from "./errors.js";
+import { ApiError, notFoundError } from "./errors.js";
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A malformed id cannot name any resource, so it gets the same 404 a
+ * missing or foreign resource gets - one indistinguishable outcome for
+ * "not yours to see" (spec §3 constraint 4).
+ */
+export function uuidParamOrNotFound(param: string): string {
+  if (!UUID_PATTERN.test(param)) {
+    throw notFoundError();
+  }
+  return param;
+}
 
 /**
  * Read a request body as JSON, treating malformed or missing JSON as the
