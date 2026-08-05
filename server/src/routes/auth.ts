@@ -43,7 +43,7 @@ export function authRoutes(deps: AuthRouteDependencies): Hono {
     }
 
     const user = await findOrCreateUser(deps.db, identity, body.displayName);
-    const token = await deps.sessionTokens.issue(user.id);
+    const token = await deps.sessionTokens.issue(user.id, user.tokenVersion);
 
     return c.json({
       token,
@@ -75,20 +75,22 @@ async function findOrCreateUser(
     })
     .onConflictDoNothing({ target: users.appleSub })
     .returning();
-  if (inserted.length === 1) {
-    return inserted[0];
+  const insertedUser = inserted[0];
+  if (insertedUser !== undefined) {
+    return insertedUser;
   }
 
   const existing = await db
     .select()
     .from(users)
     .where(eq(users.appleSub, identity.appleSub));
-  if (existing.length !== 1) {
+  const existingUser = existing[0];
+  if (existingUser === undefined) {
     // The insert conflicted, so the row must exist; not finding it means
     // something is genuinely broken.
     throw new Error(
       `User with apple_sub ${identity.appleSub} conflicted on insert but was not found`,
     );
   }
-  return existing[0];
+  return existingUser;
 }

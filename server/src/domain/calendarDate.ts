@@ -15,11 +15,11 @@ export function daysInMonth(year: number, month: number): number {
   if (!Number.isInteger(month) || month < 1 || month > 12) {
     return 0;
   }
-  const lengths = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  if (month === 2 && isLeapYear(year)) {
-    return 29;
+  if (month === 2) {
+    return isLeapYear(year) ? 29 : 28;
   }
-  return lengths[month - 1];
+  const thirtyDayMonths = [4, 6, 9, 11];
+  return thirtyDayMonths.includes(month) ? 30 : 31;
 }
 
 export function isLeapYear(year: number): boolean {

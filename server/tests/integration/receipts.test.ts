@@ -52,8 +52,8 @@ describe("POST /api/receipts", () => {
       images: { page: number; downloadUrl: string }[];
     };
     expect(withImages.images).toHaveLength(1);
-    expect(withImages.images[0].page).toBe(1);
-    expect(withImages.images[0].downloadUrl).toContain(userId);
+    expect(withImages.images[0]?.page).toBe(1);
+    expect(withImages.images[0]?.downloadUrl).toContain(userId);
   });
 
   it("round-trips money exactly as integer cents", async () => {
@@ -84,8 +84,8 @@ describe("POST /api/receipts", () => {
       .select()
       .from(receipts)
       .where(eq(receipts.id, created.id));
-    expect(rows[0].totalCents).toBe(1000000000);
-    expect(Number.isInteger(rows[0].subtotalCents)).toBe(true);
+    expect(rows[0]?.totalCents).toBe(1000000000);
+    expect(rows[0]?.subtotalCents).toBe(999999999);
   });
 
   it("answers 400, not 500, to a body that is not JSON at all", async () => {
@@ -243,6 +243,41 @@ describe("GET /api/receipts filters", () => {
       token,
       "GET",
       "/api/receipts?userId=abc",
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("pages with a cursor and terminates with a null cursor", async () => {
+    // Three fixtures exist; page size two → one full page, then one row.
+    const first = await harness.request(token, "GET", "/api/receipts?limit=2");
+    const firstPage = (await first.json()) as {
+      receipts: { vendor: string }[];
+      nextCursor: string | null;
+    };
+    expect(firstPage.receipts.map((r) => r.vendor)).toEqual([
+      "Shell",
+      "Loblaws",
+    ]);
+    expect(firstPage.nextCursor).not.toBeNull();
+
+    const second = await harness.request(
+      token,
+      "GET",
+      `/api/receipts?limit=2&cursor=${encodeURIComponent(firstPage.nextCursor as string)}`,
+    );
+    const secondPage = (await second.json()) as {
+      receipts: { vendor: string }[];
+      nextCursor: string | null;
+    };
+    expect(secondPage.receipts.map((r) => r.vendor)).toEqual(["Staples"]);
+    expect(secondPage.nextCursor).toBeNull();
+  });
+
+  it("rejects a junk cursor with 400", async () => {
+    const response = await harness.request(
+      token,
+      "GET",
+      "/api/receipts?cursor=%21%21not-a-cursor",
     );
     expect(response.status).toBe(400);
   });

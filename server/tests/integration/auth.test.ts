@@ -17,8 +17,8 @@ describe("POST /api/auth/apple", () => {
       .from(users)
       .where(eq(users.appleSub, "new-sub"));
     expect(rows).toHaveLength(1);
-    expect(rows[0].id).toBe(userId);
-    expect(rows[0].displayName).toBe("Test User");
+    expect(rows[0]?.id).toBe(userId);
+    expect(rows[0]?.displayName).toBe("Test User");
 
     const me = await harness.request(token, "GET", "/api/me");
     expect(me.status).toBe(200);
@@ -42,7 +42,8 @@ describe("POST /api/auth/apple", () => {
       .select()
       .from(users)
       .where(eq(users.id, userId));
-    expect(rows[0].displayName).toBeNull();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.displayName).toBeNull();
   });
 
   it("rejects an invalid identity token with 401", async () => {
@@ -88,5 +89,24 @@ describe("session enforcement on protected routes", () => {
     await harness.db.delete(users).where(eq(users.id, userId));
     const response = await harness.request(token, "GET", "/api/me");
     expect(response.status).toBe(401);
+  });
+
+  it("revokes every outstanding session when token_version is bumped", async () => {
+    const { token, userId } = await harness.signIn("revoked-sub");
+    const before = await harness.request(token, "GET", "/api/me");
+    expect(before.status).toBe(200);
+
+    await harness.db
+      .update(users)
+      .set({ tokenVersion: 1 })
+      .where(eq(users.id, userId));
+
+    const after = await harness.request(token, "GET", "/api/me");
+    expect(after.status).toBe(401);
+
+    // A fresh sign-in issues a token carrying the new version, which works.
+    const again = await harness.signIn("revoked-sub");
+    const refreshed = await harness.request(again.token, "GET", "/api/me");
+    expect(refreshed.status).toBe(200);
   });
 });

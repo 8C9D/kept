@@ -38,7 +38,9 @@ describe("DELETE /api/receipts/:id (soft delete)", () => {
       .from(receipts)
       .where(eq(receipts.id, receiptId));
     expect(rows).toHaveLength(1);
-    expect(rows[0].deletedAt).not.toBeNull();
+    // toBeInstanceOf rather than not-null: with optional chaining an absent
+    // row would yield undefined, which "not.toBeNull()" would wave through.
+    expect(rows[0]?.deletedAt).toBeInstanceOf(Date);
   });
 
   it("excludes a deleted receipt from the list and its count", async () => {

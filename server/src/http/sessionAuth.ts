@@ -1,5 +1,8 @@
+import { eq } from "drizzle-orm";
 import type { MiddlewareHandler } from "hono";
 import type { SessionTokens } from "../auth/session.js";
+import type { Db } from "../db/client.js";
+import { users } from "../db/schema.js";
 import { unauthorizedError } from "./errors.js";
 
 /**
@@ -18,19 +21,32 @@ const BEARER_PREFIX = "Bearer ";
 
 export function sessionAuth(
   sessionTokens: SessionTokens,
+  db: Db,
 ): MiddlewareHandler<AuthedEnv> {
   return async (c, next) => {
     const header = c.req.header("Authorization");
     if (header === undefined || !header.startsWith(BEARER_PREFIX)) {
       throw unauthorizedError();
     }
-    const userId = await sessionTokens.verify(
+    const claims = await sessionTokens.verify(
       header.slice(BEARER_PREFIX.length),
     );
-    if (userId === null) {
+    if (claims === null) {
       throw unauthorizedError();
     }
-    c.set("userId", userId);
+
+    // The token is genuine; now check it is still current. A missing user
+    // or a bumped token_version both mean this session has been revoked.
+    const rows = await db
+      .select({ tokenVersion: users.tokenVersion })
+      .from(users)
+      .where(eq(users.id, claims.userId));
+    const user = rows[0];
+    if (user === undefined || user.tokenVersion !== claims.tokenVersion) {
+      throw unauthorizedError();
+    }
+
+    c.set("userId", claims.userId);
     await next();
   };
 }

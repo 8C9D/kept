@@ -1,6 +1,6 @@
 {
-  "id": "81a32e3f-05a4-4c7b-8b03-8ae9229e79a3",
-  "prevId": "84d451a8-ff44-494b-9cf6-562877d2c35f",
+  "id": "d06ca123-9398-48b4-a07e-b138700b5909",
+  "prevId": "193246fa-36f7-4f80-90d7-38710ffe412d",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -371,6 +371,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "token_version": {
+          "name": "token_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "fiscal_year_end_month": {
           "name": "fiscal_year_end_month",

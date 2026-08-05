@@ -55,3 +55,21 @@ Why: §6A's "next unconfirmed receipt" queue on both clients needs the server to
 **Object keys are prefixed `{userId}/` and creates reject keys outside the session user's prefix.**
 Rejected: accepting any object key (would let a receipt point at, and later presign a download for, another user's stored object).
 Why: closes the one path where client-supplied input could cross the isolation boundary.
+
+## 2026-08-05 - Wave-1 gate review (the owner)
+
+**Create and update handlers use explicit field maps, not spreads of the parsed body.**
+Rejected: spreading the strict-schema output into the insert/update (my wave-1 shape).
+Why: the spread silently drops a schema key with no matching column - an invisible failure - whereas a forgotten line in an explicit map is at least visible in review; §10's rule is explicit beats concise.
+
+**`noUncheckedIndexedAccess` enabled.**
+Rejected: leaving it off with per-site care.
+Why: every `rows[0]` was typed as always-present; enabling it now, while the codebase is small, converts a class of latent 500s into compile errors.
+
+**`GET /api/receipts` is paged: keyset cursor on `(purchased_at, created_at, id)` descending, limit default 50 / max 200.**
+Rejected: unbounded lists ("fine at three users") and offset pagination.
+Why: the §6A backlog import makes lists large on day one, and keyset cursors stay stable under concurrent inserts, which is exactly the backlog-import condition.
+
+**`users.token_version`, carried as the JWT `tv` claim, checked on every verify.**
+Rejected: unrevocable 30-day JWTs.
+Why: bumping the integer revokes all of a user's sessions at the cost of one indexed read per request; tokens without the claim are invalid by construction.

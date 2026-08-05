@@ -29,6 +29,9 @@ async function seed() {
       },
     ])
     .returning();
+  if (userA === undefined || userB === undefined) {
+    throw new Error("Seeding users returned fewer rows than inserted");
+  }
 
   const inserted = await db
     .insert(receipts)

@@ -1,9 +1,11 @@
 import { Hono } from "hono";
 import type { SessionTokens } from "../auth/session.js";
+import type { Db } from "../db/client.js";
 import { ApiError } from "../http/errors.js";
 import { sessionAuth, type AuthedEnv } from "../http/sessionAuth.js";
 
 interface ExportRouteDependencies {
+  db: Db;
   sessionTokens: SessionTokens;
 }
 
@@ -18,7 +20,7 @@ interface ExportRouteDependencies {
  */
 export function exportRoutes(deps: ExportRouteDependencies): Hono<AuthedEnv> {
   const router = new Hono<AuthedEnv>();
-  router.use("*", sessionAuth(deps.sessionTokens));
+  router.use("*", sessionAuth(deps.sessionTokens, deps.db));
 
   const notImplemented = () => {
     throw new ApiError(

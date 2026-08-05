@@ -17,7 +17,7 @@ interface MeRouteDependencies {
 /** GET/PATCH /api/me - own profile and fiscal year settings. */
 export function meRoutes(deps: MeRouteDependencies): Hono<AuthedEnv> {
   const router = new Hono<AuthedEnv>();
-  router.use("*", sessionAuth(deps.sessionTokens));
+  router.use("*", sessionAuth(deps.sessionTokens, deps.db));
 
   router.get("/", async (c) => {
     const user = await loadUser(deps.db, c.get("userId"));
@@ -58,12 +58,13 @@ export function meRoutes(deps: MeRouteDependencies): Hono<AuthedEnv> {
       .set(changes)
       .where(eq(users.id, user.id))
       .returning();
-    if (updated.length !== 1) {
+    const updatedUser = updated[0];
+    if (updatedUser === undefined) {
       // Same impossible-in-practice state loadUser guards: the user row
       // vanished between read and write.
       throw new ApiError(401, "unauthorized", "Session user no longer exists");
     }
-    return c.json(profileOf(updated[0]));
+    return c.json(profileOf(updatedUser));
   });
 
   return router;
@@ -71,12 +72,13 @@ export function meRoutes(deps: MeRouteDependencies): Hono<AuthedEnv> {
 
 async function loadUser(db: Db, userId: string) {
   const rows = await db.select().from(users).where(eq(users.id, userId));
-  if (rows.length !== 1) {
+  const user = rows[0];
+  if (user === undefined) {
     // A valid session naming a nonexistent user should be impossible;
     // treat it as an invalid session rather than a 404 on oneself.
     throw new ApiError(401, "unauthorized", "Session user no longer exists");
   }
-  return rows[0];
+  return user;
 }
 
 /** The API shape of a profile; apple_sub stays internal. */

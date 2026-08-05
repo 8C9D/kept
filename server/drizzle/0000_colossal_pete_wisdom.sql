@@ -39,6 +39,7 @@ CREATE TABLE "users" (
 	"apple_sub" text NOT NULL,
 	"email" text,
 	"display_name" text,
+	"token_version" integer DEFAULT 0 NOT NULL,
 	"fiscal_year_end_month" smallint DEFAULT 12 NOT NULL,
 	"fiscal_year_end_day" smallint DEFAULT 31 NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,

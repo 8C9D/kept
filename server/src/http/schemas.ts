@@ -139,6 +139,21 @@ export const listReceiptsQuerySchema = z.strictObject({
     .optional(),
   status: receiptStatusSchema.optional(),
   q: z.string().min(1).max(200).optional(),
+  // Backlog imports make lists large on day one; pages are mandatory, with
+  // an opaque keyset cursor from the previous page's response.
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  cursor: z.string().min(1).optional(),
+});
+
+/**
+ * The decoded shape of a list cursor: the sort key of the last row of the
+ * previous page. Opaque to clients; validated on the way back in because a
+ * cursor is still client input.
+ */
+export const listCursorSchema = z.strictObject({
+  purchasedAt: isoDateSchema,
+  createdAt: z.iso.datetime({ offset: true }),
+  id: z.uuid(),
 });
 
 export const updateMeSchema = z

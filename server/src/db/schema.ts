@@ -25,6 +25,9 @@ export const users = pgTable("users", {
   // only on first authorization and may hand nothing; a placeholder would
   // corrupt the field.
   displayName: text("display_name"),
+  // Stamped into every session JWT and compared on verification; bumping it
+  // revokes all of a user's outstanding sessions at once.
+  tokenVersion: integer("token_version").notNull().default(0),
   fiscalYearEndMonth: smallint("fiscal_year_end_month").notNull().default(12),
   fiscalYearEndDay: smallint("fiscal_year_end_day").notNull().default(31),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

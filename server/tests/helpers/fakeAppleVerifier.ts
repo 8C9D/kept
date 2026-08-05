@@ -14,14 +14,11 @@ import {
 export function fakeAppleVerifier(): AppleIdentityVerifier {
   return {
     async verify(identityToken: string) {
-      const parts = identityToken.split(":");
-      if (parts[0] !== "apple-token" || parts.length < 2 || parts[1] === "") {
+      const [scheme, sub, email] = identityToken.split(":");
+      if (scheme !== "apple-token" || sub === undefined || sub === "") {
         throw new AppleVerificationError("Fake verifier rejected the token");
       }
-      return {
-        appleSub: parts[1],
-        email: parts.length >= 3 ? parts[2] : null,
-      };
+      return { appleSub: sub, email: email ?? null };
     },
   };
 }
