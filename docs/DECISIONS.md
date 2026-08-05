@@ -142,3 +142,37 @@ Why: a crash mid-run strands a poller identically to a crash before the claim; b
 **The export byte budget stands alone; `maxReceipts` removed.**
 Rejected: keeping a row-count limit alongside the byte cap.
 Why: row count is a worse-measured proxy for the same memory bound - ten thousand small receipts and two thousand large ones are the same problem, and only bytes see that - and it could refuse an export that would have fit, the wrong failure for the one artifact the accountant needs.
+
+## 2026-08-05 - Wave 3
+
+**The Xcode project file is hand-written using filesystem-synchronized groups (Xcode 16+ format).**
+Rejected: XcodeGen or Tuist (a new tool dependency, and the kickoff bars global installs), and the classic pbxproj that lists every file (rots on every file add, a standing merge hazard).
+Why: synchronized root groups make the on-disk folders the source of truth, so adding a Swift file never touches the project file again.
+
+**Swift 5 language mode, not Swift 6 strict concurrency.**
+Rejected: SWIFT_VERSION = 6.
+Why: the codebase is a teaching text (§10.1) and strict concurrency's annotation ceremony would obscure the code it decorates; async/await and @MainActor isolation are still used throughout, so the migration later is additive, not corrective.
+
+**Models depend on a KeptAPI protocol; APIClient is its one production implementation.**
+Rejected: view models on the concrete APIClient (every model test would build HTTP responses), and a client with per-endpoint request/decode logic (the kickoff's call-site-per-endpoint ban).
+Why: transport-level behaviour (token attachment, error mapping, decoding) is proven once in APIClientTests against a stubbed transport; model tests script the protocol and stay about model decisions.
+
+**Session state is one enum (signedOut / signingIn / signedIn); a 401 on any authenticated call and a missing keychain token both funnel into the same rejected-session path.**
+Rejected: boolean flags, and treating sign-in's own 401 (a rejected Apple identity token) as a session death.
+Why: the two flavours of 401 mean different things - one ends a session, the other fails a sign-in attempt - and conflating them would tear down nothing on a failed sign-in yet show the wrong message.
+
+**Session token in the keychain as a generic password with kSecAttrAccessibleWhenUnlocked.**
+Rejected: UserDefaults (barred by the kickoff - a plaintext plist in unencrypted backups), and AfterFirstUnlock accessibility (my first choice, reversed by the reviewer pass: loosening a security posture for the wave-5 background outbox before it exists is speculative generality applied to security).
+Why: WhenUnlocked is the strictest class the app's current foreground-only reads allow; the save path re-asserts accessibility on update, so wave 5 can widen it with one constant and existing installs migrate on their next save.
+
+**Pending count comes from a probe query (status=pending, limit 200) and is typed exact / atLeast / unknown.**
+Rejected: counting pending rows in loaded pages only (a silent undercount, the error-masking pattern), adding a server count endpoint this wave (server changes are out of wave-3 scope; flagged in the gate report instead), and coupling the probe to the list fetch (my first shape, reversed by the reviewer pass: a failed badge count was taking down a successfully loaded list).
+Why: the server has no count endpoint; one maximum-size page gives an exact count up to 200, an honest "200+" beyond, and a stated "unavailable" when the probe fails - never a quiet zero.
+
+**purchasedAt stays a yyyy-mm-dd String in the model, formatted by one UTC-pinned formatter.**
+Rejected: decoding it as Date (invents a midnight and a timezone the receipt never had, and shifts a day west of Greenwich), and a custom CalendarDate type (weight without a second consumer; reconsider when the wave-4 confirm form edits dates).
+Why: the API's calendar date survives round trips untouched, and display formatting pins UTC on both parse and render.
+
+**Server address is UserDefaults-configurable in-app, defaulting to http://localhost:3000.**
+Rejected: a build-setting-only base URL (repointing a device build means rebuilding), and .env-style config (no such mechanism on iOS).
+Why: the simulator reaches a local server with zero setup, and a device on the same network is a settings-sheet edit away; ATS is relaxed for local networking only, revisited at distribution.
