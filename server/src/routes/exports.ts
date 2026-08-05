@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { SessionTokens } from "../auth/session.js";
 import type { Db } from "../db/client.js";
 import { exportJobs, users } from "../db/schema.js";
@@ -23,9 +23,37 @@ interface ExportRouteDependencies {
 }
 
 /**
+ * Export zips are artifacts, not records (spec §10B): the receipts and
+ * images are what is retained, a zip is regenerable from them, and the
+ * exports/ storage prefix carries a 30-day lifecycle expiry. After that
+ * window a completed job reports "expired" - still carrying its period, so
+ * the client re-runs it rather than downloading.
+ */
+const DOWNLOAD_LIFETIME_DAYS = 30;
+
+/**
+ * A job that has sat queued this long was lost - the process died between
+ * the insert and the claim. Reporting it as "stale" (computed, never
+ * stored) tells the client to stop polling and re-run; no sweeper process,
+ * no extra state.
+ */
+const STALE_QUEUED_AFTER_MINUTES = 5;
+
+/**
+ * What a client sees: the stored lifecycle states plus the two computed
+ * ones. "expired" and "stale" both mean "re-run this period", not "wait".
+ */
+type ReportedStatus =
+  | (typeof exportJobs.$inferSelect)["status"]
+  | "expired"
+  | "stale";
+
+/**
  * POST /api/export - start generating an export; returns the job to poll.
- * GET /api/export/:id - job status; carries a presigned download URL once
- * complete. Both scoped to the session user like everything else.
+ * GET /api/export - the caller's own jobs, newest first.
+ * GET /api/export/:id - job status; carries a presigned download URL while
+ * complete and unexpired. All scoped to the session user like everything
+ * else.
  */
 export function exportRoutes(deps: ExportRouteDependencies): Hono<AuthedEnv> {
   const router = new Hono<AuthedEnv>();
@@ -57,6 +85,20 @@ export function exportRoutes(deps: ExportRouteDependencies): Hono<AuthedEnv> {
     return c.json(jobResponse(job, null), 202);
   });
 
+  /** The caller's recent jobs, for the web export screen's history list. */
+  router.get("/", async (c) => {
+    const rows = await deps.db
+      .select()
+      .from(exportJobs)
+      .where(eq(exportJobs.userId, c.get("userId")))
+      .orderBy(desc(exportJobs.createdAt))
+      .limit(50);
+    const jobs = await Promise.all(
+      rows.map(async (job) => jobResponse(job, await downloadUrlFor(job))),
+    );
+    return c.json({ jobs });
+  });
+
   router.get("/:id", async (c) => {
     const id = uuidParamOrNotFound(c.req.param("id"));
     const rows = await deps.db
@@ -67,15 +109,46 @@ export function exportRoutes(deps: ExportRouteDependencies): Hono<AuthedEnv> {
     if (job === undefined) {
       throw notFoundError();
     }
-
-    const downloadUrl =
-      job.status === "complete" && job.objectKey !== null
-        ? await deps.storage.presignDownload(job.objectKey)
-        : null;
-    return c.json(jobResponse(job, downloadUrl));
+    return c.json(jobResponse(job, await downloadUrlFor(job)));
   });
 
   return router;
+
+  async function downloadUrlFor(
+    job: typeof exportJobs.$inferSelect,
+  ): Promise<string | null> {
+    if (reportedStatus(job, new Date()) !== "complete" || job.objectKey === null) {
+      return null;
+    }
+    return deps.storage.presignDownload(job.objectKey);
+  }
+}
+
+/**
+ * The status a client should act on. Stored states pass through except
+ * where time has changed their meaning: a completed job past the storage
+ * lifecycle is "expired", a queued job nothing ever claimed is "stale".
+ * Nothing is written back - the row stays the truthful history.
+ */
+function reportedStatus(
+  job: typeof exportJobs.$inferSelect,
+  now: Date,
+): ReportedStatus {
+  if (job.status === "complete" && job.completedAt !== null) {
+    const expiresAt =
+      job.completedAt.getTime() + DOWNLOAD_LIFETIME_DAYS * 24 * 60 * 60 * 1000;
+    if (now.getTime() > expiresAt) {
+      return "expired";
+    }
+  }
+  if (job.status === "queued") {
+    const staleAt =
+      job.createdAt.getTime() + STALE_QUEUED_AFTER_MINUTES * 60 * 1000;
+    if (now.getTime() > staleAt) {
+      return "stale";
+    }
+  }
+  return job.status;
 }
 
 async function resolvePeriod(
@@ -108,14 +181,18 @@ async function resolvePeriod(
   return { start: toIsoDate(period.start), end: toIsoDate(period.end) };
 }
 
-/** The API shape of a job; the storage key stays internal. */
+/**
+ * The API shape of a job; the storage key stays internal. The period is
+ * always present so an expired or stale job is re-runnable from the
+ * response alone.
+ */
 function jobResponse(
   job: typeof exportJobs.$inferSelect,
   downloadUrl: string | null,
 ) {
   return {
     id: job.id,
-    status: job.status,
+    status: reportedStatus(job, new Date()),
     periodStart: job.periodStart,
     periodEnd: job.periodEnd,
     error: job.error,

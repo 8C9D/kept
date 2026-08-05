@@ -7,6 +7,12 @@
  * The interface is defined here and tested against a fake; the Cloudflare
  * R2 implementation arrives when credentials exist (deployment work, after
  * the local waves).
+ *
+ * ⚠ Bucket requirement for the real adapter: a 30-day lifecycle expiry on
+ * the exports prefix - keys shaped `{userId}/exports/...` (spec §10B).
+ * Export zips are artifacts, not records - regenerable from the retained
+ * receipts and images - and the API already reports jobs past that window
+ * as "expired". Receipt images must NOT be under any lifecycle rule.
  */
 export interface ObjectStorage {
   /** A URL the client can PUT the image bytes to, valid briefly. */

@@ -15,6 +15,26 @@ export interface ExportPeriod {
   end: string;
 }
 
+/**
+ * Assembly happens in memory (see buildZip), so an export that cannot fit
+ * must be refused with a clear reason - an explicit failure the user can
+ * act on (export a shorter period), never an OOM crash. With the backlog
+ * and six-year retention, a full year can genuinely reach gigabytes.
+ *
+ * The byte budget is deliberately well under available memory: during
+ * assembly the images exist roughly twice (downloaded buffers plus the
+ * archive's output).
+ */
+export interface ExportLimits {
+  maxReceipts: number;
+  maxTotalBytes: number;
+}
+
+export const DEFAULT_EXPORT_LIMITS: ExportLimits = {
+  maxReceipts: 10_000,
+  maxTotalBytes: 256 * 1024 * 1024, // 256 MiB
+};
+
 interface GenerateExportDependencies {
   db: Db;
   storage: ObjectStorage;
@@ -32,6 +52,7 @@ interface GenerateExportDependencies {
 export async function generateExport(
   deps: GenerateExportDependencies,
   input: { jobId: string; userId: string; period: ExportPeriod },
+  limits: ExportLimits = DEFAULT_EXPORT_LIMITS,
 ): Promise<{ objectKey: string; receiptCount: number }> {
   const userRows = await deps.db
     .select({ displayName: users.displayName })
@@ -47,6 +68,11 @@ export async function generateExport(
     input.userId,
     input.period,
   );
+  if (receipts.length > limits.maxReceipts) {
+    throw new Error(
+      `Export covers ${receipts.length} receipts, above the ${limits.maxReceipts} limit; export a shorter period`,
+    );
+  }
 
   // Page-1 image per receipt, in one query. Every receipt is created with
   // an image, so a missing one is a data-integrity failure and the export
@@ -115,11 +141,20 @@ export async function generateExport(
   const xlsx = await writeXlsx(rows);
   const csv = writeCsv(rows);
 
+  // The budget is checked before each append, so the refusal lands before
+  // the memory is spent, not after.
+  let totalBytes = xlsx.byteLength + csv.length;
   const zip = await buildZip(async (archive) => {
     archive.append(Buffer.from(xlsx), { name: `receipts-${label}.xlsx` });
     archive.append(csv, { name: `receipts-${label}.csv` });
     for (const { row, imageObjectKey } of bundle) {
       const bytes = await deps.storage.download(imageObjectKey);
+      totalBytes += bytes.byteLength;
+      if (totalBytes > limits.maxTotalBytes) {
+        throw new Error(
+          `Export exceeds the ${Math.floor(limits.maxTotalBytes / (1024 * 1024))} MiB size limit; export a shorter period`,
+        );
+      }
       archive.append(Buffer.from(bytes), { name: row.imageFilename });
     }
   });

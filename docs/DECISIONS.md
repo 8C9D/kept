@@ -103,3 +103,32 @@ Why: legibility wins at this scale; the seam to change it is one function (`buil
 **Dependencies: archiver 8 (class API) and exceljs at runtime; adm-zip as a test-only dependency for zip inspection.**
 Rejected: hand-rolling zip reading in tests.
 Why: the suite must open the artifact it produced; adm-zip stays out of the runtime dependency tree.
+
+## 2026-08-05 - Wave-2 gate review (the owner)
+
+**`whose` is documented as existing for accountant-side merging.**
+Rejected: leaving the column's purpose unstated (it read as redundant and would eventually be "cleaned up").
+Why: constancy within a file is the design - it is what makes a combined workbook of two people's exports unambiguous.
+
+**Export zips are artifacts, not records; the exports storage prefix gets a 30-day lifecycle expiry.**
+Rejected: keeping zips forever as records.
+Why: receipts and images are the retained records and a zip is regenerable from them; the job row keeps its period, and past the window a job reports `expired` - re-runnable, not downloadable.
+
+**`GET /api/export` (own jobs, newest first) added now.**
+Rejected: deferring the job list to wave 7.
+Why: cheapest while the export code is loaded; the web export screen needs a history list regardless.
+
+**In-memory zip assembly is guarded by row-count and byte budgets (10 000 receipts / 256 MiB defaults) that fail the job with an actionable reason.**
+Rejected: building streaming assembly.
+Why: with the backlog and six-year retention a year's zip can reach gigabytes; an explicit "export a shorter period" refusal is a far better outcome than an OOM crash, and streaming is real complexity for a case a shorter period solves.
+
+**A job stranded in `queued` past five minutes reports a computed `stale` status.**
+Rejected: a background sweeper process and any new state.
+Why: the only problem was a client polling forever; a computed status solves exactly that, and nothing is written back - the row stays the truthful history.
+
+## 2026-08-05 - Cross-wave observation
+
+**Runtime predictions have been consistently pessimistic; the real friction has landed at dependency seams every wave.**
+Evidence: wave 1 predicted drizzle error-wrapping and zod message failures - all passed; the one failure was a jose API misuse in my own test.
+Wave 2 predicted CSV assertion and archiver behavioral failures - all 105 tests passed first run; the two stumbles were compile-time dependency changes (archiver 8 dropping its factory API, exceljs typings predating Node's generic Buffer).
+How to apply: spend prediction effort on dependency upgrade notes and API surfaces at the seams (read the changelog of a newly added or majored dependency before writing against it), and trust the tested-runtime paths more.

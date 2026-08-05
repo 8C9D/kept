@@ -1,6 +1,9 @@
 import AdmZip from "adm-zip";
 import ExcelJS from "exceljs";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { exportJobs } from "../../src/db/schema.js";
+import { generateExport } from "../../src/export/generateExport.js";
 import {
   createTestHarness,
   receiptBody,
@@ -259,5 +262,115 @@ describe("the export pipeline", () => {
       periodEnd: "2026-01-01",
     });
     expect(response.status).toBe(400);
+  });
+
+  it("refuses an export over the size budget with an actionable reason", async () => {
+    await createReceiptWithImage(token, userId, "d1".repeat(32), {
+      status: "confirmed",
+    });
+    const period = { start: "2026-01-01", end: "2026-12-31" };
+    await expect(
+      generateExport(
+        { db: harness.db, storage: harness.storage },
+        { jobId: "11111111-2222-3333-4444-555555555555", userId, period },
+        { maxReceipts: 10_000, maxTotalBytes: 10 },
+      ),
+    ).rejects.toThrow(/size limit.*shorter period/);
+  });
+
+  it("refuses an export over the receipt-count limit", async () => {
+    await createReceiptWithImage(token, userId, "d2".repeat(32), {
+      status: "confirmed",
+    });
+    const period = { start: "2026-01-01", end: "2026-12-31" };
+    await expect(
+      generateExport(
+        { db: harness.db, storage: harness.storage },
+        { jobId: "11111111-2222-3333-4444-555555555555", userId, period },
+        { maxReceipts: 0, maxTotalBytes: 1024 },
+      ),
+    ).rejects.toThrow(/above the 0 limit/);
+  });
+
+  it("reports a completed job past the storage lifecycle as expired and re-runnable", async () => {
+    await createReceiptWithImage(token, userId, "d3".repeat(32), {
+      status: "confirmed",
+    });
+    const started = await harness.request(token, "POST", "/api/export", {
+      periodStart: "2026-01-01",
+      periodEnd: "2026-12-31",
+    });
+    const { id: jobId } = (await started.json()) as JobResponse;
+    const done = await pollUntilSettled(token, jobId);
+    expect(done.status).toBe("complete");
+
+    // Age the job past the 30-day download lifetime.
+    const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+    await harness.db
+      .update(exportJobs)
+      .set({ completedAt: thirtyOneDaysAgo })
+      .where(eq(exportJobs.id, jobId));
+
+    const response = await harness.request(token, "GET", `/api/export/${jobId}`);
+    const job = (await response.json()) as JobResponse;
+    expect(job.status).toBe("expired");
+    expect(job.downloadUrl).toBeNull();
+    // The period survives, so the client can re-run it directly.
+    expect(job.periodStart).toBe("2026-01-01");
+    expect(job.periodEnd).toBe("2026-12-31");
+  });
+
+  it("reports a job stranded in queued as stale so clients stop polling", async () => {
+    // A row inserted directly, never picked up - the crashed-before-claim
+    // case. Its createdAt is aged past the stale threshold.
+    const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000);
+    const inserted = await harness.db
+      .insert(exportJobs)
+      .values({
+        userId,
+        periodStart: "2026-01-01",
+        periodEnd: "2026-12-31",
+        createdAt: sixMinutesAgo,
+      })
+      .returning({ id: exportJobs.id });
+    const jobId = inserted[0]?.id as string;
+
+    const response = await harness.request(token, "GET", `/api/export/${jobId}`);
+    const job = (await response.json()) as JobResponse;
+    expect(job.status).toBe("stale");
+    expect(job.downloadUrl).toBeNull();
+  });
+
+  it("lists the caller's own jobs, newest first, and nobody else's", async () => {
+    for (const period of ["2024", "2025"]) {
+      const response = await harness.request(token, "POST", "/api/export", {
+        periodStart: `${period}-01-01`,
+        periodEnd: `${period}-12-31`,
+      });
+      const { id } = (await response.json()) as JobResponse;
+      await pollUntilSettled(token, id);
+    }
+    const other = await harness.signIn("export-lister");
+    const otherStarted = await harness.request(other.token, "POST", "/api/export", {
+      periodStart: "2026-01-01",
+      periodEnd: "2026-12-31",
+    });
+    await pollUntilSettled(
+      other.token,
+      ((await otherStarted.json()) as JobResponse).id,
+    );
+
+    const response = await harness.request(token, "GET", "/api/export");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { jobs: JobResponse[] };
+    expect(body.jobs).toHaveLength(2);
+    expect(body.jobs.map((job) => job.periodStart)).toEqual([
+      "2025-01-01",
+      "2024-01-01",
+    ]);
+    for (const job of body.jobs) {
+      expect(job.status).toBe("complete");
+      expect(job.downloadUrl).not.toBeNull();
+    }
   });
 });
