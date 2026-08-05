@@ -1,6 +1,6 @@
 {
-  "id": "167a15c2-705e-45ea-93e5-0ddfc08e646f",
-  "prevId": "00000000-0000-0000-0000-000000000000",
+  "id": "1a77f25d-d61b-4387-8c15-b9b868389ca5",
+  "prevId": "167a15c2-705e-45ea-93e5-0ddfc08e646f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -58,47 +58,47 @@
         "receipt_images_receipt_id_receipts_id_fk": {
           "name": "receipt_images_receipt_id_receipts_id_fk",
           "tableFrom": "receipt_images",
-          "tableTo": "receipts",
           "columnsFrom": [
             "receipt_id"
           ],
+          "tableTo": "receipts",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "receipt_images_user_id_users_id_fk": {
           "name": "receipt_images_user_id_users_id_fk",
           "tableFrom": "receipt_images",
-          "tableTo": "users",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "receipt_images_receipt_id_page_uq": {
           "name": "receipt_images_receipt_id_page_uq",
-          "nullsNotDistinct": false,
           "columns": [
             "receipt_id",
             "page"
-          ]
+          ],
+          "nullsNotDistinct": false
         },
         "receipt_images_user_id_sha256_uq": {
           "name": "receipt_images_user_id_sha256_uq",
-          "nullsNotDistinct": false,
           "columns": [
             "user_id",
             "sha256"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -254,9 +254,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "receipts_user_id_is_business_idx": {
           "name": "receipts_user_id_is_business_idx",
@@ -275,9 +275,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "receipts_user_id_status_idx": {
           "name": "receipts_user_id_status_idx",
@@ -296,24 +296,24 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "receipts_user_id_users_id_fk": {
           "name": "receipts_user_id_users_id_fk",
           "tableFrom": "receipts",
-          "tableTo": "users",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -379,10 +379,10 @@
       "uniqueConstraints": {
         "users_apple_sub_unique": {
           "name": "users_apple_sub_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "apple_sub"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -401,10 +401,10 @@
     }
   },
   "schemas": {},
+  "views": {},
   "sequences": {},
   "roles": {},
   "policies": {},
-  "views": {},
   "_meta": {
     "columns": {},
     "schemas": {},

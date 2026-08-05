@@ -34,7 +34,9 @@ export const receipts = pgTable(
       .references(() => users.id),
     purchasedAt: date("purchased_at").notNull(),
     capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
-    vendor: text("vendor").notNull(),
+    // Nullable: an illegible vendor is a real outcome, and a forced
+    // placeholder corrupts the field (spec §5).
+    vendor: text("vendor"),
     vendorTaxNumber: text("vendor_tax_number"),
     subtotalCents: integer("subtotal_cents"),
     hstCents: integer("hst_cents"),
@@ -46,9 +48,14 @@ export const receipts = pgTable(
     // No default at any layer: the client must send an explicit choice.
     isBusiness: boolean("is_business").notNull(),
     notes: text("notes"),
-    status: receiptStatus("status").notNull(),
+    // Soft delete: non-null rows are excluded from every list, count, and
+    // export. CRA retention makes hard deletes off the table (spec §10B).
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    // Defaulting to 'pending' is fail-closed: pending rows never export.
+    status: receiptStatus("status").notNull().default("pending"),
     ocrRawText: text("ocr_raw_text"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Maintained by a Postgres trigger (drizzle/0001), not handler code.
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -65,6 +72,11 @@ export const receiptImages = pgTable(
     receiptId: uuid("receipt_id")
       .notNull()
       .references(() => receipts.id),
+    // Denormalized so the duplicate-image constraint can be user-scoped;
+    // a constraint that needs a join is not a constraint (spec §5).
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
     page: smallint("page").notNull(),
     objectKey: text("object_key").notNull(),
     sha256: text("sha256").notNull(),
@@ -72,6 +84,6 @@ export const receiptImages = pgTable(
   },
   (t) => [
     unique("receipt_images_receipt_id_page_uq").on(t.receiptId, t.page),
-    unique("receipt_images_receipt_id_sha256_uq").on(t.receiptId, t.sha256),
+    unique("receipt_images_user_id_sha256_uq").on(t.userId, t.sha256),
   ],
 );
