@@ -104,7 +104,9 @@ Recorded so they are not silently revisited, and so the reasoning stays auditabl
 ```
 kept/
   CLAUDE.md                     ← agent instructions, see §10
-  Kept-Build-Spec.md            ← this file
+  docs/
+    Kept-Build-Spec.md          ← this file
+    Agentic-SDLC-Framework.md   ← reference
   web/                          ← Vite + React SPA (review, search, export)
     src/
     tests/
@@ -148,7 +150,7 @@ Deliberately small. No household, organization, or team entity — that was remo
 | `user_id` | uuid FK → users | **Every query scopes on this. No exceptions.** |
 | `purchased_at` | date | The date on the receipt, not the capture date |
 | `captured_at` | timestamptz | |
-| `vendor` | text | |
+| `vendor` | text **nullable** | An illegible vendor is a real outcome; forcing a placeholder string corrupts the field for everyone reading it later. |
 | `vendor_tax_number` | text nullable | GST/HST registration number |
 | `subtotal_cents` | integer nullable | |
 | `hst_cents` | integer nullable | **Own field. Never derived from total.** |
@@ -159,9 +161,10 @@ Deliberately small. No household, organization, or team entity — that was remo
 | `payment_method` | text nullable | |
 | `is_business` | boolean | **Required at capture. No default.** See §5.2 |
 | `notes` | text nullable | |
-| `status` | enum `pending` \| `confirmed` | **See §5.3.** A receipt is `pending` until a human has confirmed its numbers. **Exports include `confirmed` only.** |
+| `deleted_at` | timestamptz nullable | **Soft delete.** Non-null rows are excluded from every list, count, and export. |
+| `status` | enum `pending` \| `confirmed`, **default `pending`** | **See §5.3.** A receipt is `pending` until a human has confirmed its numbers. **Exports include `confirmed` only.** |
 | `ocr_raw_text` | text nullable | Kept for debugging the parser and for future re-parsing |
-| `created_at` / `updated_at` | timestamptz | |
+| `created_at` / `updated_at` | timestamptz, default `now()` | ⚠ `updated_at` is maintained by a **Postgres trigger**, not by handler code. A field whose freshness depends on every future handler remembering it is a field that silently rots. |
 
 **Money is stored as integer cents.** Never floats. The HST figure is a tax claim.
 
@@ -175,12 +178,17 @@ Separate table from day one, even though v1 captures a single page.
 |---|---|---|
 | `id` | uuid PK | |
 | `receipt_id` | uuid FK → receipts | |
+| `user_id` | uuid FK → users | **Denormalized deliberately** — see the constraint note below. |
 | `page` | smallint | 1-based ordering |
 | `object_key` | text | R2 key |
 | `sha256` | text | Integrity check and cheap duplicate detection |
 | `created_at` | timestamptz | |
 
-**Unique `(receipt_id, page)` and unique `(receipt_id, sha256)`.** A `user_id`-scoped unique on `sha256` (via join) makes re-capturing the same photo a caught error rather than a duplicate row — which matters most during the backlog pass, where the same receipt can easily be scanned twice.
+**Unique `(receipt_id, page)` and unique `(user_id, sha256)`.**
+
+⚠ **Corrected Aug 5 — the earlier version of this note overclaimed.** A unique on `(receipt_id, sha256)` only prevents the same image appearing twice *on one receipt*, which is not the failure anyone has. The constraint has to be scoped to the **user**, which is why `user_id` is denormalized onto this table rather than reached through a join — a constraint that needs a join is not a constraint.
+
+⚠ **And be honest about what it catches.** Byte-identical duplicates are real on the **file-upload path**: re-dragging the same PDF out of an email backlog produces the same bytes, and the constraint stops it cleanly. **It does not catch a re-scanned piece of paper** — two photographs of one receipt differ in every pixel, so no hash will ever match them. **Near-duplicate detection** (same date, same vendor, same total → warn at confirm time) is the answer to that, and it is **deferred to v2** (§11). Do not let the hash constraint stand in for it.
 
 **Why a table rather than a column.** Multi-page receipts are deferred (§11), but deferring them with an `image_key` column means a migration later; deferring them with this table costs one join now and nothing later. Cheap insurance against an unresolved question (§12).
 
@@ -430,6 +438,7 @@ Once capture, storage, and the outbox work end to end, run a deliberate bug pass
 - **Automated email ingestion.** A **dedicated forwarding address**: forward the receipt email, a parser pulls the attachment or renders the body. Not mailbox OAuth polling — forwarding avoids inbox-read scopes, and works identically across whatever mail providers the family uses. v1's answer is manual file upload of a PDF or image, which reuses the confirm screen unchanged.
 - **Dashboard** — per-user, not a family view. Spend and totals over time.
 - **Category taxonomy** — CRA T2125 lines or T2 GIFI codes, depending on the sole-proprietor-vs-incorporated answer.
+- **Near-duplicate detection** — warn when a new receipt matches an existing one on date, vendor, and total. This is the real answer to a re-scanned paper receipt, which hashing cannot catch (§5).
 - **Multi-page receipts** — VisionKit supports it; v1 takes page one.
 - **Second user's account** — the model already supports it; nothing to build.
 
@@ -459,6 +468,7 @@ Once capture, storage, and the outbox work end to end, run a deliberate bug pass
 
 ## Update log
 
+- **August 5, 2026 (wave-0 gate review)** — Five schema corrections from Claude Code's wave-0 report, all accepted. **(1) `deleted_at` added** — §6 specified a soft delete and §10B made it a retention requirement, but the schema had no column for it; wave 1 could not have implemented its own API surface. A real spec bug. **(2) The duplicate-photo constraint was rewritten and the claim around it corrected** — unique `(receipt_id, sha256)` only prevents the same image twice on one receipt, which is nobody's failure mode; it is now unique `(user_id, sha256)` with `user_id` denormalized onto `receipt_images`, because a constraint that needs a join is not a constraint. **The stronger correction is honesty about scope:** hashing catches re-uploaded identical *files* (real on the email-backlog path) and can never catch a re-scanned piece of *paper*, since two photographs of one receipt share no pixels. Near-duplicate detection on date+vendor+total is now explicitly v2, so the hash constraint stops standing in for it. **(3) `status` gains `DEFAULT 'pending'`** — unlike `is_business`, this is a system state rather than a hidden human choice, and defaulting it is fail-closed. **(4) `updated_at` moves to a Postgres trigger**, not handler code. **(5) `vendor` becomes nullable** — an illegible vendor is a real outcome and a forced placeholder corrupts the field. Also aligned the repo layout with the kickoff's `docs/` directory.
 - **August 5, 2026 (backlog pass)** — **The backlog was confirmed as real for both users and pulled into v1** (§6A): a tool that cannot absorb the existing pile starts behind, and the pile is what motivated the project. Three changes follow — **batch scanning** on iOS via VisionKit's multi-page session, **multi-file upload on the web client** (a deliberate narrowing of the earlier "web does not capture" rule: no camera on web, but a folder of emailed PDFs belongs on a laptop, not forwarded to a phone one at a time), and a **confirm queue** on both clients. **New `status` field (`pending` | `confirmed`)** reconciles a fast backlog pass with constraint 2 without weakening it: unconfirmed receipts are stored and visible but **excluded from every export**, so the confirm step is deferred rather than skipped. **Images moved to their own `receipt_images` table** — one join now, and multi-page becomes a feature addition instead of a migration, which is what makes the unresolved multi-page question genuinely non-blocking. **HST filing recorded as assumed annual**, with the note that quarterly would cost one dropdown since exports already take a date range. Flagged that wave 7 may deserve promotion ahead of iOS distribution, since the backlog is a today problem.
 - **August 5, 2026 (lifecycle pass)** — Added **§10A** (the UI is information architecture only; visual design is an open gap that must close **before wave 4**, since the confirm screen is the product and designing it after building it means redesigning it), **§10B** (security review in two passes — after wave 1 and before wave 6 — a bug review after wave 5, minimal CI, a *tested* backup restore, and an explicit list of deferred DevOps ceremony), and **§10.3** (the thin agentic-SDLC slice: builder+reviewer only, duplication/error-masking rubric, correction catalog, safety substrate before unattended runs — and explicitly *not* the nine-stage pipeline). Named retention as the one non-deferrable item: six-year CRA requirement, so soft deletes, real backups, and a verified restore.
 - **August 5, 2026 (web client + name)** — **Named Kept.** **Added a web client** as a first-class second view: review, search, bulk correction, and — moved here from iOS — **the year-end export**, because a multi-gigabyte zip destined for an accountant does not belong on a phone. That drops the iOS app from six screens to five. Stack is a **Vite + React static SPA** against the same Hono API; Next.js was re-examined in light of the new UI and still rejected, as were Electron and a native macOS target. **New wave 7** carries the web client, with the note that it must land before the first year-end since export now lives there. **Flagged as real setup work:** Sign in with Apple on the web needs its own Services ID, a verified domain, and a return URL.
