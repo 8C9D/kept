@@ -33,8 +33,12 @@ enum Fixtures {
         )
     }
 
-    static func page(_ receipts: [Receipt], nextCursor: String? = nil) -> ReceiptListPage {
-        ReceiptListPage(receipts: receipts, nextCursor: nextCursor)
+    static func page(
+        _ receipts: [Receipt],
+        nextCursor: String? = nil,
+        pendingCount: Int = 0
+    ) -> ReceiptListPage {
+        ReceiptListPage(receipts: receipts, nextCursor: nextCursor, pendingCount: pendingCount)
     }
 
     static func signInResponse(token: String = "session-jwt") -> SignInResponse {

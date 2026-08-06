@@ -188,9 +188,26 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
         ? encodeListCursor(lastRow)
         : null;
 
+    // The §5.2a pending badge on both clients reads this from the list
+    // response they already fetch (wave-3 gate review; the server had no
+    // count and the iOS client was probing 200 rows to display a number).
+    // It is the user's total pending count, deliberately independent of
+    // this request's filters and paging: the badge means "receipts
+    // awaiting confirmation", not "pending rows on this page".
+    const pendingRows = await deps.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(receipts)
+      .where(and(visibleTo(userId), eq(receipts.status, "pending")));
+    const pendingCount = pendingRows[0]?.count;
+    if (pendingCount === undefined) {
+      // count(*) always yields one row; its absence means something is
+      // genuinely broken.
+      throw new Error("Pending-count query returned no row");
+    }
+
     // The list omits ocr_raw_text: it can run to 100 KB per receipt and
     // only the detail view has a use for it.
-    return c.json({ receipts: page.map(receiptResponse), nextCursor });
+    return c.json({ receipts: page.map(receiptResponse), nextCursor, pendingCount });
   });
 
   /** GET /api/receipts/:id - one receipt plus presigned image downloads. */

@@ -109,3 +109,32 @@ The script - in order, each step states what passing looks like:
 6. **Cold-launch persistence.** Swipe the app away, relaunch. **Pass:** straight to Home, no sign-in screen.
 7. **Revocation.** In psql: `UPDATE users SET token_version = token_version + 1 WHERE apple_sub NOT LIKE 'synthetic-%';` then pull to refresh on the phone. **Pass:** the sign-in screen, with "Your session has expired. Sign in again." Signing in again works immediately.
 8. **Sign out.** (After signing back in.) Ellipsis menu → Sign out. **Pass:** sign-in screen, no message; relaunching the app stays signed out.
+
+## 7 · Device verification - PASSED (the owner, 2026-08-05)
+
+All eight steps of §6 passed on the owner's iPhone with no deviations: real Sign in with Apple end to end (first-authorization name captured and stored), the reassigned seed data with the correct pending badge and USD rendering, 65 receipts ordering correctly with no duplicates, detail fields and stated absences, session persistence across cold launch, token_version revocation landing on the expiry message, and clean sign-out.
+One observation rather than a deviation: the paging spinner never appeared, because local wifi returns the next page faster than a human can scroll to the trigger row - paging correctness held (full list reachable, no duplicates, clean list after a mid-scroll refresh).
+**The wave-3 gate is closed.**
+
+Operational notes from the assisted run, for the record:
+
+- The build-and-install path ran entirely from the CLI: `devicectl` pairing (first attempt timed out awaiting the phone-side prompt; second succeeded), Developer Mode enablement on the phone, then `xcodebuild -allowProvisioningUpdates`, which auto-issued "iOS Team Provisioning Profile: com.arthurzhang.kept" carrying the Sign in with Apple entitlement - the App ID was registered automatically, and the developer portal was never opened. §2's predicted failure points (pairing/Developer Mode friction) were the ones that actually fired; ATS and the Local Network prompt were not.
+- Mid-run, the API server on port 3000 turned out to be down at step 4 and had to be restarted - which surfaced the wave's most instructive defect, found by the owner: **`npm run dev` never loaded `.env.local`**. Every prior wave's suite (110 tests) was green while the real entry point was unrunnable from a clean checkout, because tests inject their configuration and never execute `src/index.ts`. This produced the new standing gate requirement (framework guardrail 7, CLAUDE.md): every gate starts the real server the real way and lands one real request.
+
+## 8 · Gate-review changes accepted (the owner)
+
+Five changes, applied immediately after the gate in the follow-up commit; decisions and rejected alternatives in `DECISIONS.md`:
+
+1. `GET /api/receipts` now returns `pendingCount`; the iOS 200-row probe is gone.
+2. MinIO joins docker-compose as local object storage, behind the real S3-compatible adapter - the presigned path wave 4 depends on is now exercisable locally.
+3. The seed-reassignment SQL became `npm run db:claim`.
+4. `ReceiptListModel` no longer holds a raw API reference: every request goes through `GuardedReceiptLoader`, whose result type carries `.superseded` - the generation check moved from convention to construction, per this report's own weakest-code call.
+5. `npm run dev` loads `.env.local` (creating it if absent) via `node --env-file`.
+
+Also confirmed: §7.1's "recent receipts" means ordering, not a cutoff - recorded in the spec.
+
+Applying change 2 forced a fix the integration tests earned on their first run: the SDK's presigned PUT URLs sign only the `host` header by default, so the upload-url route's content-type restriction was decorative - a client could declare `image/jpeg` and store anything. The adapter now signs the content-type header, and the mismatched-PUT test that exposed this asserts the 403.
+
+First execution of guardrail 7, against this change set: with no shell-sourced environment, `npm run dev` ran the production entrypoint - `predev` created/kept `.env.local`, `node --env-file` loaded it, object storage resolved to the docker-compose MinIO default and ensured its bucket, "Kept API listening on port 3000" - and a real `GET /api/me` answered `{"error":{"code":"unauthorized",...}}`, the correct envelope for a sessionless request. Suites after all changes: server 119 tests green (`tsc --noEmit` clean), iOS 51 tests green.
+
+One operational note for future device runs: the integration tests reset the same docker-compose Postgres the dev server uses, so running `npm test` wipes any real signed-in user and claimed data - re-run `db:seed`, sign in, and `db:claim` afterwards. Known tradeoff of the shared local database, recorded rather than changed.

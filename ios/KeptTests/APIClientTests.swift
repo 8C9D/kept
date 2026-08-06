@@ -171,6 +171,7 @@ final class APIClientTests: XCTestCase {
 
         XCTAssertEqual(page.receipts.count, 2)
         XCTAssertEqual(page.nextCursor, "opaque-cursor-value")
+        XCTAssertEqual(page.pendingCount, 7)
 
         let first = try XCTUnwrap(page.receipts.first)
         XCTAssertEqual(first.id, UUID(uuidString: "0a1b2c3d-0000-4000-8000-000000000001"))
@@ -306,11 +307,12 @@ final class APIClientTests: XCTestCase {
           "updatedAt": "2026-08-05T10:00:01.000Z"
         }
       ],
-      "nextCursor": "opaque-cursor-value"
+      "nextCursor": "opaque-cursor-value",
+      "pendingCount": 7
     }
     """
 
-    private let emptyPageJSON = #"{"receipts": [], "nextCursor": null}"#
+    private let emptyPageJSON = #"{"receipts": [], "nextCursor": null, "pendingCount": 0}"#
 
     private let detailJSON = """
     {

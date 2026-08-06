@@ -283,6 +283,54 @@ describe("GET /api/receipts filters", () => {
   });
 });
 
+describe("GET /api/receipts pendingCount", () => {
+  it("counts the user's pending receipts regardless of paging and filters", async () => {
+    // Two pending (the column default), one confirmed.
+    for (const overrides of [
+      { sha: "a1".repeat(32) },
+      { sha: "a2".repeat(32), purchasedAt: "2026-03-16" },
+      { sha: "a3".repeat(32), status: "confirmed" },
+    ]) {
+      const response = await harness.request(token, "POST", "/api/receipts",
+        bodyWithImage(overrides),
+      );
+      expect(response.status).toBe(201);
+    }
+
+    // One row on the page, but the badge count is the user-wide truth.
+    const paged = await harness.request(token, "GET", "/api/receipts?limit=1");
+    expect(((await paged.json()) as { pendingCount: number }).pendingCount).toBe(2);
+
+    // A confirmed-only filter must not bend the count either.
+    const filtered = await harness.request(
+      token,
+      "GET",
+      "/api/receipts?status=confirmed",
+    );
+    expect(((await filtered.json()) as { pendingCount: number }).pendingCount).toBe(2);
+  });
+
+  it("excludes soft-deleted receipts and other users' receipts", async () => {
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ sha: "b1".repeat(32) }),
+    );
+    const { id } = (await created.json()) as { id: string };
+
+    // Another user's pending receipt must never leak into my count.
+    const other = await harness.signIn("pending-count-other-user");
+    await harness.request(other.token, "POST", "/api/receipts",
+      receiptBody({ image: imageFor(other.userId, "b2".repeat(32)) }),
+    );
+
+    const before = await harness.request(token, "GET", "/api/receipts");
+    expect(((await before.json()) as { pendingCount: number }).pendingCount).toBe(1);
+
+    await harness.request(token, "DELETE", `/api/receipts/${id}`);
+    const after = await harness.request(token, "GET", "/api/receipts");
+    expect(((await after.json()) as { pendingCount: number }).pendingCount).toBe(0);
+  });
+});
+
 describe("PATCH /api/receipts/:id", () => {
   it("updates only the provided fields and bumps updated_at", async () => {
     const created = await harness.request(token, "POST", "/api/receipts",

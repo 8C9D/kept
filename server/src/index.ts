@@ -3,7 +3,12 @@ import { createApp } from "./app.js";
 import { createAppleIdentityVerifier } from "./auth/appleVerifier.js";
 import { createSessionTokens } from "./auth/session.js";
 import { createDb } from "./db/client.js";
-import { unconfiguredObjectStorage } from "./storage/objectStorage.js";
+import {
+  LOCAL_DEV_STORAGE_CONFIG,
+  createBucketIfMissing,
+  createS3ObjectStorage,
+  resolveStorageConfig,
+} from "./storage/s3ObjectStorage.js";
 
 /**
  * The production entrypoint. Configuration is read here and nowhere else,
@@ -34,6 +39,29 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error(`PORT must be a port number, got: ${process.env.PORT}`);
 }
 
+// Object storage: STORAGE_* when set (R2 in deployment, or MinIO under a
+// custom endpoint), otherwise the docker-compose MinIO default - in which
+// case the bucket is auto-created, so a clean checkout serves images with
+// no ceremony. (Wave-3 gate review: wave 4's capture path cannot run
+// against a server that cannot store.)
+const configuredStorage = resolveStorageConfig(process.env);
+const storageConfig = configuredStorage ?? LOCAL_DEV_STORAGE_CONFIG;
+if (configuredStorage === null) {
+  console.log(
+    `Object storage: local MinIO default at ${storageConfig.endpoint} (set STORAGE_* to point elsewhere)`,
+  );
+  try {
+    await createBucketIfMissing(storageConfig);
+  } catch (error) {
+    // Same philosophy as the env check above: stop at startup with the
+    // fix named, not at the first request that needed an image.
+    throw new Error(
+      `MinIO is not reachable at ${storageConfig.endpoint} - run "docker compose up -d" in server/`,
+      { cause: error },
+    );
+  }
+}
+
 const { db } = createDb(databaseUrl);
 const app = createApp({
   db,
@@ -41,7 +69,7 @@ const app = createApp({
   // constructing their own app; this file offers no way to do so.
   appleVerifier: createAppleIdentityVerifier(appleClientId),
   sessionTokens: createSessionTokens(sessionSecret),
-  storage: unconfiguredObjectStorage(), // R2 adapter arrives with wave 2
+  storage: createS3ObjectStorage(storageConfig),
 });
 
 serve({ fetch: app.fetch, port }, (info) => {

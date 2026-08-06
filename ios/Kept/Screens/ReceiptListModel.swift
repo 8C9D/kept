@@ -6,11 +6,10 @@ import Foundation
 ///
 /// Concurrency: everything runs on the main actor, but each `await` is a
 /// suspension point where another load can start - a pull-to-refresh while
-/// a page fetch is in flight, for instance. `generation` names the load
-/// that currently owns the screen: it is incremented when a refresh
-/// starts, captured before every await, and re-checked after, so a
-/// superseded fetch discards its result instead of splicing a stale page
-/// into a fresh list. (Wave-3 reviewer finding.)
+/// a page fetch is in flight, for instance. The model therefore talks to
+/// the API only through GuardedReceiptLoader, which stamps every request
+/// with a load generation and reports a response overtaken by a newer
+/// load as `.superseded` - an outcome the switch below cannot ignore.
 @MainActor
 final class ReceiptListModel: ObservableObject {
     /// The list as a whole. One enum, so "loading and failed at once" is
@@ -29,14 +28,11 @@ final class ReceiptListModel: ObservableObject {
         case failed(String)
     }
 
-    /// The server has no count endpoint, so the count comes from fetching
-    /// the pending receipts themselves, up to one maximum-size page.
-    /// Beyond that the truth is "at least N", and when the probe (or the
-    /// list) fails the truth is "unknown" - stated as such, never silently
-    /// rendered as zero.
+    /// The pending badge's number, from the list response's user-wide
+    /// count. `unknown` is the stated truth when the list itself failed -
+    /// never a quiet zero.
     enum PendingCount: Equatable {
         case exact(Int)
-        case atLeast(Int)
         case unknown
     }
 
@@ -46,66 +42,37 @@ final class ReceiptListModel: ObservableObject {
     @Published private(set) var nextPage: NextPage = .idle
 
     private var nextCursor: String?
-    private var generation = 0
-    private let api: any KeptAPI
-
-    /// The server's maximum list page size; requesting it makes the pending
-    /// count exact for anyone with up to 200 unconfirmed receipts.
-    static let pendingProbeLimit = 200
+    private let loader: GuardedReceiptLoader
 
     init(api: any KeptAPI) {
-        self.api = api
+        loader = GuardedReceiptLoader(api: api)
     }
 
-    /// First page plus the pending probe, concurrently. Also the refresh
-    /// path: pull-to-refresh re-runs it, replacing the list.
+    /// First page; also the refresh path - pull-to-refresh re-runs it,
+    /// replacing the list. On failure the stale rows would render as if
+    /// they were current, so they are dropped in favour of the failure
+    /// and Retry.
     func loadFirstPage() async {
-        generation += 1
-        let current = generation
+        loader.beginNewList()
         if receipts.isEmpty {
             phase = .loading
         }
 
-        async let pendingProbe = api.receiptsPage(
-            cursor: nil,
-            status: .pending,
-            limit: Self.pendingProbeLimit
-        )
-
-        // The list is the screen, so it succeeds or fails on its own. On a
-        // failed refresh the stale rows would render as if they were
-        // current, so they are dropped in favour of the failure and Retry.
-        do {
-            let page = try await api.receiptsPage(cursor: nil, status: nil, limit: nil)
-            guard current == generation else { return }
-            receipts = page.receipts
-            nextCursor = page.nextCursor
-            nextPage = .idle
-            phase = receipts.isEmpty ? .empty : .loaded
-        } catch {
-            guard current == generation else { return }
+        switch await loader.firstPage() {
+        case .superseded:
+            return
+        case .failure(let error):
             receipts = []
             nextCursor = nil
             nextPage = .idle
             pendingCount = .unknown
             phase = .failed(error.localizedDescription)
-            // Returning here abandons the probe; async let cancels it on
-            // the way out.
-            return
-        }
-
-        // The badge is decoration on a working list; its failure must not
-        // take a loaded screen down. It degrades to a stated unknown
-        // instead. (Wave-3 reviewer finding.)
-        do {
-            let pending = try await pendingProbe
-            guard current == generation else { return }
-            pendingCount = pending.nextCursor == nil
-                ? .exact(pending.receipts.count)
-                : .atLeast(pending.receipts.count)
-        } catch {
-            guard current == generation else { return }
-            pendingCount = .unknown
+        case .success(let page):
+            receipts = page.receipts
+            nextCursor = page.nextCursor
+            nextPage = .idle
+            pendingCount = .exact(page.pendingCount)
+            phase = receipts.isEmpty ? .empty : .loaded
         }
     }
 
@@ -122,19 +89,21 @@ final class ReceiptListModel: ObservableObject {
 
     private func loadMore() async {
         guard let cursor = nextCursor, nextPage != .loading else { return }
-        let current = generation
         nextPage = .loading
-        do {
-            let page = try await api.receiptsPage(cursor: cursor, status: nil, limit: nil)
-            // A refresh started while this page was in flight: the cursor
-            // it used belongs to a list that no longer exists.
-            guard current == generation else { return }
+        switch await loader.page(cursor: cursor) {
+        case .superseded:
+            // A refresh replaced the list while this page was in flight;
+            // the refresh path owns nextPage now.
+            return
+        case .failure(let error):
+            nextPage = .failed(error.localizedDescription)
+        case .success(let page):
             receipts.append(contentsOf: page.receipts)
             nextCursor = page.nextCursor
             nextPage = .idle
-        } catch {
-            guard current == generation else { return }
-            nextPage = .failed(error.localizedDescription)
+            // Every page carries the badge's number; applying it keeps the
+            // count fresh as the user scrolls.
+            pendingCount = .exact(page.pendingCount)
         }
     }
 }

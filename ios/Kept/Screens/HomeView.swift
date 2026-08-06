@@ -93,8 +93,6 @@ struct HomeView: View {
                 EmptyView()
             case .exact(let count):
                 PendingBadge(text: "\(count) pending")
-            case .atLeast(let count):
-                PendingBadge(text: "\(count)+ pending")
             case .unknown:
                 // The count could not be fetched; saying so beats quietly
                 // implying zero.

@@ -40,10 +40,14 @@ struct Receipt: Decodable, Equatable, Hashable, Identifiable {
 }
 
 /// One page of GET /api/receipts. `nextCursor` is opaque; handing it back
-/// unchanged is the whole pagination contract.
+/// unchanged is the whole pagination contract. `pendingCount` is the
+/// user's total pending receipts - independent of this page's filters and
+/// paging - and feeds the §5.2a badge directly (wave-3 gate review; it
+/// replaced a 200-row client-side probe).
 struct ReceiptListPage: Decodable, Equatable {
     let receipts: [Receipt]
     let nextCursor: String?
+    let pendingCount: Int
 }
 
 struct ReceiptImage: Decodable, Equatable {

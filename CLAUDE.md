@@ -36,6 +36,8 @@ Every design decision is subordinate to this sentence.
   An exit code is not evidence.
 - Predict before verifying.
   State in writing what you expect an artifact to look like, then look at it, then note the gap.
+- Every gate starts the real server the real way before it closes: the production entrypoint (`npm run dev` or the platform equivalent), from a clean checkout, config loaded as an operator would load it, then one real request against it.
+  A test suite that injects its configuration can be fully green while the entry point cannot start - that happened at wave 3.
 
 ## Review discipline
 

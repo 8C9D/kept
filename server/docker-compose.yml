@@ -13,8 +13,28 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kept -d kept"]
       interval: 5s
+
+  # Local object storage behind the same S3-compatible adapter that will
+  # talk to R2 in deployment (spec §4.2, wave-3 gate review). Credentials
+  # are local-container-only, same reasoning as kept/kept above.
+  minio:
+    image: minio/minio
+    container_name: kept-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: kept
+      MINIO_ROOT_PASSWORD: kept-local-dev
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - kept-minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live"]
+      interval: 5s
       timeout: 3s
       retries: 10
 
 volumes:
   kept-pgdata:
+  kept-minio-data:

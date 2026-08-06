@@ -2,7 +2,9 @@ import XCTest
 @testable import Kept
 
 /// The Home list's decisions: paging driven by the opaque cursor, the
-/// pending count from the probe query, and honest failure states.
+/// pending badge from the list response's count, and honest failure
+/// states - including the superseded-response cases GuardedReceiptLoader
+/// exists for.
 @MainActor
 final class ReceiptListModelTests: XCTestCase {
     private var api = StubKeptAPI()
@@ -16,16 +18,9 @@ final class ReceiptListModelTests: XCTestCase {
         ReceiptListModel(api: api)
     }
 
-    /// Routes the two first-load requests by their status parameter, and
-    /// pages of the main list by cursor.
-    private func stubPages(
-        byCursor: [String?: ReceiptListPage],
-        pending: ReceiptListPage
-    ) {
-        api.receiptsPageHandler = { cursor, status, _ in
-            if status == .pending {
-                return pending
-            }
+    /// Routes list requests by cursor; unknown cursors fail loudly.
+    private func stubPages(byCursor: [String?: ReceiptListPage]) {
+        api.receiptsPageHandler = { cursor, _, _ in
             guard let page = byCursor[cursor] else {
                 throw StubKeptAPI.UnstubbedCall(endpoint: "receiptsPage(cursor: \(cursor ?? "nil"))")
             }
@@ -35,51 +30,29 @@ final class ReceiptListModelTests: XCTestCase {
 
     // MARK: - First load
 
-    func testFirstPageLoadsAndCountsPending() async {
+    func testFirstPageLoadsAndCarriesThePendingCount() async {
         let confirmed = Fixtures.receipt(status: .confirmed)
         let pending = Fixtures.receipt(status: .pending)
-        stubPages(
-            byCursor: [nil: Fixtures.page([confirmed, pending])],
-            pending: Fixtures.page([pending])
-        )
+        stubPages(byCursor: [nil: Fixtures.page([confirmed, pending], pendingCount: 14)])
         let model = makeModel()
 
         await model.loadFirstPage()
 
         XCTAssertEqual(model.phase, .loaded)
         XCTAssertEqual(model.receipts, [confirmed, pending])
-        XCTAssertEqual(model.pendingCount, .exact(1))
-
-        // The probe must ask for pending only, at the server's maximum
-        // page size, or the count silently degrades.
-        let probe = api.receiptsPageCalls.first { $0.status == .pending }
-        XCTAssertEqual(probe?.limit, ReceiptListModel.pendingProbeLimit)
+        // The badge is the response's user-wide count, not a count of the
+        // rows on this page.
+        XCTAssertEqual(model.pendingCount, .exact(14))
     }
 
     func testNoReceiptsIsTheEmptyPhase() async {
-        stubPages(
-            byCursor: [nil: Fixtures.page([])],
-            pending: Fixtures.page([])
-        )
+        stubPages(byCursor: [nil: Fixtures.page([])])
         let model = makeModel()
 
         await model.loadFirstPage()
 
         XCTAssertEqual(model.phase, .empty)
         XCTAssertEqual(model.pendingCount, .exact(0))
-    }
-
-    func testPendingProbeWithMorePagesReportsAtLeast() async {
-        let pending = Fixtures.receipt(status: .pending)
-        stubPages(
-            byCursor: [nil: Fixtures.page([pending])],
-            pending: Fixtures.page([pending], nextCursor: "more-pending")
-        )
-        let model = makeModel()
-
-        await model.loadFirstPage()
-
-        XCTAssertEqual(model.pendingCount, .atLeast(1))
     }
 
     func testFirstPageFailureIsTheFailedPhase() async {
@@ -94,36 +67,13 @@ final class ReceiptListModelTests: XCTestCase {
             return XCTFail("Expected .failed, got \(model.phase)")
         }
         XCTAssertTrue(model.receipts.isEmpty)
-    }
-
-    func testProbeFailureDoesNotTakeDownALoadedList() async {
-        // The badge is decoration; the receipt list must survive its
-        // failure, with the count stated as unknown rather than zero.
-        let receipt = Fixtures.receipt()
-        api.receiptsPageHandler = { _, status, _ in
-            if status == .pending {
-                throw APIError.network(URLError(.timedOut))
-            }
-            return Fixtures.page([receipt])
-        }
-        let model = makeModel()
-
-        await model.loadFirstPage()
-
-        XCTAssertEqual(model.phase, .loaded)
-        XCTAssertEqual(model.receipts, [receipt])
+        // Nothing on a failed screen is current, including the badge.
         XCTAssertEqual(model.pendingCount, .unknown)
     }
 
     func testFailedRefreshResetsThePendingBadgeToUnknown() async {
-        // After a failed refresh nothing on screen is current, including
-        // the badge; a stale "3 pending" above a failure state would be a
-        // quiet wrong answer.
         let pending = Fixtures.receipt(status: .pending)
-        stubPages(
-            byCursor: [nil: Fixtures.page([pending])],
-            pending: Fixtures.page([pending])
-        )
+        stubPages(byCursor: [nil: Fixtures.page([pending], pendingCount: 1)])
         let model = makeModel()
         await model.loadFirstPage()
         XCTAssertEqual(model.pendingCount, .exact(1))
@@ -145,13 +95,10 @@ final class ReceiptListModelTests: XCTestCase {
         let first = Fixtures.receipt()
         let last = Fixtures.receipt()
         let nextPageReceipt = Fixtures.receipt()
-        stubPages(
-            byCursor: [
-                nil: Fixtures.page([first, last], nextCursor: "cursor-page-2"),
-                "cursor-page-2": Fixtures.page([nextPageReceipt]),
-            ],
-            pending: Fixtures.page([])
-        )
+        stubPages(byCursor: [
+            nil: Fixtures.page([first, last], nextCursor: "cursor-page-2", pendingCount: 3),
+            "cursor-page-2": Fixtures.page([nextPageReceipt], pendingCount: 4),
+        ])
         let model = makeModel()
         await model.loadFirstPage()
 
@@ -159,6 +106,8 @@ final class ReceiptListModelTests: XCTestCase {
 
         XCTAssertEqual(model.receipts, [first, last, nextPageReceipt])
         XCTAssertEqual(model.nextPage, .idle)
+        // Each page refreshes the badge with the count it carried.
+        XCTAssertEqual(model.pendingCount, .exact(4))
         let pagedCall = api.receiptsPageCalls.last
         XCTAssertEqual(pagedCall?.cursor, "cursor-page-2")
         XCTAssertNil(pagedCall?.status)
@@ -167,10 +116,7 @@ final class ReceiptListModelTests: XCTestCase {
     func testMidListReceiptDoesNotTriggerPaging() async {
         let first = Fixtures.receipt()
         let last = Fixtures.receipt()
-        stubPages(
-            byCursor: [nil: Fixtures.page([first, last], nextCursor: "cursor-page-2")],
-            pending: Fixtures.page([])
-        )
+        stubPages(byCursor: [nil: Fixtures.page([first, last], nextCursor: "cursor-page-2")])
         let model = makeModel()
         await model.loadFirstPage()
         let callsAfterFirstLoad = api.receiptsPageCalls.count
@@ -182,10 +128,7 @@ final class ReceiptListModelTests: XCTestCase {
 
     func testExhaustedListDoesNotRequestAnotherPage() async {
         let only = Fixtures.receipt()
-        stubPages(
-            byCursor: [nil: Fixtures.page([only], nextCursor: nil)],
-            pending: Fixtures.page([])
-        )
+        stubPages(byCursor: [nil: Fixtures.page([only], nextCursor: nil)])
         let model = makeModel()
         await model.loadFirstPage()
         let callsAfterFirstLoad = api.receiptsPageCalls.count
@@ -196,17 +139,17 @@ final class ReceiptListModelTests: XCTestCase {
     }
 
     func testRefreshDiscardsAPageFetchedForTheOldList() async {
-        // The interleave the generation guard exists for: a next-page fetch
+        // The interleave GuardedReceiptLoader exists for: a next-page fetch
         // is in flight when a pull-to-refresh replaces the list. The stale
         // page belongs to a list that no longer exists and must be dropped,
-        // not appended. (Wave-3 reviewer finding.)
+        // not appended. (Wave-3 reviewer finding; loader added at the
+        // wave-3 gate review.)
         let originalLast = Fixtures.receipt()
         let staleReceipt = Fixtures.receipt()
         let freshReceipt = Fixtures.receipt()
         let gate = Gate()
 
-        api.receiptsPageHandler = { cursor, status, _ in
-            if status == .pending { return Fixtures.page([]) }
+        api.receiptsPageHandler = { cursor, _, _ in
             if cursor == "stale-cursor" {
                 await gate.wait()
                 return Fixtures.page([staleReceipt])
@@ -228,9 +171,8 @@ final class ReceiptListModelTests: XCTestCase {
         }
 
         // Refresh while the page fetch is suspended, then release it.
-        api.receiptsPageHandler = { _, status, _ in
-            if status == .pending { return Fixtures.page([]) }
-            return Fixtures.page([freshReceipt])
+        api.receiptsPageHandler = { _, _, _ in
+            Fixtures.page([freshReceipt])
         }
         await model.loadFirstPage()
         await gate.open()
@@ -244,8 +186,7 @@ final class ReceiptListModelTests: XCTestCase {
         let last = Fixtures.receipt()
         let recovered = Fixtures.receipt()
         var pagingAttempts = 0
-        api.receiptsPageHandler = { cursor, status, _ in
-            if status == .pending { return Fixtures.page([]) }
+        api.receiptsPageHandler = { cursor, _, _ in
             if cursor == nil { return Fixtures.page([last], nextCursor: "cursor-page-2") }
             pagingAttempts += 1
             if pagingAttempts == 1 {
