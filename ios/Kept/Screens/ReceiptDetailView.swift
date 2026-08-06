@@ -6,10 +6,16 @@ import SwiftUI
 struct ReceiptDetailView: View {
     @StateObject private var model: ReceiptDetailModel
     private let receipt: Receipt
+    private let api: APIClient
+
+    /// Non-nil while the confirm form is presented over this screen; the
+    /// model is created at tap time from the already-loaded detail.
+    @State private var confirmModel: ConfirmReceiptModel?
 
     init(api: APIClient, receipt: Receipt) {
         _model = StateObject(wrappedValue: ReceiptDetailModel(api: api))
         self.receipt = receipt
+        self.api = api
     }
 
     var body: some View {
@@ -30,6 +36,20 @@ struct ReceiptDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await model.load(id: receipt.id)
+        }
+        .fullScreenCover(item: $confirmModel) { presented in
+            NavigationStack {
+                ConfirmReceiptView(
+                    model: presented,
+                    onSaved: {
+                        confirmModel = nil
+                        // The row just went confirmed; re-read it so the
+                        // screen shows the saved truth, not a stale badge.
+                        await model.load(id: receipt.id)
+                    },
+                    onSetAside: { confirmModel = nil }
+                )
+            }
         }
     }
 
@@ -68,6 +88,21 @@ struct ReceiptDetailView: View {
                     }
                 }
                 .padding(.vertical, 4)
+
+                if detail.receipt.status == .pending {
+                    // A pending receipt's obvious next step, offered where
+                    // the person already is - the header-badge queue must
+                    // not be the only route (wave-4 re-test, the owner's
+                    // finding: tapping a pending receipt was a dead end).
+                    Button {
+                        confirmModel = ConfirmReceiptModel(api: api, detail: detail)
+                    } label: {
+                        Text("Confirm this receipt")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
             }
 
             Section("Details") {

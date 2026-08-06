@@ -3,6 +3,24 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - Wave-4 gate review, second pass (the owner)
+
+**Vendor is the topmost line within 15% of the tallest letter-bearing line in the top quarter, not the single tallest.**
+Rejected: keeping single-tallest (the winner between same-size header lines is Vision height jitter - the same paper flipped between name and street address across two scans), running the vendor heuristic on pre-assembly fragments (the attributed cause, disproven against the artifact: the assembler had left both header lines untouched, and fragments would truncate a split name), and position-only rules (a genuinely logo-sized name below a tagline should win, and under the band rule it still does).
+Why: same-size print makes "largest" a measurement artifact; "the name prints above the address" is the signal that survives jitter. Diagnosed by dumping Vision's real geometry from the stored image rather than guessing.
+
+**Labels also match against a despaced copy of the row, fenced by letters rather than word boundaries.**
+Rejected: word-boundary matching on despaced text (digits are word characters, so "Total15.25" never matches \btotal\b - found when the first attempt's test failed), and loosening the raw-text rules (despacing alone would misread "SUB TOTAL" and "TOTAL SAVINGS"; the raw word-boundary match still governs deliberate spacing).
+Why: Vision split "Total" into "Tot al" on the real receipt, and a mid-word split is invisible to any within-word match; the despaced pass recovers exactly those.
+
+**The parser fixture is Vision's real measurements verbatim, not invented geometry.**
+Rejected: patching the invented fixture (it had passed while the device regressed - fabricated heights hid what Vision actually reports, which is what let the vendor regression through a fixture that did assert vendor).
+Why: the fixture's job is to reproduce reality; the real dump carries all three parser lessons at once (wide-gap columns, jittered heights, a mid-word split).
+
+**A pending receipt's detail screen carries a "Confirm this receipt" button opening the same confirm form.**
+Rejected: leaving the header-badge queue as the only route (the owner's finding: tapping a pending receipt was a dead end), and a sixth screen or inline editing on detail (the confirm form already exists and §7.1's five-screen rule stands).
+Why: the receipt in front of you should be confirmable where you are; the queue remains the batch route, and both paths run through the identical tested model.
+
 ## 2026-08-06 - Wave-4 gate review (the owner)
 
 **The parser assembles printed rows from Vision fragments before any heuristic runs; `ocr_raw_text` stores the assembled rows.**

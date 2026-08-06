@@ -123,22 +123,27 @@ enum ReceiptParser {
 
     // MARK: - Vendor
 
-    /// The tallest text in the top quarter of the receipt - the store name
-    /// is almost always the header's largest print. Lines without a letter
-    /// (a phone number, a date) can't be a name and don't compete.
+    /// §7.3's "largest-font text block in the top quarter", made robust to
+    /// measurement jitter: on a thermal receipt every header line is the
+    /// same print size, and Vision's box heights vary a few percent per
+    /// scan - the wave-4 re-test measured the address 5% taller than the
+    /// store name on one photo and the reverse on another, flipping the
+    /// suggested vendor between scans. So near-tallest is a band, not a
+    /// single winner: among letter-bearing lines within 15% of the tallest,
+    /// take the topmost, because the name prints above the address. A line
+    /// genuinely larger than the band (a real logo-sized name) still wins
+    /// outright wherever it sits in the quarter.
     private static func vendor(in lines: [RecognizedLine]) -> String? {
         let candidates = lines.filter { line in
             line.verticalCenter < 0.25
                 && line.text.contains(where: \.isLetter)
         }
-        let tallest = candidates.max { first, second in
-            // max(by:) wants "first orders before second"; ties go to the
-            // earlier (higher-on-the-receipt) line, so strictly-less keeps
-            // the first of equals.
-            first.height < second.height
-        }
-        guard let tallest else { return nil }
-        let trimmed = tallest.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let tallestHeight = candidates.map(\.height).max() else { return nil }
+        let winner = candidates
+            .filter { $0.height >= 0.85 * tallestHeight }
+            .min { $0.verticalCenter < $1.verticalCenter }
+        guard let winner else { return nil }
+        let trimmed = winner.text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
 
@@ -161,18 +166,52 @@ enum ReceiptParser {
         return patterns
     }()
 
+    /// The same words fenced by LETTERS rather than \b, for matching text
+    /// whose spaces were removed: despacing glues the label to its amount
+    /// ("Total15.25"), and a digit is a word character, so \b would never
+    /// fire there. Letters still fence - "TOTALSAVINGS" (from "TOTAL
+    /// SAVINGS") does not read as a bare total. Consumed-prefix instead of
+    /// lookbehind, same as ReceiptDateParser and for the same reason.
+    private static let despacedWordPatterns: [String: Regex<AnyRegexOutput>] = {
+        var patterns: [String: Regex<AnyRegexOutput>] = [:]
+        for word in ["total", "hst", "gst", "tax", "bn"] {
+            if let pattern = try? Regex("(?:^|[^A-Za-z])\(word)(?![A-Za-z])").ignoresCase() {
+                patterns[word] = pattern
+            }
+        }
+        return patterns
+    }()
+
     private static func containsWord(_ word: String, in text: String) -> Bool {
-        guard let pattern = wordPatterns[word] else {
+        guard
+            let pattern = wordPatterns[word],
+            let despacedPattern = despacedWordPatterns[word]
+        else {
             // Every caller passes one of the five words above; asking for
             // another is a programmer error, surfaced in debug builds and
             // degraded to "not found" in a capture path.
             assertionFailure("No compiled pattern for word: \(word)")
             return false
         }
-        return text.contains(pattern)
+        // Matched against the text as printed AND with spaces removed:
+        // Vision sometimes splits a label mid-word ("Tot al 15.25" on the
+        // wave-4 re-test receipt), which no within-word match can see.
+        // The raw match still governs deliberate spacing - "SUB TOTAL"
+        // stays a subtotal via the exclusion below, and "TOTAL SAVINGS"
+        // stays a total line - while the despaced match ("Total15.25")
+        // recovers the split ones.
+        return text.contains(pattern) || despaced(text).contains(despacedPattern)
     }
 
     private static func isSubtotalLine(_ text: String) -> Bool {
-        text.range(of: #"sub[\s-]?total"#, options: [.regularExpression, .caseInsensitive]) != nil
+        // The \s? in the pattern covers "SUB TOTAL"; the despaced check
+        // covers a Vision mid-word split like "Subto tal".
+        let pattern = #"sub[\s-]?total"#
+        return text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+            || despaced(text).range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private static func despaced(_ text: String) -> String {
+        text.replacingOccurrences(of: " ", with: "")
     }
 }

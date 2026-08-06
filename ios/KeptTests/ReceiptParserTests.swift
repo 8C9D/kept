@@ -95,6 +95,40 @@ final class ReceiptParserTests: XCTestCase {
         XCTAssertTrue(suggestions.isEmpty)
     }
 
+    func testSplitLabelStillReadsAsItsWord() {
+        // Vision split "Total" mid-word on the real receipt; the despaced
+        // match recovers it without loosening the deliberate-spacing rules.
+        let split = ReceiptParser.parse(lines: [
+            RecognizedLine(text: "Tot al 15.25", verticalCenter: 0.5, height: 0.02),
+        ])
+        XCTAssertEqual(split.totalCents, 1525)
+
+        // "SUB TOTAL" is still a subtotal, not a total, both spellings.
+        let spaced = ReceiptParser.parse(lines: [
+            RecognizedLine(text: "SUB TOTAL 10.00", verticalCenter: 0.5, height: 0.02),
+        ])
+        XCTAssertEqual(spaced.subtotalCents, 1000)
+        XCTAssertNil(spaced.totalCents)
+    }
+
+    func testVendorSurvivesHeightJitterButYieldsToGenuinelyBiggerPrint() {
+        // Same print size, measurement jitter: the address measures a few
+        // percent taller, and the topmost of the near-tallest band wins.
+        let jittered = ReceiptParser.parse(lines: [
+            line("Corner Noodle Bar", y: 0.07, height: 0.0306),
+            line("12 Main Street", y: 0.10, height: 0.0323),
+        ])
+        XCTAssertEqual(jittered.vendor, "Corner Noodle Bar")
+
+        // A genuinely larger name below a small header line still wins:
+        // the band excludes the small line, position never enters into it.
+        let bigNameLower = ReceiptParser.parse(lines: [
+            line("Welcome to", y: 0.03, height: 0.012),
+            line("BIG BOX HARDWARE", y: 0.08, height: 0.045),
+        ])
+        XCTAssertEqual(bigNameLower.vendor, "BIG BOX HARDWARE")
+    }
+
     // MARK: - Total heuristics
 
     func testTotalPrefersLabelledLineOverLargerAmountElsewhere() {
