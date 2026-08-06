@@ -7,12 +7,24 @@ import Foundation
 /// instead of a real queue.
 @MainActor
 protocol OutboxEnqueuing: AnyObject {
-    /// Durably queues one scanned page as a receipt-to-be. When this
-    /// returns, the receipt is safe on the phone; when it throws (a full
-    /// disk, mainly), the capture flow must say so - the paper is still in
-    /// the person's hand, and a false "saved" is the one unforgivable
-    /// answer (wave-5 kickoff §1).
+    /// Durably queues one scanned page as a pending receipt-to-be; the
+    /// drain runs OCR later. When this returns, the receipt is safe on
+    /// the phone; when it throws (a full disk, mainly), the capture flow
+    /// must say so - the paper is still in the person's hand, and a false
+    /// "saved" is the one unforgivable answer (wave-5 kickoff §1).
     func enqueue(imageData: Data) async throws
+
+    /// The single-capture variant: OCR already ran (its result rides in
+    /// `parsed`, so the drain never re-reads the image), and when the
+    /// person confirmed on the spot, `confirmation` carries their fields -
+    /// the create lands the receipt already `confirmed`. A nil
+    /// confirmation is the "Later" exit: queued pending, like a batch
+    /// page.
+    func enqueue(
+        imageData: Data,
+        parsed: ParsedReceipt,
+        confirmation: ConfirmedReceiptFields?
+    ) async throws
 }
 
 /// The offline outbox (spec §7.4): owns the durable queue of captured
@@ -187,6 +199,22 @@ final class OutboxController: ObservableObject {
     // MARK: - Enqueue (the §7.4 save path)
 
     func enqueue(imageData: Data) async throws {
+        try await enqueueItem(imageData: imageData, progress: .captured, confirmation: nil)
+    }
+
+    func enqueue(
+        imageData: Data,
+        parsed: ParsedReceipt,
+        confirmation: ConfirmedReceiptFields?
+    ) async throws {
+        try await enqueueItem(imageData: imageData, progress: .parsed(parsed), confirmation: confirmation)
+    }
+
+    private func enqueueItem(
+        imageData: Data,
+        progress: OutboxItem.Progress,
+        confirmation: ConfirmedReceiptFields?
+    ) async throws {
         // Best-effort: loading first keeps new sequence numbers above the
         // stored ones, but a failed load must never block a save - this
         // receipt's durability outranks the ordering nicety.
@@ -204,9 +232,9 @@ final class OutboxController: ObservableObject {
             sequence: sequence,
             capturedAt: now(),
             sha256: Self.sha256Hex(imageData),
-            progress: .captured,
+            progress: progress,
             ocrAttempts: 0,
-            blockedMessage: nil
+            confirmation: confirmation
         )
         try await store.add(item, imageData: imageData)
         items.append(item)
@@ -516,6 +544,31 @@ final class OutboxController: ObservableObject {
         objectKey: String
     ) -> CreateReceiptRequest {
         let suggestions = parsed.suggestions
+        if let confirmed = item.confirmation {
+            // Confirmed at capture (the single-capture flow): the human's
+            // fields land as a `confirmed` row directly - it never joins
+            // the pending queue. The parser's suggestions still ride
+            // along verbatim, because comparing them with these confirmed
+            // fields IS the §7.3 accuracy measurement.
+            return CreateReceiptRequest(
+                purchasedAt: confirmed.purchasedAt,
+                capturedAt: ReceiptFormat.timestamp(of: item.capturedAt),
+                vendor: confirmed.vendor,
+                vendorTaxNumber: confirmed.vendorTaxNumber,
+                subtotalCents: confirmed.subtotalCents,
+                hstCents: confirmed.hstCents,
+                otherTaxCents: confirmed.otherTaxCents,
+                totalCents: confirmed.totalCents,
+                category: confirmed.category,
+                paymentMethod: confirmed.paymentMethod,
+                isBusiness: confirmed.isBusiness,
+                notes: confirmed.notes,
+                status: .confirmed,
+                ocrRawText: parsed.ocrRawText,
+                ocrSuggestions: OcrSuggestionsPayload(suggestions),
+                image: CreateReceiptRequest.Image(objectKey: objectKey, sha256: item.sha256)
+            )
+        }
         return CreateReceiptRequest(
             // The parser's date when it found one; otherwise the capture
             // day - the day the person scanned it, not the day the upload

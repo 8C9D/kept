@@ -3,6 +3,19 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - Wave-5 gate ratification (the owner)
+
+**Ratified: §7.4's worker is app-lifecycle-driven, with no OS background execution.**
+Rejected: adding `BGTaskScheduler` for literal background upload.
+Why: real background execution buys latency nobody perceives; the foreground-driven drain plus the ~30-second backgrounding grant covers the actual usage pattern, and the keychain posture stays `WhenUnlocked` as a direct consequence.
+
+**Rejected: capture returning to Home without the confirm screen. A single capture goes scan → confirm again; the confirm screen is now local-backed and its Save is a durable outbox write.**
+Rejected on the owner's reading of his own kickoff: "return to Home immediately" meant *don't block on the network*, never *don't show the screen*. Online is the common case, and charging every receipt a badge tap to serve the rare offline one adds friction to the common path while manufacturing a pending queue that §1's success test exists to avoid.
+The implementation honors both halves: after scanning one page, on-device OCR prefills the §7.2 form from local data (image included - no server row exists yet), and **Save writes the confirmed receipt into the outbox** - a disk-only, immediately-returning operation; the drain later uploads it and creates the row already `confirmed`, so it never joins the pending queue. "Later" queues it pending instead, so leaving the screen never costs the scan. **Batch mode keeps the wave-5 shape** - many pages queue pending immediately and are worked down through the confirm queue afterwards, which is correct for a stack and wrong for one receipt.
+Also rejected: waiting for the upload before showing the confirm screen (a network wait on the capture path is what §7.4 abolishes; offline it becomes an indefinite spinner), and confirming against the server row post-upload as wave 4 did (re-introduces connectivity into the moment of capture).
+Supersedes, in part, the wave-4 "single capture is a batch of one" decision: the *enqueue path* stays one path (everything goes through the outbox), but the *confirm timing* now splits by page count - which is the distinction that decision's "one path" argument actually cared about.
+Stated cost: a scan is in memory only while the confirm screen is up; the app dying right then loses it, and the paper is still in the person's hand. The §7.4 guarantee anchors at Save, not at scan - same as the paper-based reality it replaces.
+
 ## 2026-08-06 - Wave 5
 
 **The keychain stays `WhenUnlocked`; the outbox drains only while the app runs in the foreground (plus the ~30-second `beginBackgroundTask` tail after backgrounding).**

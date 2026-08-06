@@ -79,6 +79,7 @@ final class OutboxControllerTests: XCTestCase {
         sha256: String = "feed0000",
         progress: OutboxItem.Progress,
         ocrAttempts: Int = 0,
+        confirmation: ConfirmedReceiptFields? = nil,
         blockedMessage: String? = nil
     ) -> OutboxItem {
         OutboxItem(
@@ -89,6 +90,7 @@ final class OutboxControllerTests: XCTestCase {
             sha256: sha256,
             progress: progress,
             ocrAttempts: ocrAttempts,
+            confirmation: confirmation,
             blockedMessage: blockedMessage
         )
     }
@@ -131,6 +133,64 @@ final class OutboxControllerTests: XCTestCase {
         XCTAssertTrue(store.items.isEmpty, "finished items leave the queue")
         XCTAssertEqual(controller.serverConfirmedCount, 2)
         XCTAssertTrue(controller.entries.isEmpty)
+    }
+
+    func testConfirmedAtCaptureItemCreatesAConfirmedRowWithTheSuggestionRecord() async throws {
+        // The single-capture flow: a human confirmed on the spot, so the
+        // create lands the receipt already confirmed - it never joins the
+        // pending queue - while the parser's suggestions still ride along
+        // verbatim, because comparing them with the confirmed fields IS
+        // the §7.3 accuracy measurement.
+        let confirmed = ConfirmedReceiptFields(
+            purchasedAt: "2026-01-15", // the human corrected the parsed date
+            vendor: "Maple Foods",
+            vendorTaxNumber: nil,
+            subtotalCents: 10000,
+            hstCents: 1300,
+            otherTaxCents: nil,
+            totalCents: 11300,
+            category: "groceries",
+            paymentMethod: "visa",
+            isBusiness: true,
+            notes: nil
+        )
+        let controller = await makeController()
+        try await controller.enqueue(
+            imageData: Data("page one bytes".utf8),
+            parsed: Self.parsedFixture,
+            confirmation: confirmed
+        )
+        await settle(controller)
+
+        let request = try XCTUnwrap(api.createReceiptCalls.first)
+        XCTAssertEqual(request.status, .confirmed)
+        XCTAssertEqual(request.purchasedAt, "2026-01-15")
+        XCTAssertEqual(request.isBusiness, true)
+        XCTAssertEqual(request.category, "groceries")
+        XCTAssertEqual(request.totalCents, 11300)
+        XCTAssertEqual(request.ocrSuggestions.purchasedAt, "2026-01-14") // the parser's, untouched
+        XCTAssertEqual(request.ocrRawText, Self.parsedFixture.ocrRawText)
+        XCTAssertTrue(store.items.isEmpty)
+
+        // On the wire: status and isBusiness present for this create, and
+        // the recognizer was never asked - the parse rode in with the item.
+        let body = try JSONSerialization.jsonObject(with: APIClient.encoder.encode(request)) as? [String: Any]
+        XCTAssertEqual(body?["status"] as? String, "confirmed")
+        XCTAssertEqual(body?["isBusiness"] as? Bool, true)
+    }
+
+    func testPendingCreateStillOmitsIsBusinessAndStatusOnTheWire() async throws {
+        // The §5.2 rule made visible at the transport: a pending create
+        // must not carry the keys only a human's choice may supply.
+        let controller = await makeController()
+        try await controller.enqueue(imageData: Data("page one bytes".utf8))
+        await settle(controller)
+
+        let request = try XCTUnwrap(api.createReceiptCalls.first)
+        let body = try JSONSerialization.jsonObject(with: APIClient.encoder.encode(request)) as? [String: Any]
+        XCTAssertNotNil(body)
+        XCTAssertNil(body?["isBusiness"])
+        XCTAssertNil(body?["status"])
     }
 
     func testCreateCarriesParsedSuggestionsRawTextAndCaptureTimes() async throws {

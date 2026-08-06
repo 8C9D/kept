@@ -1,37 +1,62 @@
 import SwiftUI
 
+/// Where a receipt image's bytes come from: a presigned URL for stored
+/// receipts, or the scanned bytes still in memory for a capture being
+/// confirmed before it uploads (wave-5 gate ratification).
+enum ReceiptImageSource: Equatable {
+    case remote(URL)
+    case local(Data)
+}
+
 /// The confirm screen's inline receipt image: the person is checking
 /// numbers against paper, so the image loads eagerly and failures say so.
 struct ReceiptImageView: View {
-    let url: URL
+    let source: ReceiptImageSource
 
     var body: some View {
-        AsyncImage(url: url) { phase in
-            switch phase {
-            case .empty:
-                CenteredProgressRow()
-            case .success(let image):
-                image
+        switch source {
+        case .remote(let url):
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .empty:
+                    CenteredProgressRow()
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFit()
+                case .failure:
+                    loadFailureLabel
+                @unknown default:
+                    EmptyView()
+                }
+            }
+        case .local(let data):
+            if let uiImage = UIImage(data: data) {
+                Image(uiImage: uiImage)
                     .resizable()
                     .scaledToFit()
-            case .failure:
-                Label(
-                    "The image could not be loaded.",
-                    systemImage: "photo.badge.exclamationmark"
-                )
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            @unknown default:
-                EmptyView()
+            } else {
+                // The scanner produced these bytes moments ago; failing to
+                // re-decode them is stated, same as a failed download.
+                loadFailureLabel
             }
         }
+    }
+
+    private var loadFailureLabel: some View {
+        Label(
+            "The image could not be loaded.",
+            systemImage: "photo.badge.exclamationmark"
+        )
+        .font(.footnote)
+        .foregroundStyle(.secondary)
     }
 }
 
 /// Tap-to-zoom (spec §7.2: "tappable to zoom - they must be able to see
 /// the paper"): pinch to magnify, double-tap to toggle, drag to pan.
 struct ZoomableImageSheet: View {
-    let url: URL
+    let source: ReceiptImageSource
 
     @Environment(\.dismiss) private var dismiss
     @State private var steadyZoom: CGFloat = 1
@@ -44,7 +69,7 @@ struct ZoomableImageSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView([.horizontal, .vertical]) {
-                ReceiptImageView(url: url)
+                ReceiptImageView(source: source)
                     .scaleEffect(zoom, anchor: .center)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

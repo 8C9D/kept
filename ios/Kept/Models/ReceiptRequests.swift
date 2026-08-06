@@ -58,9 +58,11 @@ struct OcrSuggestionsPayload: Encodable, Equatable {
     }
 }
 
-/// POST /api/receipts - a freshly scanned receipt, created `pending` with
-/// whatever the parser found (spec §6A: each scan in a batch becomes its
-/// own pending receipt; a human confirms it in the queue).
+/// POST /api/receipts - a freshly scanned receipt. Batch scans create
+/// `pending` rows carrying only what the parser found (spec §6A: a human
+/// confirms them in the queue); a single capture confirmed on the spot
+/// creates a `confirmed` row directly, carrying the human's fields
+/// alongside the parser's record (wave-5 gate ratification).
 struct CreateReceiptRequest: Encodable, Equatable {
     let purchasedAt: String
     let capturedAt: String
@@ -68,7 +70,13 @@ struct CreateReceiptRequest: Encodable, Equatable {
     let vendorTaxNumber: String?
     let subtotalCents: Int?
     let hstCents: Int?
+    let otherTaxCents: Int?
     let totalCents: Int?
+    let category: String?
+    let paymentMethod: String?
+    let isBusiness: Bool?
+    let notes: String?
+    let status: ReceiptStatus?
     let ocrRawText: String?
     let ocrSuggestions: OcrSuggestionsPayload
     let image: Image
@@ -78,9 +86,48 @@ struct CreateReceiptRequest: Encodable, Equatable {
         let sha256: String
     }
 
-    // Absent keys, not explicit nulls, for the strict schema; `isBusiness`
-    // is never sent at create - it has no default anywhere (spec §5.2) and
-    // only the confirm screen's explicit choice ever supplies it.
+    /// Defaults keep the pending-create call sites at the wave-4 shape;
+    /// only the confirmed-at-capture path supplies the rest.
+    init(
+        purchasedAt: String,
+        capturedAt: String,
+        vendor: String?,
+        vendorTaxNumber: String?,
+        subtotalCents: Int?,
+        hstCents: Int?,
+        otherTaxCents: Int? = nil,
+        totalCents: Int?,
+        category: String? = nil,
+        paymentMethod: String? = nil,
+        isBusiness: Bool? = nil,
+        notes: String? = nil,
+        status: ReceiptStatus? = nil,
+        ocrRawText: String?,
+        ocrSuggestions: OcrSuggestionsPayload,
+        image: Image
+    ) {
+        self.purchasedAt = purchasedAt
+        self.capturedAt = capturedAt
+        self.vendor = vendor
+        self.vendorTaxNumber = vendorTaxNumber
+        self.subtotalCents = subtotalCents
+        self.hstCents = hstCents
+        self.otherTaxCents = otherTaxCents
+        self.totalCents = totalCents
+        self.category = category
+        self.paymentMethod = paymentMethod
+        self.isBusiness = isBusiness
+        self.notes = notes
+        self.status = status
+        self.ocrRawText = ocrRawText
+        self.ocrSuggestions = ocrSuggestions
+        self.image = image
+    }
+
+    // Absent keys, not explicit nulls, for the strict schema. `isBusiness`
+    // and `status` ride only on the confirmed-at-capture path - a pending
+    // create never sends them, because `is_business` has no default
+    // anywhere (spec §5.2) and only a human's explicit choice supplies it.
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(purchasedAt, forKey: .purchasedAt)
@@ -89,7 +136,13 @@ struct CreateReceiptRequest: Encodable, Equatable {
         try container.encodeIfPresent(vendorTaxNumber, forKey: .vendorTaxNumber)
         try container.encodeIfPresent(subtotalCents, forKey: .subtotalCents)
         try container.encodeIfPresent(hstCents, forKey: .hstCents)
+        try container.encodeIfPresent(otherTaxCents, forKey: .otherTaxCents)
         try container.encodeIfPresent(totalCents, forKey: .totalCents)
+        try container.encodeIfPresent(category, forKey: .category)
+        try container.encodeIfPresent(paymentMethod, forKey: .paymentMethod)
+        try container.encodeIfPresent(isBusiness, forKey: .isBusiness)
+        try container.encodeIfPresent(notes, forKey: .notes)
+        try container.encodeIfPresent(status, forKey: .status)
         try container.encodeIfPresent(ocrRawText, forKey: .ocrRawText)
         try container.encode(ocrSuggestions, forKey: .ocrSuggestions)
         try container.encode(image, forKey: .image)
@@ -97,7 +150,8 @@ struct CreateReceiptRequest: Encodable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case purchasedAt, capturedAt, vendor, vendorTaxNumber
-        case subtotalCents, hstCents, totalCents
+        case subtotalCents, hstCents, otherTaxCents, totalCents
+        case category, paymentMethod, isBusiness, notes, status
         case ocrRawText, ocrSuggestions, image
     }
 }
@@ -119,6 +173,23 @@ struct ConfirmReceiptRequest: Encodable, Equatable {
     let paymentMethod: String?
     let isBusiness: Bool
     let notes: String?
+
+    /// The PATCH body from what the confirm form produced - the same
+    /// fields the capture-time path stores on a queued item, so the two
+    /// save routes cannot drift apart.
+    init(_ fields: ConfirmedReceiptFields) {
+        purchasedAt = fields.purchasedAt
+        vendor = fields.vendor
+        vendorTaxNumber = fields.vendorTaxNumber
+        subtotalCents = fields.subtotalCents
+        hstCents = fields.hstCents
+        otherTaxCents = fields.otherTaxCents
+        totalCents = fields.totalCents
+        category = fields.category
+        paymentMethod = fields.paymentMethod
+        isBusiness = fields.isBusiness
+        notes = fields.notes
+    }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)

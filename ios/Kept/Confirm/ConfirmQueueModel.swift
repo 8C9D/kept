@@ -70,8 +70,11 @@ final class ConfirmQueueModel: ObservableObject {
     /// "This one later": keep it pending, move on. The §5.2a badge keeps
     /// nagging about it, which is the design.
     func setAsideCurrent() async {
-        if case .confirming(let model) = phase {
-            setAsideIds.insert(model.receiptId)
+        // The queue only ever builds server-backed models, so receiptId is
+        // always present here; the optionality belongs to the capture-time
+        // confirm path, which has no server row yet.
+        if case .confirming(let model) = phase, let receiptId = model.receiptId {
+            setAsideIds.insert(receiptId)
             handledCount += 1
         }
         await loadNext()

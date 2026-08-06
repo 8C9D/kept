@@ -33,6 +33,7 @@ final class FileOutboxStoreTests: XCTestCase {
             sha256: "abc123",
             progress: progress,
             ocrAttempts: 0,
+            confirmation: nil,
             blockedMessage: nil
         )
     }
@@ -51,6 +52,19 @@ final class FileOutboxStoreTests: XCTestCase {
             sha256: "def456",
             progress: .uploaded(parsed, objectKey: "user/2026/08/x.jpg"),
             ocrAttempts: 2,
+            confirmation: ConfirmedReceiptFields(
+                purchasedAt: "2026-01-14",
+                vendor: "MAPLE",
+                vendorTaxNumber: nil,
+                subtotalCents: 10000,
+                hstCents: 1300,
+                otherTaxCents: nil,
+                totalCents: 11300,
+                category: "supplies",
+                paymentMethod: nil,
+                isBusiness: true,
+                notes: nil
+            ),
             blockedMessage: "a reason"
         )
         try await store.add(captured, imageData: Data("first image".utf8))

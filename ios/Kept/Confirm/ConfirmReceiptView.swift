@@ -42,8 +42,8 @@ struct ConfirmReceiptView: View {
             }
         }
         .sheet(isPresented: $showZoomedImage) {
-            if let imageURL = model.imageURL {
-                ZoomableImageSheet(url: imageURL)
+            if let imageSource = model.imageSource {
+                ZoomableImageSheet(source: imageSource)
             }
         }
     }
@@ -59,8 +59,8 @@ struct ConfirmReceiptView: View {
     @ViewBuilder
     private var imageSection: some View {
         Section {
-            if let imageURL = model.imageURL {
-                ReceiptImageView(url: imageURL)
+            if let imageSource = model.imageSource {
+                ReceiptImageView(source: imageSource)
                     .frame(maxWidth: .infinity, minHeight: 160, maxHeight: 260)
                     .contentShape(Rectangle())
                     .onTapGesture { showZoomedImage = true }
@@ -70,6 +70,15 @@ struct ConfirmReceiptView: View {
                     .font(.footnote)
                     .italic()
                     .foregroundStyle(.secondary)
+            }
+            if let note = model.ocrFailureNote {
+                // Recognition failed at capture: without this line, an
+                // empty form would read as "the receipt is blank" - the
+                // remedy (type what the paper says) is already on screen.
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
             }
         }
         .listRowBackground(Color.clear)

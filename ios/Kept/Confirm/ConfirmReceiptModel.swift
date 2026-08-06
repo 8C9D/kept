@@ -12,7 +12,12 @@ import Foundation
 /// - the arithmetic check warns, inside the total card, and never blocks;
 /// - save is disabled until business-or-personal is chosen (the §5.2
 ///   no-default rule made visible), with the reason stated;
-/// - a valid save PATCHes every field plus status=confirmed in one call.
+/// - a valid save hands the confirmed fields to whichever save path built
+///   this model: a PATCH with status=confirmed for a server-side pending
+///   receipt (the queue and the detail screen), or a durable outbox write
+///   for a capture confirmed on the spot (wave-5 gate ratification) - the
+///   form neither knows nor cares, which is what keeps the two paths one
+///   screen.
 @MainActor
 final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// The fields that can carry an OCR suggestion and therefore an amber
@@ -22,11 +27,17 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         case total, date, vendor, hst, subtotal, taxNumber
     }
 
-    let receiptId: UUID
+    /// The server-side receipt this form edits, when there is one; nil for
+    /// a capture being confirmed before it has uploaded.
+    let receiptId: UUID?
     let currency: String
-    /// Presigned and short-lived; fetched fresh with the detail, displayed
-    /// promptly, never persisted.
-    let imageURL: URL?
+    /// A presigned URL (short-lived; displayed promptly, never persisted)
+    /// for stored receipts, or the scanned bytes still in hand for a
+    /// capture-time confirm.
+    let imageSource: ReceiptImageSource?
+    /// Stated when on-device OCR failed outright at capture, so an empty
+    /// form reads as "recognition failed", not "the receipt is blank".
+    let ocrFailureNote: String?
 
     // MARK: - Form state
 
@@ -57,16 +68,24 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// says so out loud instead of passing it off as parsed.
     let dateIsCaptureDayFallback: Bool
 
-    private let api: any KeptAPI
+    /// Where the confirmed fields go on save. Injected by whoever built
+    /// the model; the form's rules above are identical either way.
+    private let saveAction: (ConfirmedReceiptFields) async throws -> Void
 
     // MARK: - Construction
 
+    /// A server-side pending receipt (the confirm queue, or the detail
+    /// screen's "Confirm this receipt"): save PATCHes it to confirmed.
     init(api: any KeptAPI, detail: ReceiptDetail) {
-        self.api = api
         let receipt = detail.receipt
-        receiptId = receipt.id
+        let id = receipt.id
+        saveAction = { fields in
+            _ = try await api.confirmReceipt(id: id, ConfirmReceiptRequest(fields))
+        }
+        receiptId = id
         currency = receipt.currency
-        imageURL = detail.images.first?.downloadUrl
+        imageSource = detail.images.first.map { .remote($0.downloadUrl) }
+        ocrFailureNote = nil
 
         totalText = receipt.totalCents.map(MoneyInput.text(fromCents:)) ?? ""
         purchasedDate = ReceiptFormat.pickerDate(fromIso: receipt.purchasedAt) ?? Date()
@@ -105,6 +124,53 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             // fallback; claiming fabrication would be its own lie.
             dateIsCaptureDayFallback = false
         }
+        unreviewedFields = unreviewed
+    }
+
+    /// A capture being confirmed on the spot, before anything has
+    /// uploaded (wave-5 gate ratification): the form is prefilled from
+    /// the on-device parse, the image is the scanned bytes still in
+    /// memory, and save hands the confirmed fields to the injected
+    /// action - a durable outbox write, in production.
+    init(
+        draft: CapturedReceiptDraft,
+        saveAction: @escaping (ConfirmedReceiptFields) async throws -> Void
+    ) {
+        self.saveAction = saveAction
+        receiptId = nil
+        // Not editable on this form (spec, wave-4 report §6.3); the create
+        // omits it and the server's column default applies.
+        currency = "CAD"
+        imageSource = .local(draft.imageData)
+        ocrFailureNote = draft.ocrFailureNote
+
+        let suggestions = draft.suggestions
+        totalText = suggestions.totalCents.map(MoneyInput.text(fromCents:)) ?? ""
+        // Parsed date, or the capture day - both through the same
+        // UTC-pinned round trip the picker renders in.
+        let dateString = suggestions.purchasedAt ?? ReceiptFormat.calendarDate(of: draft.capturedAt)
+        purchasedDate = ReceiptFormat.pickerDate(fromIso: dateString) ?? Date()
+        vendorText = suggestions.vendor ?? ""
+        hstText = suggestions.hstCents.map(MoneyInput.text(fromCents:)) ?? ""
+        subtotalText = suggestions.subtotalCents.map(MoneyInput.text(fromCents:)) ?? ""
+        otherTaxText = ""
+        taxNumberText = suggestions.vendorTaxNumber ?? ""
+        categoryText = ""
+        paymentMethodText = ""
+        notesText = ""
+        businessChoice = nil
+
+        // Same amber rule as the server-backed path, read straight from
+        // the parse: exactly the suggested fields start unreviewed, and
+        // the date always does (parsed or fabricated-from-capture-day,
+        // the latter additionally called out).
+        var unreviewed: Set<SuggestedField> = [.date]
+        if suggestions.totalCents != nil { unreviewed.insert(.total) }
+        if suggestions.vendor != nil { unreviewed.insert(.vendor) }
+        if suggestions.hstCents != nil { unreviewed.insert(.hst) }
+        if suggestions.subtotalCents != nil { unreviewed.insert(.subtotal) }
+        if suggestions.vendorTaxNumber != nil { unreviewed.insert(.taxNumber) }
+        dateIsCaptureDayFallback = suggestions.purchasedAt == nil
         unreviewedFields = unreviewed
     }
 
@@ -198,8 +264,10 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         saveBlocker == nil
     }
 
-    /// One tap, one PATCH, straight back to the queue - no success modal
-    /// (spec §10A.1). Returns whether the receipt is now confirmed.
+    /// One tap, one durable save - a PATCH or an outbox write, whichever
+    /// built this model - straight back to wherever the person came from,
+    /// no success modal (spec §10A.1). Returns whether the receipt is now
+    /// confirmed.
     func save() async -> Bool {
         guard let isBusiness = businessChoice, case .cents(let totalCents) = totalInput else {
             // The UI disables save while saveBlocker is non-nil; reaching
@@ -214,7 +282,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         defer { isSaving = false }
 
         do {
-            _ = try await api.confirmReceipt(id: receiptId, ConfirmReceiptRequest(
+            try await saveAction(ConfirmedReceiptFields(
                 purchasedAt: ReceiptFormat.isoDate(fromPicker: purchasedDate),
                 vendor: normalized(vendorText),
                 vendorTaxNumber: normalized(taxNumberText),

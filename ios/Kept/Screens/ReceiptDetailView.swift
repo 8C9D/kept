@@ -137,7 +137,7 @@ struct ReceiptDetailView: View {
                 // The same component the confirm screen renders, so the
                 // two screens' image behaviour cannot drift (wave-4
                 // reviewer pass: this block was its copy).
-                ReceiptImageView(url: image.downloadUrl)
+                ReceiptImageView(source: .remote(image.downloadUrl))
             }
         }
     }

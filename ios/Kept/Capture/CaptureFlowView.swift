@@ -1,16 +1,19 @@
 import SwiftUI
 
-/// The capture journey (spec §7.4): scanner → per-page save into the
-/// outbox → straight back to Home. Saving is a local disk write, so this
-/// screen is on screen for moments; the outbox uploads behind Home, where
-/// queued items show with their status, and confirmation happens from the
-/// pending badge once each receipt reaches the server. One receipt or a
-/// batch of eighty follows the same path, because a single capture is a
-/// batch of one (spec §6A).
+/// The capture journey, split by the wave-5 gate ratification:
+///
+/// - **One page**: scanner → on-device read → the §7.2 confirm screen,
+///   right there, because confirming in the moment is the §1 success
+///   test. Its Save is a durable disk write into the outbox (a confirmed
+///   receipt; the upload happens behind Home), so nothing here ever waits
+///   on the network. "Later" queues it pending instead.
+/// - **A batch**: every page queues pending immediately and Home returns
+///   at once; the stack is worked down through the confirm queue
+///   afterwards (spec §6A).
 struct CaptureFlowView: View {
     private enum Stage {
         case scanning
-        case saving
+        case handlingPages
     }
 
     @StateObject private var captureModel: CaptureFlowModel
@@ -21,7 +24,10 @@ struct CaptureFlowView: View {
     private let onFinished: (_ didChangeAnything: Bool) -> Void
 
     init(outbox: OutboxController, onFinished: @escaping (_ didChangeAnything: Bool) -> Void) {
-        _captureModel = StateObject(wrappedValue: CaptureFlowModel(outbox: outbox))
+        _captureModel = StateObject(wrappedValue: CaptureFlowModel(
+            outbox: outbox,
+            recognizer: VisionReceiptTextRecognizer()
+        ))
         self.onFinished = onFinished
     }
 
@@ -38,28 +44,53 @@ struct CaptureFlowView: View {
                     // the person re-tap Capture beats a dead-end alert.
                     onFinished(false)
                 case .scanned(let pages):
-                    stage = .saving
+                    stage = .handlingPages
                     Task { await captureModel.savePages(pages) }
                 }
             }
             .ignoresSafeArea()
 
-        case .saving:
-            savingBody
+        case .handlingPages:
+            pagesBody
         }
     }
 
     @ViewBuilder
-    private var savingBody: some View {
+    private var pagesBody: some View {
         switch captureModel.phase {
-        case .idle, .saving:
+        case .idle, .reading:
             VStack(spacing: 12) {
                 ProgressView()
-                if case .saving(let pageNumber, let pageCount) = captureModel.phase, pageCount > 1 {
+                Text("Reading receipt…")
+                    .font(.headline)
+                Text("On this device - no connection needed.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        case .confirming(let confirmModel):
+            NavigationStack {
+                ConfirmReceiptView(
+                    model: confirmModel,
+                    onSaved: {
+                        // The saveAction already queued the confirmed
+                        // receipt durably; straight back to Home, no
+                        // success modal (§10A.1).
+                        captureModel.finishSingleCapture()
+                    },
+                    onSetAside: {
+                        await captureModel.setAsideSingleCapture()
+                    }
+                )
+            }
+            .interactiveDismissDisabled()
+
+        case .saving:
+            VStack(spacing: 12) {
+                ProgressView()
+                if case .saving(let pageNumber, let pageCount) = captureModel.phase {
                     Text("Saving receipt \(pageNumber) of \(pageCount)…")
-                        .font(.headline)
-                } else {
-                    Text("Saving receipt…")
                         .font(.headline)
                 }
                 Text("Saved on this phone; uploads on its own.")
