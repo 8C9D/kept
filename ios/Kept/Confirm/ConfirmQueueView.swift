@@ -41,7 +41,15 @@ struct ConfirmQueueView: View {
                 .id(model.receiptId)
 
             case .done(let setAsideCount):
-                queueDone(setAsideCount: setAsideCount)
+                // A summary earns its screen only when a batch was worked
+                // down or something was set aside and needs saying. After
+                // a single confirm - the everyday case - any recap is a
+                // success modal, which §10A.1 forbids: straight to Home.
+                if queue.handledCount > 1 || setAsideCount > 0 {
+                    queueDone(setAsideCount: setAsideCount)
+                } else {
+                    Color.clear.onAppear { onFinished() }
+                }
             }
         }
     }

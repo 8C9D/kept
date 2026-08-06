@@ -3,6 +3,24 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - Wave-4 gate review (the owner)
+
+**The parser assembles printed rows from Vision fragments before any heuristic runs; `ocr_raw_text` stores the assembled rows.**
+Rejected: per-heuristic cross-observation matching (the same band-pairing logic duplicated six times), and shipping raw fragments in `ocr_raw_text` (a future re-parse would inherit the unpairable-columns problem the fix exists to solve).
+Why: on the first real thermal receipt, "Subtotal"/"13.50" and "HST"/"1.76" were separate observations across a wide gap - unmatchable by any within-one-string heuristic - while every contiguous field parsed; merging fragments whose vertical centers sit within half the taller fragment's height, ordered left to right, makes the §7.3 heuristics see what the paper shows. Stated limit: validated against one sample; the accuracy table re-checks it (spec §7.3 note).
+
+**The queue's done screen appears only when the sitting handled more than one receipt or set one aside; a single confirm returns straight to Home.**
+Rejected: the wave-4 shape (a "Queue clear" screen after every queue run - a success modal on the everyday single-capture path, which §10A.1 forbids; the owner's finding), and dropping the summary entirely (a worked-down batch and set-asides genuinely have something to say).
+Why: the recap earns a screen only when there is something to recap.
+
+**Confirm-screen and Home layout: the business/personal row keeps default list insets; the capture button's label is an explicit HStack.**
+Rejected: zero row insets under the choice buttons (put their rounded strokes on the row's clip bounds, cutting them flat - The owner's finding), and `Label` for the capture button (inside a `List`, `Label` reserves a leading icon column and renders left-shifted).
+Why: both were found on device; the full-bleed zero-inset treatment remains only on the image row, which has no strokes to clip.
+
+**The ten-receipt accuracy session is waived; the per-field table accrues through real use.**
+Rejected: blocking the gate on a staged capture session.
+Why: the owner's call at the gate - `parse-accuracy` reads every confirmed receipt with a suggestion record, so ordinary use produces the same table with better variety; the number remains the §7.3 trigger data either way.
+
 ## 2026-08-06 - Wave 4
 
 **Integration tests run against `kept_test` (TEST_DATABASE_URL), and the setup refuses a config that resolves to the dev database.**

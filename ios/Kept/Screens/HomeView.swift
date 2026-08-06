@@ -81,10 +81,17 @@ struct HomeView: View {
             Button {
                 showCaptureFlow = true
             } label: {
-                Label("Capture", systemImage: "doc.viewfinder")
-                    .font(.title3.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
+                // An explicit HStack, not Label: inside a List, Label
+                // reserves a leading icon column and renders left-shifted
+                // (wave-4 device run, the owner's finding 2 - the label was
+                // visibly off-center).
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.viewfinder")
+                    Text("Capture")
+                }
+                .font(.title3.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent)
             .disabled(!DocumentScannerView.isSupported)

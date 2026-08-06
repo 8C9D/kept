@@ -14,10 +14,13 @@ import Foundation
 /// heuristic is rewritten or a cloud parser is added later.
 enum ReceiptParser {
     static func parse(lines unorderedLines: [RecognizedLine]) -> ReceiptSuggestions {
-        // Reading order, top of the receipt first. The plumbing already
-        // sorts, but "first date" and "topmost" must not depend on a
-        // caller remembering to.
-        let lines = unorderedLines.sorted { $0.verticalCenter < $1.verticalCenter }
+        // Reassemble printed rows first: a thermal receipt's "Subtotal"
+        // and its amount arrive as separate fragments, and every heuristic
+        // below matches label and amount within one string. Sorting and
+        // assembly happen here as well as in the plumbing, so neither
+        // depends on the caller remembering (assembly is stable on
+        // already-assembled rows).
+        let lines = ReceiptRowAssembler.assembleRows(unorderedLines)
 
         return ReceiptSuggestions(
             totalCents: total(in: lines),

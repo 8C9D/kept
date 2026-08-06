@@ -48,6 +48,26 @@ final class ConfirmQueueModelTests: XCTestCase {
         XCTAssertEqual(setAsideCount, 0)
     }
 
+    func testHandledCountDrivesTheSummaryRule() async {
+        // §10A.1: a single confirmed receipt must return straight to Home
+        // (the view shows a summary only for handledCount > 1 or set-
+        // asides); the model's count is what that decision reads.
+        let only = Fixtures.receipt(isBusiness: nil, status: .pending)
+        stubPendingList([only], pendingCount: 1)
+
+        await queue.loadNext()
+        XCTAssertEqual(queue.handledCount, 0)
+
+        stubPendingList([], pendingCount: 0)
+        await queue.advanceAfterSave()
+
+        XCTAssertEqual(queue.handledCount, 1)
+        guard case .done(let setAsideCount) = queue.phase else {
+            return XCTFail("Expected done, got \(queue.phase)")
+        }
+        XCTAssertEqual(setAsideCount, 0)
+    }
+
     func testSetAsideSkipsTheReceiptForTheRestOfTheSitting() async {
         let first = Fixtures.receipt(isBusiness: nil, status: .pending)
         let second = Fixtures.receipt(isBusiness: nil, status: .pending)
@@ -68,6 +88,7 @@ final class ConfirmQueueModelTests: XCTestCase {
             return XCTFail("Expected done, got \(queue.phase)")
         }
         XCTAssertEqual(setAsideCount, 2)
+        XCTAssertEqual(queue.handledCount, 2) // set-asides were dealt with too
     }
 
     func testAFailedFetchStatesItselfAndRetries() async {

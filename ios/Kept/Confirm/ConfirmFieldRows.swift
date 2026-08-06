@@ -62,7 +62,10 @@ struct BusinessPersonalPicker: View {
             choiceButton(title: "Personal", value: false)
         }
         .listRowBackground(Color.clear)
-        .listRowInsets(EdgeInsets())
+        // Default row insets, deliberately: with zero insets the buttons
+        // ran to the row's clip bounds and the outer rounded strokes were
+        // cut flat at both edges (wave-4 device run, the owner's finding 4).
+        // Inside the insets, nothing is clipped.
     }
 
     @ViewBuilder

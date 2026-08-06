@@ -50,17 +50,20 @@ struct VisionReceiptTextRecognizer: ReceiptTextRecognizer {
             }
             // Vision's boundingBox is normalized with the origin at the
             // BOTTOM-left; RecognizedLine's verticalCenter is 0 at the TOP
-            // (how a person reads a receipt), hence the flip.
+            // (how a person reads a receipt), hence the flip. Horizontal
+            // needs no flip.
             let box = observation.boundingBox
             return RecognizedLine(
                 text: candidate.string,
                 verticalCenter: 1.0 - box.midY,
-                height: box.height
+                height: box.height,
+                horizontalCenter: box.midX
             )
         }
-        // Reading order for the stored raw text and the parser alike.
-        .sorted { $0.verticalCenter < $1.verticalCenter }
 
-        return RecognizedText(lines: lines)
+        // Rows as printed, not fragments as recognized: this is what lets
+        // the stored raw text keep "Subtotal 13.50" together for a future
+        // re-parse, and the parser assembles again anyway (stable).
+        return RecognizedText(lines: ReceiptRowAssembler.assembleRows(lines))
     }
 }

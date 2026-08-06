@@ -115,8 +115,17 @@ The script - single capture first, then batch, then the queue, then the number:
 10. **The ten receipts (§9's gate).** Capture ten real receipts of varied quality - crisp, crumpled, faded, long, a printed PDF-style one - and confirm each, *correcting every wrong field as you would in real use* (that IS the measurement; also confirm-unchanged a correct suggestion rather than retyping it). Include at least one no-HST receipt and one handwritten-or-hopeless one.
 11. **The number.** On the Mac: `cd ~/dev/kept/server && npm run parse-accuracy`. **Pass:** a per-field table (total · date · vendor · hst · subtotal · tax number) with accuracy percentages over your confirmed receipts, plus every correction listed with suggested vs confirmed values. **Paste that table into §8 below - it is the parser's specification from now on (§7.3), and the trigger data for any future cloud parser.**
 
-## 8 · Device verification - PENDING (the owner)
+## 8 · Device verification - PASSED with findings (the owner, 2026-08-06)
 
-Awaiting the §7 run. Record: pass/fail per step, deviations, and the parse-accuracy table verbatim.
+Run: one real receipt end to end (a thermal restaurant receipt) rather than the staged ten - **the owner waived the ten-receipt session; the accuracy table accrues through real use of `npm run parse-accuracy`**, which reads every confirmed receipt with a suggestion record, so ordinary use produces the same number with better variety. The path itself passed: build and install over `devicectl`, capture through the real scanner, on-device OCR, the confirm screen against the presigned MinIO image via the Mac's `.local` name, and a confirmed row in the database.
 
-**Do not begin wave 5** (per the kickoff: stop here).
+Four findings returned, all fixed same-day (decisions and rejected alternatives in `DECISIONS.md`):
+
+1. **Spec violation - the "Queue clear" screen was a success modal.** §10A.1 forbids exactly this on a five-second task, and I built it anyway on the everyday single-capture path. A single confirm now returns straight to Home; the summary appears only when the sitting handled more than one receipt or set one aside. That this shipped past my own §10A.1 checklist is the wave's most instructive miss: I checked "no success modal after *saving*" and did not read the queue-done screen as one.
+2. **Capture button label off-center.** `Label` inside a `List` reserves a leading icon column; replaced with an explicit centered HStack.
+3. **Two-column thermal layouts defeated the §7.3 heuristics** - subtotal and HST unparsed on the device receipt while contiguous fields (vendor, date, tax number) succeeded, and the total survived only via the lower-third fallback. Diagnosis confirmed against the stored `ocr_raw_text`: label and amount are separate Vision observations across a wide gap, and every heuristic matched within one string. Fixed with `ReceiptRowAssembler` - fragments sharing a vertical band (within half the taller fragment's height) merge into printed rows, left to right by bounding box - run both in the plumbing (so stored raw text keeps the pairing for future re-parses) and in the parser (stable on assembled input). The real receipt's recognized text is now a fixture: subtotal 13.50, HST 1.76, and total 15.25 all parse from their labelled rows. ⚠ Validated against one sample; the spec's §7.3 note flags re-checking the band rule as the accuracy table fills.
+4. **Business/personal buttons' rounded strokes clipped flat at the row edges.** Zero list-row insets put the strokes on the clip bounds; default insets restored. Per the owner's instruction the confirm screen's layout was reviewed as a whole rather than symptom-patched: the only remaining zero-inset row is the image (full-bleed by intent, nothing to clip), and the save section and total card sit inside default insets.
+
+Suites after all changes: server 150 green, iOS 122 green (row assembler + real-receipt fixture + queue summary-rule tests added), zero warnings; fixed build reinstalled on the device.
+
+**The wave-4 gate is closed pending the accruing accuracy table.** Wave 5 not started (per the kickoff).

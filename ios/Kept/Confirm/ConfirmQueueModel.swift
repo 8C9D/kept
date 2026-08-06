@@ -20,6 +20,12 @@ final class ConfirmQueueModel: ObservableObject {
     /// The user's total pending count, from the same server field as the
     /// Home badge - "3 left" over the queue is that number.
     @Published private(set) var pendingCount: Int?
+    /// Receipts this sitting has dealt with - confirmed or set aside.
+    /// The done screen shows a summary only when there was a batch to
+    /// summarize; after a single capture it must return straight to Home,
+    /// because a one-line recap of a five-second task is the success modal
+    /// §10A.1 forbids (wave-4 device run, the owner's finding 1).
+    @Published private(set) var handledCount = 0
 
     private let api: any KeptAPI
     /// Receipts set aside this sitting. Server-side they stay pending;
@@ -66,12 +72,14 @@ final class ConfirmQueueModel: ObservableObject {
     func setAsideCurrent() async {
         if case .confirming(let model) = phase {
             setAsideIds.insert(model.receiptId)
+            handledCount += 1
         }
         await loadNext()
     }
 
     /// Called by the view after the current form saves successfully.
     func advanceAfterSave() async {
+        handledCount += 1
         await loadNext()
     }
 }
