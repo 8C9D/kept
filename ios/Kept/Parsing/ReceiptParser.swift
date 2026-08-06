@@ -52,31 +52,71 @@ enum ReceiptParser {
 
     // MARK: - HST
 
-    /// The amount on the first line naming the tax. "HST"/"GST" outrank a
-    /// bare "TAX", which also appears in phrases like "total before tax" -
-    /// so tax-labelled lines that mention a total are skipped.
+    /// The GST/HST program amount - the input tax credit field, where a
+    /// wrong-but-plausible suggestion is more dangerous than a missing
+    /// one: an absence demands attention, a 0.00 gets ticked past.
+    ///
+    /// Labels are ranked, never lumped (wave-5 device step 1: a receipt
+    /// printing "GST $0.00" above "HST $2.05" put the GST zero into this
+    /// field under the old any-of-HST|GST|TAX first match):
+    ///
+    ///   non-zero HST > non-zero GST > non-zero TAX >
+    ///   zero HST     > zero GST     > zero TAX
+    ///
+    /// HST outranks GST because it is the more specific label and the
+    /// harmonized amount already contains the federal part - a receipt
+    /// printing both non-zero is charging the tax twice, and preferring
+    /// the HST row leaves the arithmetic warning to surface that. A GST
+    /// row still suggests into this field when it is the only tax printed
+    /// (a non-harmonized province): GST and HST are one CRA program,
+    /// claimed on the same return line. Every zero is demoted below every
+    /// non-zero because an explicit 0.00 beside a non-zero sibling label
+    /// means the tax was charged under the sibling program - the wave-5
+    /// receipt exactly, and its GST-province mirror - while a receipt
+    /// whose every tax row is zero genuinely charged none, and suggesting
+    /// that zero is honest. Within one tier, the topmost row wins.
     private static func hst(in lines: [RecognizedLine]) -> Int? {
         let candidates = lines.filter { !isSubtotalLine($0.text) }
-        if let hstLine = candidates.first(where: { line in
-            (containsWord("hst", in: line.text) || containsWord("gst", in: line.text))
-                && ReceiptAmount.lastAmount(in: line.text) != nil
-        }) {
-            return ReceiptAmount.lastAmount(in: hstLine.text)
+
+        func amount(labelled label: String, allowZero: Bool, excludingTotalLines: Bool) -> Int? {
+            for line in candidates {
+                guard containsWord(label, in: line.text) else { continue }
+                if excludingTotalLines && containsWord("total", in: line.text) { continue }
+                guard let amount = ReceiptAmount.lastAmount(in: line.text) else { continue }
+                if amount == 0 && !allowZero { continue }
+                return amount
+            }
+            return nil
         }
-        if let taxLine = candidates.first(where: { line in
-            containsWord("tax", in: line.text)
-                && !containsWord("total", in: line.text)
-                && ReceiptAmount.lastAmount(in: line.text) != nil
-        }) {
-            return ReceiptAmount.lastAmount(in: taxLine.text)
+
+        for allowZero in [false, true] {
+            if let hst = amount(labelled: "hst", allowZero: allowZero, excludingTotalLines: false) {
+                return hst
+            }
+            if let gst = amount(labelled: "gst", allowZero: allowZero, excludingTotalLines: false) {
+                return gst
+            }
+            // A bare "tax" also appears in phrases like "total before
+            // tax", so tax-labelled lines that mention a total are
+            // skipped - unchanged from wave 4.
+            if let tax = amount(labelled: "tax", allowZero: allowZero, excludingTotalLines: true) {
+                return tax
+            }
         }
         return nil
     }
 
     // MARK: - Subtotal
 
+    /// The bottom-most subtotal-labelled row. Audited alongside the HST
+    /// fix for first-match-among-several-candidates: a long receipt can
+    /// print section subtotals above its summary block, and the summary
+    /// subtotal - the one the arithmetic check compares - prints last,
+    /// beside the taxes and total. A single-subtotal receipt, the common
+    /// case, is unaffected. No real receipt has exercised the
+    /// multi-subtotal case yet; the accuracy table arbitrates this guess.
     private static func subtotal(in lines: [RecognizedLine]) -> Int? {
-        guard let line = lines.first(where: { isSubtotalLine($0.text) }) else {
+        guard let line = lines.last(where: { isSubtotalLine($0.text) }) else {
             return nil
         }
         return ReceiptAmount.lastAmount(in: line.text)

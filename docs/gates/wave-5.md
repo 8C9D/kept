@@ -113,6 +113,14 @@ Consequences worth naming: the capture-time confirm works fully **offline** - sc
 5. **⚠ Force-quit case.** Airplane ON, capture and confirm two receipts (papers 4-5), force-quit the app, airplane OFF, reopen. **Pass:** both rows reappear, drain, and arrive confirmed exactly once each.
 6-10. **Unchanged from §8** (stuck items and manual retry; kill mid-upload; the pocket case; the discard surface; server-side truth via psql and `parse-accuracy` - which now has three confirmed-at-capture receipts with suggestion records to read).
 
-## 10 · Stopping here
+## 10 · Device script step 1 (the owner, 2026-08-06): one parser finding, fixed
 
-Wave 6 not started. The next session, per kickoff §7, is **the consolidated security review** (§7 above), then wave 6. The wave-5 gate closes when the device script (§9's version) passes on the phone.
+The first receipt through the ratified flow (Food Court, thermal) parsed date, vendor, subtotal 15.79, total 17.84, and the tax number correctly, and the arithmetic warning fired as designed - **but HST suggested 0.00 against a true 2.05**: the receipt prints "GST: $0.00" above "HST: $2.05", and §7.3's lumped `HST|GST|TAX` first-match took the GST row. The owner's framing is now doctrine for this field: *a wrong-but-plausible value is more dangerous than a missing one* - amber demands attention, but 0.00 can be ticked past, and this field is the input tax credit.
+
+Fixed same-day: labels ranked, never lumped - non-zero HST > non-zero GST > non-zero TAX, then their zeros in the same order (the zero demotion kills the bug's mirror image in GST provinces); both-non-zero prefers HST with the arithmetic warning surfacing the double charge. The commissioned audit of every several-candidates heuristic moved subtotal to bottom-most-match and recorded total/date/vendor/tax-number as deliberate. Rule and rejected alternatives in `DECISIONS.md`; spec §7.3 updated. Six new rule tests; iOS 168 green, zero warnings.
+
+**Two honest debts.** (1) The real-geometry fixture the wave-4 rule demands does not exist yet: the step-1 scan was never queued (the session ended without a completed Save - the Outbox directory on the phone is empty, and no row or image reached the server), so there are no bytes to re-run Vision over. The rule tests are labelled as synthetic; the fixture lands when the re-test's upload provides the image, one command via the newly committed `ios/Tools/vision-dump.swift` (smoke-tested against the stored wave-4 receipt). (2) Because nothing was queued, **the outbox's device behaviour is still unexercised** - the re-test's Save is its first real run. If a row lingers under "Will retry", the message on it is the diagnostic to report.
+
+## 11 · Stopping here
+
+Wave 6 not started. The next session, per kickoff §7, is **the consolidated security review** (§7 above), then wave 6. The wave-5 gate closes when the device script (§9's version) passes on the phone, resuming from step 1.

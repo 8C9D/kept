@@ -3,6 +3,16 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - Wave-5 device step 1 (the owner): HST/GST label priority
+
+**Tax labels are ranked, never lumped: non-zero HST > non-zero GST > non-zero TAX > zero HST > zero GST > zero TAX; topmost within a tier; total-mentioning TAX lines stay excluded.**
+Rejected: the wave-4 shape (one `HST|GST` pattern, first match - The owner's Food Court receipt printed "GST: $0.00" above "HST: $2.05" and the GST zero landed in the HST field, the input tax credit, where a wrong-but-plausible 0.00 gets ticked past while an absence demands attention); summing HST and GST rows (invents a number no row printed); and pure label priority without the zero demotion (its mirror image - "HST $0.00" above a charged GST row in a non-harmonized province - reproduces the identical bug the other way around).
+Why: HST is the more specific label and the harmonized amount already contains the federal part, so when both are non-zero - a receipt charging the tax twice - the HST row wins and the arithmetic warning surfaces the mess. A lone GST row still suggests into the field: GST and HST are one CRA program, claimed on the same return line. An explicit zero beside a non-zero sibling label is a shadow of the sibling program; an all-zero tax block is a genuinely exempt receipt, whose zero is the honest suggestion.
+
+**The same audit ran over every heuristic that could face several labelled candidates.** Subtotal moved from first to **bottom-most** matching row (section subtotals print above the summary block; the summary subtotal is what the arithmetic check compares; single-subtotal receipts unaffected; flagged as evidence-free until a real multi-subtotal receipt lands in the accuracy table). Left deliberate as-is, now with the reasoning recorded: total (largest across all total-labelled lines - "largest" already resolves multiplicity), date (first parseable, top-third preferred - wave-4 tested), vendor (topmost-of-near-tallest band - wave-4 second pass), tax number (topmost match - the supplier prints its own number in the header block, above any other party's).
+
+**The fixture debt is stated, not papered over.** The Food Court scan was never queued (the step-1 session ended without a completed Save, by design losing only the in-memory scan), so its bytes exist nowhere to re-run Vision over - the wave-4 rule demands real geometry, and there is none to be had. The fix carries rule tests over synthetic rows, explicitly labelled as such, and the real-dump fixture lands when the re-test uploads the receipt. `ios/Tools/vision-dump.swift` is now a committed tool (smoke-tested against the stored wave-4 receipt) so that dump is one command.
+
 ## 2026-08-06 - Wave-5 gate ratification (the owner)
 
 **Ratified: §7.4's worker is app-lifecycle-driven, with no OS background execution.**

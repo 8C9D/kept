@@ -180,6 +180,87 @@ final class ReceiptParserTests: XCTestCase {
         XCTAssertNil(suggestions.hstCents)
     }
 
+    // MARK: - HST label priority (wave-5 device step 1)
+
+    func testLabelledZeroGstRowDoesNotShadowTheHstRow() {
+        // Reconstructed from the wave-5 device receipt: a
+        // tax block printing "GST: $0.00" above "HST: $2.05" suggested
+        // the GST zero into the HST field - the input tax credit - under
+        // the old lumped HST|GST|TAX first match. ⚠ NOT a Vision dump:
+        // that scan was never queued, so its bytes exist nowhere to
+        // re-run Vision over; the real-geometry fixture is owed and
+        // lands with the device re-test (DECISIONS.md).
+        let suggestions = ReceiptParser.parse(lines: [
+            line("Subtotal $15.79", y: 0.60),
+            line("GST: $0.00", y: 0.64),
+            line("HST: $2.05", y: 0.68),
+            line("Total: $17.84", y: 0.72),
+        ])
+        XCTAssertEqual(suggestions.hstCents, 205)
+        XCTAssertEqual(suggestions.subtotalCents, 1579)
+        XCTAssertEqual(suggestions.totalCents, 1784)
+    }
+
+    func testGstOnlyReceiptSuggestsTheGstAmount() {
+        // A non-harmonized province prints GST alone; it is the same CRA
+        // program and belongs in this field.
+        let suggestions = ReceiptParser.parse(lines: [
+            line("SUBTOTAL 12.00", y: 0.60),
+            line("GST 0.60", y: 0.65),
+            line("TOTAL 12.60", y: 0.70),
+        ])
+        XCTAssertEqual(suggestions.hstCents, 60)
+    }
+
+    func testZeroHstRowLosesToTheNonZeroGstRow() {
+        // The wave-5 receipt's mirror image: the zero is the shadow, the
+        // sibling label carries the tax actually charged.
+        let suggestions = ReceiptParser.parse(lines: [
+            line("HST: $0.00", y: 0.62),
+            line("GST: $0.60", y: 0.66),
+            line("TOTAL 12.60", y: 0.72),
+        ])
+        XCTAssertEqual(suggestions.hstCents, 60)
+    }
+
+    func testBothTaxesNonZeroPreferTheHstRow() {
+        // A receipt charging both is charging the tax twice; the HST row
+        // wins as the more specific label, and the arithmetic warning is
+        // what surfaces the mess (rule recorded in DECISIONS.md).
+        let suggestions = ReceiptParser.parse(lines: [
+            line("GST 0.60", y: 0.62),
+            line("HST 2.05", y: 0.66),
+            line("TOTAL 20.00", y: 0.72),
+        ])
+        XCTAssertEqual(suggestions.hstCents, 205)
+    }
+
+    func testAllZeroTaxRowsSuggestTheHonestZero() {
+        // An exempt receipt genuinely charged no tax: zero is the truth
+        // here, not a shadowing artifact.
+        let suggestions = ReceiptParser.parse(lines: [
+            line("GST $0.00", y: 0.62),
+            line("HST $0.00", y: 0.66),
+            line("TOTAL 10.00", y: 0.72),
+        ])
+        XCTAssertEqual(suggestions.hstCents, 0)
+    }
+
+    func testMultipleSubtotalRowsPreferTheBottomMost() {
+        // The same audit's subtotal finding: section subtotals print
+        // above the summary block, and the summary subtotal - the one
+        // the arithmetic check compares - prints last, beside the taxes.
+        let suggestions = ReceiptParser.parse(lines: [
+            line("GROCERY SUBTOTAL 20.00", y: 0.40),
+            line("PHARMACY SUBTOTAL 10.00", y: 0.50),
+            line("SUBTOTAL 30.00", y: 0.62),
+            line("HST 3.90", y: 0.66),
+            line("TOTAL 33.90", y: 0.72),
+        ])
+        XCTAssertEqual(suggestions.subtotalCents, 3000)
+        XCTAssertEqual(suggestions.totalCents, 3390)
+    }
+
     // MARK: - Tax number heuristics
 
     func testBareNineDigitsNeedsAGstLabel() {
