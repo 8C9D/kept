@@ -44,12 +44,20 @@ struct ReceiptDetailView: View {
             // lands.
             Section {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(ReceiptFormat.money(
-                        cents: detail.receipt.totalCents,
-                        currency: detail.receipt.currency
-                    ))
-                    .font(.largeTitle.bold())
-                    .monospacedDigit()
+                    if let totalCents = detail.receipt.totalCents {
+                        Text(ReceiptFormat.money(
+                            cents: totalCents,
+                            currency: detail.receipt.currency
+                        ))
+                        .font(.largeTitle.bold())
+                        .monospacedDigit()
+                    } else {
+                        // Only a pending scan can lack a total; stated, in
+                        // the same large type the number would occupy.
+                        Text("No total yet")
+                            .font(.largeTitle.bold())
+                            .foregroundStyle(.secondary)
+                    }
                     HStack(spacing: 8) {
                         Text("Total")
                             .font(.caption)
@@ -69,7 +77,10 @@ struct ReceiptDetailView: View {
                 FieldRow(label: "Subtotal", value: money(detail.receipt.subtotalCents, detail.receipt.currency))
                 FieldRow(label: "Other tax", value: money(detail.receipt.otherTaxCents, detail.receipt.currency))
                 FieldRow(label: "Tax number", value: detail.receipt.vendorTaxNumber)
-                FieldRow(label: "Type", value: detail.receipt.isBusiness ? "Business" : "Personal")
+                FieldRow(
+                    label: "Type",
+                    value: detail.receipt.isBusiness.map { $0 ? "Business" : "Personal" }
+                )
                 FieldRow(label: "Category", value: detail.receipt.category)
                 FieldRow(label: "Payment", value: detail.receipt.paymentMethod)
                 FieldRow(label: "Notes", value: detail.receipt.notes)
@@ -88,26 +99,10 @@ struct ReceiptDetailView: View {
                 .foregroundStyle(.secondary)
         } else {
             ForEach(images, id: \.page) { image in
-                AsyncImage(url: image.downloadUrl) { phase in
-                    switch phase {
-                    case .empty:
-                        CenteredProgressRow()
-                            .frame(minHeight: 180)
-                    case .success(let loaded):
-                        loaded
-                            .resizable()
-                            .scaledToFit()
-                    case .failure:
-                        Label(
-                            "The image could not be loaded.",
-                            systemImage: "photo.badge.exclamationmark"
-                        )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    @unknown default:
-                        EmptyView()
-                    }
-                }
+                // The same component the confirm screen renders, so the
+                // two screens' image behaviour cannot drift (wave-4
+                // reviewer pass: this block was its copy).
+                ReceiptImageView(url: image.downloadUrl)
             }
         }
     }

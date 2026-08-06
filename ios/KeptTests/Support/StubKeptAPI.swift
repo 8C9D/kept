@@ -12,6 +12,10 @@ final class StubKeptAPI: KeptAPI {
     var signInHandler: ((_ identityToken: String, _ displayName: String?) async throws -> SignInResponse)?
     var receiptsPageHandler: ((_ cursor: String?, _ status: ReceiptStatus?, _ limit: Int?) async throws -> ReceiptListPage)?
     var receiptDetailHandler: ((_ id: UUID) async throws -> ReceiptDetail)?
+    var uploadTargetHandler: ((_ contentType: ImageUploadContentType) async throws -> UploadTarget)?
+    var uploadImageHandler: ((_ target: UploadTarget, _ data: Data, _ contentType: ImageUploadContentType) async throws -> Void)?
+    var createReceiptHandler: ((_ request: CreateReceiptRequest) async throws -> Receipt)?
+    var confirmReceiptHandler: ((_ id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt)?
 
     /// ReceiptListModel fetches its first page and the pending probe with
     /// `async let`, so two tasks call receiptsPage concurrently; the call
@@ -19,9 +23,19 @@ final class StubKeptAPI: KeptAPI {
     /// reviewer finding.)
     private let callLock = NSLock()
     private var recordedReceiptsPageCalls: [(cursor: String?, status: ReceiptStatus?, limit: Int?)] = []
+    private var recordedCreateReceiptCalls: [CreateReceiptRequest] = []
+    private var recordedConfirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] = []
 
     var receiptsPageCalls: [(cursor: String?, status: ReceiptStatus?, limit: Int?)] {
         callLock.withLock { recordedReceiptsPageCalls }
+    }
+
+    var createReceiptCalls: [CreateReceiptRequest] {
+        callLock.withLock { recordedCreateReceiptCalls }
+    }
+
+    var confirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] {
+        callLock.withLock { recordedConfirmReceiptCalls }
     }
 
     func signInWithApple(identityToken: String, displayName: String?) async throws -> SignInResponse {
@@ -38,5 +52,27 @@ final class StubKeptAPI: KeptAPI {
     func receiptDetail(id: UUID) async throws -> ReceiptDetail {
         guard let receiptDetailHandler else { throw UnstubbedCall(endpoint: "receiptDetail") }
         return try await receiptDetailHandler(id)
+    }
+
+    func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget {
+        guard let uploadTargetHandler else { throw UnstubbedCall(endpoint: "uploadTarget") }
+        return try await uploadTargetHandler(contentType)
+    }
+
+    func uploadImage(to target: UploadTarget, data: Data, contentType: ImageUploadContentType) async throws {
+        guard let uploadImageHandler else { throw UnstubbedCall(endpoint: "uploadImage") }
+        try await uploadImageHandler(target, data, contentType)
+    }
+
+    func createReceipt(_ request: CreateReceiptRequest) async throws -> Receipt {
+        callLock.withLock { recordedCreateReceiptCalls.append(request) }
+        guard let createReceiptHandler else { throw UnstubbedCall(endpoint: "createReceipt") }
+        return try await createReceiptHandler(request)
+    }
+
+    func confirmReceipt(id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt {
+        callLock.withLock { recordedConfirmReceiptCalls.append((id, request)) }
+        guard let confirmReceiptHandler else { throw UnstubbedCall(endpoint: "confirmReceipt") }
+        return try await confirmReceiptHandler(id, request)
     }
 }

@@ -7,10 +7,13 @@ import { isUniqueViolation } from "../db/errors.js";
 import { visibleTo } from "../db/receiptQueries.js";
 import { receiptImages, receipts } from "../db/schema.js";
 import { ApiError, notFoundError } from "../http/errors.js";
+import type { z } from "zod";
+import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
 import {
   createReceiptSchema,
   listCursorSchema,
   listReceiptsQuerySchema,
+  ocrSuggestionsSchema,
   updateReceiptSchema,
   uploadUrlSchema,
 } from "../http/schemas.js";
@@ -87,14 +90,18 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
             subtotalCents: body.subtotalCents ?? null,
             hstCents: body.hstCents ?? null,
             otherTaxCents: body.otherTaxCents ?? null,
-            totalCents: body.totalCents,
+            // Null while pending means "not read / not chosen yet" - stated
+            // absences, never fabricated values. The schema has already
+            // rejected a confirmed create missing either.
+            totalCents: body.totalCents ?? null,
             ...(body.currency !== undefined && { currency: body.currency }),
             ...(body.status !== undefined && { status: body.status }),
             category: body.category ?? null,
             paymentMethod: body.paymentMethod ?? null,
-            isBusiness: body.isBusiness,
+            isBusiness: body.isBusiness ?? null,
             notes: body.notes ?? null,
             ocrRawText: body.ocrRawText ?? null,
+            ocrSuggestions: normalizeOcrSuggestions(body.ocrSuggestions),
           })
           .returning();
         if (receipt === undefined) {
@@ -248,6 +255,10 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     return c.json({
       ...receiptResponse(receipt),
       ocrRawText: receipt.ocrRawText,
+      // The confirm screen marks exactly the fields the parser suggested
+      // (wave-4 reviewer pass): value-presence is a lying proxy once a
+      // fallback (the capture-day date) or a non-OCR writer exists.
+      ocrSuggestions: receipt.ocrSuggestions,
       images,
     });
   });
@@ -283,15 +294,58 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     if (body.status !== undefined) changes.status = body.status;
     if (body.ocrRawText !== undefined) changes.ocrRawText = body.ocrRawText;
 
-    const updated = await deps.db
-      .update(receipts)
-      .set(changes)
-      .where(and(eq(receipts.id, id), visibleTo(userId)))
-      .returning();
-    const updatedReceipt = updated[0];
-    if (updatedReceipt === undefined) {
-      throw notFoundError();
-    }
+    // Read-check-write in one transaction: whether this edit leaves the
+    // receipt complete depends on the row's current values, not just the
+    // patch. The database's check constraint backstops this; the point of
+    // doing it here is a clean 400 naming the missing field.
+    const updatedReceipt = await deps.db.transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(receipts)
+        .where(and(eq(receipts.id, id), visibleTo(userId)))
+        .for("update");
+      const existing = rows[0];
+      if (existing === undefined) {
+        throw notFoundError();
+      }
+
+      const resulting = {
+        status: body.status ?? existing.status,
+        totalCents:
+          body.totalCents !== undefined ? body.totalCents : existing.totalCents,
+        isBusiness:
+          body.isBusiness !== undefined ? body.isBusiness : existing.isBusiness,
+      };
+      if (resulting.status === "confirmed") {
+        if (resulting.totalCents === null) {
+          throw new ApiError(
+            400,
+            "invalid_request",
+            "a confirmed receipt requires a total",
+          );
+        }
+        if (resulting.isBusiness === null) {
+          throw new ApiError(
+            400,
+            "invalid_request",
+            "a confirmed receipt requires a business-or-personal choice",
+          );
+        }
+      }
+
+      const updated = await tx
+        .update(receipts)
+        .set(changes)
+        .where(and(eq(receipts.id, id), visibleTo(userId)))
+        .returning();
+      const row = updated[0];
+      if (row === undefined) {
+        // The row was selected FOR UPDATE moments ago in this transaction;
+        // its absence means something is genuinely broken.
+        throw new Error("Receipt update returned no row");
+      }
+      return row;
+    });
     return c.json(receiptResponse(updatedReceipt));
   });
 
@@ -389,6 +443,27 @@ function decodeListCursor(encoded: string) {
     throw new ApiError(400, "invalid_request", "cursor is not valid");
   }
   return result.data;
+}
+
+/**
+ * The stored suggestion record has every field present so a later reader
+ * (the accuracy report, a future re-parse comparison) never distinguishes
+ * "key absent" from "parser found nothing" - they are the same fact.
+ */
+function normalizeOcrSuggestions(
+  suggestions: z.infer<typeof ocrSuggestionsSchema> | undefined,
+): OcrFieldSuggestions | null {
+  if (suggestions === undefined) {
+    return null;
+  }
+  return {
+    vendor: suggestions.vendor ?? null,
+    purchasedAt: suggestions.purchasedAt ?? null,
+    totalCents: suggestions.totalCents ?? null,
+    hstCents: suggestions.hstCents ?? null,
+    subtotalCents: suggestions.subtotalCents ?? null,
+    vendorTaxNumber: suggestions.vendorTaxNumber ?? null,
+  };
 }
 
 const EXTENSION_BY_CONTENT_TYPE = {

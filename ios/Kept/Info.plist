@@ -32,6 +32,8 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Kept uses the camera to scan paper receipts.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Kept connects to a development server on your local network during development builds.</string>
 	<key>UILaunchScreen</key>

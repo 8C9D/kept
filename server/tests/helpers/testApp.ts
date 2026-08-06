@@ -1,7 +1,12 @@
 import type { Hono } from "hono";
 import { createApp } from "../../src/app.js";
 import { createSessionTokens } from "../../src/auth/session.js";
-import { LOCAL_DEV_DATABASE_URL, createDb } from "../../src/db/client.js";
+import { createDb } from "../../src/db/client.js";
+import {
+  assertSeparateTestDatabase,
+  resolveDevDatabaseUrl,
+  resolveTestDatabaseUrl,
+} from "./testDatabase.js";
 import {
   exportJobs,
   receiptImages,
@@ -14,7 +19,10 @@ import {
   type FakeObjectStorage,
 } from "./fakeObjectStorage.js";
 
-const TEST_DATABASE_URL = process.env.DATABASE_URL ?? LOCAL_DEV_DATABASE_URL;
+// Guarded here as well as in globalSetup: a harness constructed outside
+// vitest (a future script, a REPL) must hit the same refusal.
+const TEST_DATABASE_URL = resolveTestDatabaseUrl(process.env);
+assertSeparateTestDatabase(TEST_DATABASE_URL, resolveDevDatabaseUrl(process.env));
 const TEST_SESSION_SECRET = "test-session-secret-0123456789abcdef";
 
 export interface TestHarness {

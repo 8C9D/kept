@@ -8,8 +8,10 @@ struct HomeView: View {
     @EnvironmentObject private var session: SessionController
     @StateObject private var model: ReceiptListModel
     @State private var showServerSettings = false
+    @State private var showCaptureFlow = false
+    @State private var showConfirmQueue = false
 
-    /// Kept only to hand onward to the detail screen.
+    /// Kept only to hand onward to the capture, confirm, and detail flows.
     private let api: APIClient
 
     init(api: APIClient) {
@@ -21,7 +23,7 @@ struct HomeView: View {
         NavigationStack {
             List {
                 Section {
-                    capturePlaceholder
+                    captureButton
                 }
 
                 Section {
@@ -55,15 +57,29 @@ struct HomeView: View {
             .sheet(isPresented: $showServerSettings) {
                 ServerSettingsView()
             }
+            .fullScreenCover(isPresented: $showCaptureFlow) {
+                CaptureFlowView(api: api) { didChangeAnything in
+                    showCaptureFlow = false
+                    if didChangeAnything {
+                        Task { await model.loadFirstPage() }
+                    }
+                }
+            }
+            .fullScreenCover(isPresented: $showConfirmQueue) {
+                ConfirmQueueCover(api: api) {
+                    showConfirmQueue = false
+                    Task { await model.loadFirstPage() }
+                }
+            }
         }
     }
 
-    // MARK: - Capture placeholder
+    // MARK: - Capture
 
-    private var capturePlaceholder: some View {
+    private var captureButton: some View {
         VStack(spacing: 8) {
             Button {
-                // Wave 4: opens the document scanner.
+                showCaptureFlow = true
             } label: {
                 Label("Capture", systemImage: "doc.viewfinder")
                     .font(.title3.weight(.semibold))
@@ -71,12 +87,16 @@ struct HomeView: View {
                     .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(true)
+            .disabled(!DocumentScannerView.isSupported)
 
-            Text("Scanning arrives in a later build.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
+            if !DocumentScannerView.isSupported {
+                // The simulator, in practice. A stated reason beats a
+                // mysteriously dead button.
+                Text("Scanning needs a device with a camera.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+            }
         }
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
@@ -92,7 +112,14 @@ struct HomeView: View {
             case .exact(0):
                 EmptyView()
             case .exact(let count):
-                PendingBadge(text: "\(count) pending")
+                // Tapping the badge opens the confirm queue (spec §6A):
+                // the nag and the way to make it stop are the same control.
+                Button {
+                    showConfirmQueue = true
+                } label: {
+                    PendingBadge(text: "\(count) pending - confirm")
+                }
+                .buttonStyle(.plain)
             case .unknown:
                 // The count could not be fetched; saying so beats quietly
                 // implying zero.
@@ -175,8 +202,17 @@ struct ReceiptRow: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 4) {
-                Text(ReceiptFormat.money(cents: receipt.totalCents, currency: receipt.currency))
-                    .monospacedDigit()
+                if let totalCents = receipt.totalCents {
+                    Text(ReceiptFormat.money(cents: totalCents, currency: receipt.currency))
+                        .monospacedDigit()
+                } else {
+                    // A pending scan whose total the parser couldn't read:
+                    // a stated absence until the confirm screen fills it.
+                    Text("No total yet")
+                        .font(.caption)
+                        .italic()
+                        .foregroundStyle(.secondary)
+                }
                 if receipt.status == .pending {
                     PendingBadge(text: "Pending")
                 }

@@ -106,6 +106,15 @@ export async function generateExport(
     if (imageObjectKey === undefined) {
       throw new Error(`Receipt ${receipt.id} has no page-1 image`);
     }
+    // Only confirmed receipts export, and the receipts_confirmed_complete_ck
+    // constraint guarantees a confirmed receipt has both values. Null here
+    // means that guarantee broke, and the job must fail loudly rather than
+    // hand an accountant an invented amount.
+    if (receipt.totalCents === null || receipt.isBusiness === null) {
+      throw new Error(
+        `Confirmed receipt ${receipt.id} is missing its total or business flag`,
+      );
+    }
     const row: ExportRow = {
       receiptId: receipt.id,
       date: receipt.purchasedAt,

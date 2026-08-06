@@ -7,6 +7,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "tsx src/db/seed.ts",
     "db:claim": "tsx src/db/claim.ts",
+    "parse-accuracy": "tsx src/db/parseAccuracyReport.ts",
     "storage:init": "tsx src/storage/init.ts",
     "predev": "touch .env.local",
     "dev": "node --env-file=.env.local --import tsx src/index.ts",

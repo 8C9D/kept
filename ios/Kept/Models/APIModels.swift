@@ -28,11 +28,16 @@ struct Receipt: Decodable, Equatable, Hashable, Identifiable {
     let subtotalCents: Int?
     let hstCents: Int?
     let otherTaxCents: Int?
-    let totalCents: Int
+    /// Nullable since wave 4: a batch-scanned pending receipt whose total
+    /// the parser could not read stores the absence. A confirmed receipt
+    /// always has one (server check constraint).
+    let totalCents: Int?
     let currency: String
     let category: String?
     let paymentMethod: String?
-    let isBusiness: Bool
+    /// Nullable since wave 4, same reasoning: null is "not chosen yet",
+    /// which only a pending receipt is allowed to be.
+    let isBusiness: Bool?
     let notes: String?
     let status: ReceiptStatus
     let createdAt: Date
@@ -57,22 +62,45 @@ struct ReceiptImage: Decodable, Equatable {
     let downloadUrl: URL
 }
 
+/// What the on-device parser suggested at capture, as the server recorded
+/// it (immutable). The confirm screen marks exactly these fields amber -
+/// value-presence would be a lying proxy once a fallback (the capture-day
+/// date) or a human-written value exists on a pending receipt.
+struct OcrSuggestionsRecord: Decodable, Equatable {
+    let vendor: String?
+    let purchasedAt: String?
+    let totalCents: Int?
+    let hstCents: Int?
+    let subtotalCents: Int?
+    let vendorTaxNumber: String?
+}
+
 /// GET /api/receipts/:id - every Receipt field plus what only the detail
 /// route returns. Decoding delegates the shared fields to Receipt so the
 /// two shapes cannot drift apart.
 struct ReceiptDetail: Decodable, Equatable {
     let receipt: Receipt
     let ocrRawText: String?
+    /// Nil on receipts created before wave 4 or by a client that reported
+    /// no suggestions.
+    let ocrSuggestions: OcrSuggestionsRecord?
     let images: [ReceiptImage]
 
     private enum CodingKeys: String, CodingKey {
         case ocrRawText
+        case ocrSuggestions
         case images
     }
 
-    init(receipt: Receipt, ocrRawText: String?, images: [ReceiptImage]) {
+    init(
+        receipt: Receipt,
+        ocrRawText: String?,
+        ocrSuggestions: OcrSuggestionsRecord?,
+        images: [ReceiptImage]
+    ) {
         self.receipt = receipt
         self.ocrRawText = ocrRawText
+        self.ocrSuggestions = ocrSuggestions
         self.images = images
     }
 
@@ -80,6 +108,7 @@ struct ReceiptDetail: Decodable, Equatable {
         receipt = try Receipt(from: decoder)
         let container = try decoder.container(keyedBy: CodingKeys.self)
         ocrRawText = try container.decodeIfPresent(String.self, forKey: .ocrRawText)
+        ocrSuggestions = try container.decodeIfPresent(OcrSuggestionsRecord.self, forKey: .ocrSuggestions)
         images = try container.decode([ReceiptImage].self, forKey: .images)
     }
 }

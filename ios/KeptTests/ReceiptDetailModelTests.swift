@@ -6,7 +6,7 @@ final class ReceiptDetailModelTests: XCTestCase {
     func testLoadedDetailIsExposed() async {
         let api = StubKeptAPI()
         let receipt = Fixtures.receipt()
-        let detail = ReceiptDetail(receipt: receipt, ocrRawText: "RAW", images: [])
+        let detail = Fixtures.detail(receipt: receipt, ocrRawText: "RAW")
         api.receiptDetailHandler = { id in
             XCTAssertEqual(id, receipt.id)
             return detail

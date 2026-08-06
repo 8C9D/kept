@@ -1,13 +1,18 @@
 import Foundation
 
-/// The three calls wave 3 uses, as a protocol so view models can be tested
+/// The calls the app uses, as a protocol so view models can be tested
 /// against a stub API without building HTTP responses. APIClient is the
 /// production implementation; endpoints are added here as waves need them,
-/// not speculatively.
+/// not speculatively. (Waves 1-3 added the first three; wave 4 added the
+/// capture-and-confirm four.)
 protocol KeptAPI {
     func signInWithApple(identityToken: String, displayName: String?) async throws -> SignInResponse
     func receiptsPage(cursor: String?, status: ReceiptStatus?, limit: Int?) async throws -> ReceiptListPage
     func receiptDetail(id: UUID) async throws -> ReceiptDetail
+    func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget
+    func uploadImage(to target: UploadTarget, data: Data, contentType: ImageUploadContentType) async throws
+    func createReceipt(_ request: CreateReceiptRequest) async throws -> Receipt
+    func confirmReceipt(id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt
 }
 
 extension APIClient: KeptAPI {
@@ -45,5 +50,24 @@ extension APIClient: KeptAPI {
         // pattern is case-insensitive, but sending what the server stores
         // costs nothing.
         try await get("/api/receipts/\(id.uuidString.lowercased())")
+    }
+
+    func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget {
+        struct Body: Encodable {
+            let contentType: ImageUploadContentType
+        }
+        return try await post("/api/receipts/upload-url", body: Body(contentType: contentType))
+    }
+
+    func uploadImage(to target: UploadTarget, data: Data, contentType: ImageUploadContentType) async throws {
+        try await uploadToPresignedURL(target.uploadUrl, data: data, contentType: contentType.rawValue)
+    }
+
+    func createReceipt(_ request: CreateReceiptRequest) async throws -> Receipt {
+        try await post("/api/receipts", body: request)
+    }
+
+    func confirmReceipt(id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt {
+        try await patch("/api/receipts/\(id.uuidString.lowercased())", body: request)
     }
 }

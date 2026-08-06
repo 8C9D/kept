@@ -31,7 +31,32 @@ enum ReceiptFormat {
         return date.formatted(style)
     }
 
-    private static let utc = TimeZone(identifier: "UTC") ?? .gmt
+    /// The confirm screen's date picker needs a Date; these two are the
+    /// only place the yyyy-mm-dd string and Date meet, both pinned to UTC.
+    /// ⚠ The round trip only holds if the DatePicker between them is ALSO
+    /// pinned - via `pickerEnvironment` below - otherwise a Toronto
+    /// evening renders March 20 as March 19 and "fixing" it saves the 21st
+    /// (wave-4 reviewer pass, the wave's highest finding).
+    static func pickerDate(fromIso isoDate: String) -> Date? {
+        isoDateParser.date(from: isoDate)
+    }
+
+    static func isoDate(fromPicker date: Date) -> String {
+        isoDateParser.string(from: date)
+    }
+
+    /// The calendar and timezone any DatePicker editing `purchasedAt` must
+    /// run in, so the picker, the parser, and the formatter agree on which
+    /// day an instant belongs to.
+    static let utcTimeZone: TimeZone = TimeZone(identifier: "UTC") ?? .gmt
+
+    static let utcCalendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utcTimeZone
+        return calendar
+    }()
+
+    private static var utc: TimeZone { utcTimeZone }
 
     /// en_US_POSIX + UTC is the standard recipe for parsing a fixed-format
     /// date: immune to the user's locale, calendar, and zone settings.

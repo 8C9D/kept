@@ -42,6 +42,38 @@ final class APIClient {
         return try await perform(method: "POST", path: path, query: [], body: bodyData, requiresSession: requiresSession)
     }
 
+    func patch<Body: Encodable, Response: Decodable>(
+        _ path: String,
+        body: Body
+    ) async throws -> Response {
+        let bodyData = try Self.encoder.encode(body)
+        return try await perform(method: "PATCH", path: path, query: [], body: bodyData, requiresSession: true)
+    }
+
+    /// The one non-API request in the app: uploading image bytes to the
+    /// presigned URL the server issued. The URL is absolute (it points at
+    /// object storage, not the API), authorization is in its signature -
+    /// no session token attaches - and the content type must be exactly
+    /// the one presigned, because the signature covers it (wave-3 gate).
+    func uploadToPresignedURL(_ url: URL, data: Data, contentType: String) async throws {
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.httpBody = data
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+
+        let response: HTTPURLResponse
+        do {
+            (_, response) = try await transport.send(request)
+        } catch let urlError as URLError {
+            throw APIError.network(urlError)
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            // Storage errors are XML, not the API's JSON envelope; the
+            // status code is the only signal worth mapping.
+            throw APIError.unexpectedResponse(status: response.statusCode)
+        }
+    }
+
     private func perform<Response: Decodable>(
         method: String,
         path: String,

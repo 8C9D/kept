@@ -72,41 +72,86 @@ export const uploadUrlSchema = z.strictObject({
 });
 
 /**
- * Creation. Omitting a nullable field means null; omitting `currency` or
- * `status` means the column default (CAD, pending). `isBusiness` and
- * `totalCents` cannot be omitted, and `isBusiness` carries no default here
- * for the same reason the column has none (spec §5.2): absence must be an
- * error, never a quiet choice.
+ * What the on-device parser suggested, recorded verbatim for the §7.3
+ * accuracy measurement. Absent and null both mean "the parser found
+ * nothing" - the client sends what it has. Deliberately not strict about
+ * having every key so a client with fewer heuristics can still report.
  */
-export const createReceiptSchema = z.strictObject({
-  purchasedAt,
-  capturedAt,
+export const ocrSuggestionsSchema = z.strictObject({
   vendor: vendor.optional(),
-  vendorTaxNumber: vendorTaxNumber.optional(),
-  subtotalCents: subtotalCents.optional(),
+  purchasedAt: isoDateSchema.nullable().optional(),
+  totalCents: centsSchema.nullable().optional(),
   hstCents: hstCents.optional(),
-  otherTaxCents: otherTaxCents.optional(),
-  totalCents,
-  currency: currency.optional(),
-  category: category.optional(),
-  paymentMethod: paymentMethod.optional(),
-  isBusiness,
-  notes: notes.optional(),
-  status: receiptStatusSchema.optional(),
-  ocrRawText: ocrRawText.optional(),
-  // The image is uploaded to storage first (spec §6); creating the receipt
-  // records where it landed and what it hashed to.
-  image: z.strictObject({
-    objectKey: z.string().min(1).max(500),
-    sha256: z.string().regex(/^[0-9a-f]{64}$/, {
-      error: "must be a lowercase hex sha-256 digest",
-    }),
-  }),
+  subtotalCents: subtotalCents.optional(),
+  vendorTaxNumber: vendorTaxNumber.optional(),
 });
 
 /**
+ * Creation. Omitting a nullable field means null; omitting `currency` or
+ * `status` means the column default (CAD, pending).
+ *
+ * `totalCents` and `isBusiness` may be omitted only while the receipt is
+ * `pending` (wave 4): a batch-scanned receipt stores what the parser found
+ * and states what it did not, and `is_business` still carries no default
+ * anywhere (spec §5.2) - a confirmed receipt cannot exist without an
+ * explicit choice, which the superRefine below and the database's check
+ * constraint both enforce.
+ */
+export const createReceiptSchema = z
+  .strictObject({
+    purchasedAt,
+    capturedAt,
+    vendor: vendor.optional(),
+    vendorTaxNumber: vendorTaxNumber.optional(),
+    subtotalCents: subtotalCents.optional(),
+    hstCents: hstCents.optional(),
+    otherTaxCents: otherTaxCents.optional(),
+    totalCents: totalCents.nullable().optional(),
+    currency: currency.optional(),
+    category: category.optional(),
+    paymentMethod: paymentMethod.optional(),
+    isBusiness: isBusiness.nullable().optional(),
+    notes: notes.optional(),
+    status: receiptStatusSchema.optional(),
+    ocrRawText: ocrRawText.optional(),
+    ocrSuggestions: ocrSuggestionsSchema.optional(),
+    // The image is uploaded to storage first (spec §6); creating the receipt
+    // records where it landed and what it hashed to.
+    image: z.strictObject({
+      objectKey: z.string().min(1).max(500),
+      sha256: z.string().regex(/^[0-9a-f]{64}$/, {
+        error: "must be a lowercase hex sha-256 digest",
+      }),
+    }),
+  })
+  .superRefine((body, ctx) => {
+    if (body.status !== "confirmed") {
+      return;
+    }
+    if (body.totalCents === undefined || body.totalCents === null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["totalCents"],
+        message: "a confirmed receipt requires a total",
+      });
+    }
+    if (body.isBusiness === undefined || body.isBusiness === null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["isBusiness"],
+        message: "a confirmed receipt requires a business-or-personal choice",
+      });
+    }
+  });
+
+/**
  * Update. Every field is optional; an omitted field is left unchanged, an
- * explicit null clears a nullable field.
+ * explicit null clears a nullable field. `totalCents` and `isBusiness`
+ * accept null only insofar as the receipt stays pending - the route
+ * enforces that a receipt ending up confirmed has both, since the rule
+ * depends on the row's current values, which a schema cannot see.
+ * `ocrSuggestions` is deliberately absent: what the parser said is an
+ * immutable record, or the accuracy measurement measures nothing.
  */
 export const updateReceiptSchema = z
   .strictObject({
@@ -117,11 +162,11 @@ export const updateReceiptSchema = z
     subtotalCents: subtotalCents.optional(),
     hstCents: hstCents.optional(),
     otherTaxCents: otherTaxCents.optional(),
-    totalCents: totalCents.optional(),
+    totalCents: totalCents.nullable().optional(),
     currency: currency.optional(),
     category: category.optional(),
     paymentMethod: paymentMethod.optional(),
-    isBusiness: isBusiness.optional(),
+    isBusiness: isBusiness.nullable().optional(),
     notes: notes.optional(),
     status: receiptStatusSchema.optional(),
     ocrRawText: ocrRawText.optional(),

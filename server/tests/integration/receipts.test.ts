@@ -111,18 +111,94 @@ describe("POST /api/receipts", () => {
     expect(body.error.message).toContain("integer number of cents");
   });
 
-  it("rejects a receipt with no explicit isBusiness choice", async () => {
-    const body = bodyWithImage();
+  // Wave 4: a batch-scanned receipt is created pending with whatever the
+  // parser found, so total and the business choice may be absent - but only
+  // while pending. Confirmed always requires both (schema + DB constraint).
+
+  it("rejects a confirmed receipt with no explicit isBusiness choice", async () => {
+    const body = bodyWithImage({ status: "confirmed" });
     delete (body as Record<string, unknown>).isBusiness;
     const response = await harness.request(token, "POST", "/api/receipts", body);
     expect(response.status).toBe(400);
   });
 
-  it("rejects a receipt with no total", async () => {
-    const body = bodyWithImage();
+  it("rejects a confirmed receipt with no total", async () => {
+    const body = bodyWithImage({ status: "confirmed" });
     delete (body as Record<string, unknown>).totalCents;
     const response = await harness.request(token, "POST", "/api/receipts", body);
     expect(response.status).toBe(400);
+  });
+
+  it("accepts a pending receipt with no total and no business choice", async () => {
+    const body = bodyWithImage();
+    delete (body as Record<string, unknown>).totalCents;
+    delete (body as Record<string, unknown>).isBusiness;
+    const response = await harness.request(token, "POST", "/api/receipts", body);
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as Record<string, unknown>;
+    expect(created.status).toBe("pending");
+    expect(created.totalCents).toBeNull();
+    expect(created.isBusiness).toBeNull();
+  });
+
+  it("stores the parser's suggestions verbatim, absent keys as null", async () => {
+    const response = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({
+        ocrSuggestions: { totalCents: 11300, vendor: "Test Vendor" },
+      }),
+    );
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as { id: string };
+
+    const expectedStored = {
+      vendor: "Test Vendor",
+      purchasedAt: null,
+      totalCents: 11300,
+      hstCents: null,
+      subtotalCents: null,
+      vendorTaxNumber: null,
+    };
+    const rows = await harness.db
+      .select({ ocrSuggestions: receipts.ocrSuggestions })
+      .from(receipts)
+      .where(eq(receipts.id, created.id));
+    expect(rows[0]?.ocrSuggestions).toEqual(expectedStored);
+
+    // The detail route hands the record back: the confirm screen marks
+    // exactly the fields the parser suggested, not whatever happens to be
+    // non-null (wave-4 reviewer pass).
+    const detail = await harness.request(token, "GET", `/api/receipts/${created.id}`);
+    const body = (await detail.json()) as { ocrSuggestions: unknown };
+    expect(body.ocrSuggestions).toEqual(expectedStored);
+  });
+
+  it("enforces confirmed-completeness in the database itself, not only the routes", async () => {
+    // Bypass the API on purpose: the check constraint is the guarantee that
+    // no future handler can write a confirmed receipt with no total.
+    // Drizzle wraps the pg error, so the constraint name is found by
+    // walking the cause chain (same shape isUniqueViolation handles).
+    const failure = await harness.db
+      .insert(receipts)
+      .values({
+        userId,
+        purchasedAt: "2026-03-15",
+        capturedAt: new Date(),
+        totalCents: null,
+        isBusiness: true,
+        status: "confirmed",
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(failure).toBeInstanceOf(Error);
+    const constraints: unknown[] = [];
+    let current: unknown = failure;
+    while (current instanceof Error) {
+      constraints.push((current as Error & { constraint?: unknown }).constraint);
+      current = current.cause;
+    }
+    expect(constraints).toContain("receipts_confirmed_complete_ck");
   });
 
   it("accepts numbers that do not reconcile - the server never blocks on arithmetic", async () => {
@@ -378,5 +454,87 @@ describe("PATCH /api/receipts/:id", () => {
       { vendor: "X" },
     );
     expect(response.status).toBe(404);
+  });
+
+  // Wave 4: the confirm screen's save is a PATCH to status=confirmed, and
+  // confirming an incomplete receipt must fail with the missing field named.
+
+  it("confirms a bare pending receipt once total and the choice arrive", async () => {
+    const body = bodyWithImage();
+    delete (body as Record<string, unknown>).totalCents;
+    delete (body as Record<string, unknown>).isBusiness;
+    const created = await harness.request(token, "POST", "/api/receipts", body);
+    const receipt = (await created.json()) as { id: string };
+
+    const response = await harness.request(token, "PATCH",
+      `/api/receipts/${receipt.id}`,
+      { status: "confirmed", totalCents: 4520, isBusiness: false },
+    );
+    expect(response.status).toBe(200);
+    const updated = (await response.json()) as Record<string, unknown>;
+    expect(updated.status).toBe("confirmed");
+    expect(updated.totalCents).toBe(4520);
+    expect(updated.isBusiness).toBe(false);
+  });
+
+  it("refuses to confirm a receipt that would end up with no total", async () => {
+    const body = bodyWithImage();
+    delete (body as Record<string, unknown>).totalCents;
+    const created = await harness.request(token, "POST", "/api/receipts", body);
+    const receipt = (await created.json()) as { id: string };
+
+    const response = await harness.request(token, "PATCH",
+      `/api/receipts/${receipt.id}`,
+      { status: "confirmed" },
+    );
+    expect(response.status).toBe(400);
+    const failure = (await response.json()) as {
+      error: { message: string };
+    };
+    expect(failure.error.message).toMatch(/total/);
+  });
+
+  it("refuses to confirm a receipt with no business-or-personal choice", async () => {
+    const body = bodyWithImage();
+    delete (body as Record<string, unknown>).isBusiness;
+    const created = await harness.request(token, "POST", "/api/receipts", body);
+    const receipt = (await created.json()) as { id: string };
+
+    const response = await harness.request(token, "PATCH",
+      `/api/receipts/${receipt.id}`,
+      { status: "confirmed" },
+    );
+    expect(response.status).toBe(400);
+    const failure = (await response.json()) as {
+      error: { message: string };
+    };
+    expect(failure.error.message).toMatch(/business-or-personal/);
+  });
+
+  it("refuses to null the total out of a confirmed receipt", async () => {
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ status: "confirmed" }),
+    );
+    const receipt = (await created.json()) as { id: string };
+
+    const response = await harness.request(token, "PATCH",
+      `/api/receipts/${receipt.id}`,
+      { totalCents: null },
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects any attempt to rewrite the parser's suggestion record", async () => {
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ ocrSuggestions: { totalCents: 11300 } }),
+    );
+    const receipt = (await created.json()) as { id: string };
+
+    // Strict schema: ocrSuggestions is not an updatable key at all.
+    const response = await harness.request(token, "PATCH",
+      `/api/receipts/${receipt.id}`,
+      { ocrSuggestions: { totalCents: 1 } },
+    );
+    expect(response.status).toBe(400);
   });
 });

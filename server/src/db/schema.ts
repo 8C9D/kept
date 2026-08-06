@@ -2,9 +2,11 @@ import { sql } from "drizzle-orm";
 import {
   boolean,
   char,
+  check,
   date,
   index,
   integer,
+  jsonb,
   pgEnum,
   pgTable,
   smallint,
@@ -14,6 +16,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
 
 export const receiptStatus = pgEnum("receipt_status", ["pending", "confirmed"]);
 
@@ -56,12 +59,19 @@ export const receipts = pgTable(
     subtotalCents: integer("subtotal_cents"),
     hstCents: integer("hst_cents"),
     otherTaxCents: integer("other_tax_cents"),
-    totalCents: integer("total_cents").notNull(),
+    // Nullable while pending (wave 4): a batch-scanned receipt whose total
+    // the parser could not read is stored with the absence stated, never a
+    // fabricated amount. The check constraint below guarantees a confirmed
+    // receipt always has one.
+    totalCents: integer("total_cents"),
     currency: char("currency", { length: 3 }).notNull().default("CAD"),
     category: text("category"),
     paymentMethod: text("payment_method"),
-    // No default at any layer: the client must send an explicit choice.
-    isBusiness: boolean("is_business").notNull(),
+    // No default at any layer: confirming requires an explicit choice.
+    // Nullable while pending (wave 4) for the same reason as total_cents -
+    // null is a stated "not chosen yet", which is exactly what a scanned
+    // but unconfirmed backlog receipt is (spec §5.2a).
+    isBusiness: boolean("is_business"),
     notes: text("notes"),
     // Soft delete: non-null rows are excluded from every list, count, and
     // export. CRA retention makes hard deletes off the table (spec §10B).
@@ -69,6 +79,11 @@ export const receipts = pgTable(
     // Defaulting to 'pending' is fail-closed: pending rows never export.
     status: receiptStatus("status").notNull().default("pending"),
     ocrRawText: text("ocr_raw_text"),
+    // What the on-device parser suggested at capture, verbatim and
+    // immutable: no route updates it. Comparing it with the fields a human
+    // went on to confirm is how per-field parse accuracy is measured
+    // (spec §7.3's wave-4 number), with no bookkeeping by anyone.
+    ocrSuggestions: jsonb("ocr_suggestions").$type<OcrFieldSuggestions>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     // Maintained by a Postgres trigger (drizzle/0001), not handler code.
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -77,6 +92,12 @@ export const receipts = pgTable(
     index("receipts_user_id_purchased_at_idx").on(t.userId, t.purchasedAt),
     index("receipts_user_id_is_business_idx").on(t.userId, t.isBusiness),
     index("receipts_user_id_status_idx").on(t.userId, t.status),
+    // The database's own guarantee that confirming is never partial: the
+    // route validates first for a clean 400, this backstops everything else.
+    check(
+      "receipts_confirmed_complete_ck",
+      sql`status <> 'confirmed' OR (total_cents IS NOT NULL AND is_business IS NOT NULL)`,
+    ),
   ],
 );
 
