@@ -10,7 +10,9 @@ enum ReceiptAmount {
     /// "45.20" from quantities, SKU codes, and percentages, which receipts
     /// are full of. A negative-lookahead keeps "1.234" from yielding a
     /// false "1.23".
-    private static let pattern = #/(?:\$\s*)?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})(?!\d)/#
+    /// nonisolated(unsafe): Regex is not (yet) Sendable, but the pattern is
+    /// immutable and matching does not mutate it.
+    private nonisolated(unsafe) static let pattern = #/(?:\$\s*)?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})(?!\d)/#
 
     /// Every amount on a line, in text order, as integer cents.
     static func amounts(in text: String) -> [Int] {

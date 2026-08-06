@@ -45,6 +45,35 @@ enum ReceiptFormat {
         isoDateParser.string(from: date)
     }
 
+    /// The capture day in the person's own calendar - the date they would
+    /// write on the receipt, not UTC's opinion of it. Assembled from
+    /// explicit components: a format style's output order belongs to the
+    /// locale, and this string is API syntax, not display text. (Moved
+    /// from CaptureFlowModel in wave 5; the outbox builds the create
+    /// request now.)
+    static func calendarDate(of date: Date) -> String {
+        let parts = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        guard let year = parts.year, let month = parts.month, let day = parts.day else {
+            // dateComponents with these units always yields them; treat the
+            // impossible as impossible rather than inventing a date.
+            preconditionFailure("Calendar returned no year/month/day for \(date)")
+        }
+        return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+
+    /// The capture instant as the API's ISO 8601 timestamp.
+    static func timestamp(of date: Date) -> String {
+        date.formatted(.iso8601)
+    }
+
+    /// "Aug 6, 2026 at 3:04 PM" - when a queued receipt was captured, for
+    /// the Home outbox rows. The device's own zone on purpose: a capture
+    /// is a local moment, unlike `purchasedAt`, which is a zoneless
+    /// calendar date and pins UTC above.
+    static func captureMoment(_ date: Date, locale: Locale = .autoupdatingCurrent) -> String {
+        date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: locale))
+    }
+
     /// The calendar and timezone any DatePicker editing `purchasedAt` must
     /// run in, so the picker, the parser, and the formatter agree on which
     /// day an instant belongs to.

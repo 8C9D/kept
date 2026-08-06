@@ -4,8 +4,9 @@ import Security
 /// Where the session JWT lives between launches. The keychain, never
 /// UserDefaults: UserDefaults is a plaintext plist inside the app
 /// container, included in unencrypted backups - the wrong place for a
-/// bearer credential.
-protocol SessionTokenStore {
+/// bearer credential. Sendable because APIClient reads the token from
+/// whatever task a request runs on.
+protocol SessionTokenStore: Sendable {
     /// The stored token, or nil when signed out.
     func load() throws -> String?
     func save(_ token: String) throws
@@ -28,6 +29,8 @@ extension KeychainError: LocalizedError {
 }
 
 final class KeychainSessionTokenStore: SessionTokenStore {
+    // Sendable by inspection: two immutable strings; the keychain itself
+    // is process-wide state the Security framework synchronizes.
     private let service: String
     private let account: String
 
@@ -60,13 +63,15 @@ final class KeychainSessionTokenStore: SessionTokenStore {
         }
     }
 
-    /// The strictest accessibility that works today: the app only reads the
-    /// token in the foreground. The wave-5 background outbox will need
-    /// AfterFirstUnlock; that wave changes this one constant, and because
-    /// the update path below re-asserts it, existing installs migrate on
-    /// their next save. (Wave-3 reviewer finding: don't loosen a security
-    /// posture for a feature that doesn't exist yet.)
-    private static let accessibility = kSecAttrAccessibleWhenUnlocked
+    /// The strictest accessibility that works: the app reads the token only
+    /// while foregrounded, which means the device is unlocked. Wave 5
+    /// examined widening this to AfterFirstUnlock for the outbox and kept
+    /// it - the outbox drains on foregrounding, so a locked-device token
+    /// read never happens by design; a drain overtaken by the lock fails
+    /// as a retryable error and the next foreground finishes the job
+    /// (DECISIONS.md, wave 5). Stored as String because the CFString
+    /// constant is not Sendable; the dictionaries below take it bridged.
+    private static let accessibility = kSecAttrAccessibleWhenUnlocked as String
 
     func save(_ token: String) throws {
         var attributes = baseQuery()

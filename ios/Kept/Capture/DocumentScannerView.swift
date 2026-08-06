@@ -26,7 +26,9 @@ struct DocumentScannerView: UIViewControllerRepresentable {
     /// JPEG quality for captured pages: a receipt photograph around a
     /// megabyte - text stays crisp for the zoom-to-check interaction while
     /// a sixty-receipt backlog session does not upload gigabytes.
-    private static let jpegQuality: CGFloat = 0.8
+    /// nonisolated: an immutable constant the (nonisolated) delegate reads;
+    /// the view struct's inferred MainActor isolation is irrelevant to it.
+    private nonisolated static let jpegQuality: CGFloat = 0.8
 
     let completion: (Outcome) -> Void
 

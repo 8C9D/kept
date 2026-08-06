@@ -10,8 +10,8 @@ final class APIClientTests: XCTestCase {
     private var tokenStore = InMemoryTokenStore()
     private var sessionRejections = 0
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         transport = StubTransport()
         tokenStore = InMemoryTokenStore(stored: "stored-session-token")
         sessionRejections = 0
@@ -19,11 +19,17 @@ final class APIClientTests: XCTestCase {
 
     private func makeClient() throws -> APIClient {
         let baseURL = try XCTUnwrap(URL(string: "http://kept.test"))
-        let client = APIClient(baseURL: { baseURL }, transport: transport, tokenStore: tokenStore)
-        client.onSessionRejected = { [weak self] in
+        let relay = SessionRejectionRelay()
+        relay.onSessionRejected = { [weak self] in
             self?.sessionRejections += 1
         }
-        return client
+        // The client retains the relay; nothing else needs to.
+        return APIClient(
+            baseURL: { baseURL },
+            transport: transport,
+            tokenStore: tokenStore,
+            rejectionRelay: relay
+        )
     }
 
     // MARK: - Token attachment

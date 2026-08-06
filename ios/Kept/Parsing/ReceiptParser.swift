@@ -87,8 +87,11 @@ enum ReceiptParser {
     /// A Canadian business number with its GST/HST program identifier:
     /// nine digits, "RT", four digits, spaces optional. Falls back to a
     /// bare nine-digit number on a line that labels itself GST/HST/BN.
-    private static let businessNumberPattern = #/(\d{9})\s?[Rr][Tt]\s?(\d{4})/#
-    private static let bareNineDigitsPattern = #/(?:^|\D)(\d{9})(?:\D|$)/#
+    /// nonisolated(unsafe) on the cached patterns in this file: Regex is
+    /// not (yet) marked Sendable, but these are immutable after
+    /// initialization and matching does not mutate the value.
+    private nonisolated(unsafe) static let businessNumberPattern = #/(\d{9})\s?[Rr][Tt]\s?(\d{4})/#
+    private nonisolated(unsafe) static let bareNineDigitsPattern = #/(?:^|\D)(\d{9})(?:\D|$)/#
 
     private static func vendorTaxNumber(in lines: [RecognizedLine]) -> String? {
         for line in lines {
@@ -153,7 +156,7 @@ enum ReceiptParser {
     /// matches "TOTAL:" but not "totally" or "subtotal"; "tax" matches
     /// "Tax 13%" but not "taxable". Compiled per word rather than per call
     /// because the parser runs these over every line of every scan.
-    private static let wordPatterns: [String: Regex<Substring>] = {
+    private nonisolated(unsafe) static let wordPatterns: [String: Regex<Substring>] = {
         var patterns: [String: Regex<Substring>] = [:]
         for word in ["total", "hst", "gst", "tax", "bn"] {
             // The words are literal constants, so compilation cannot fail;
@@ -172,7 +175,7 @@ enum ReceiptParser {
     /// fire there. Letters still fence - "TOTALSAVINGS" (from "TOTAL
     /// SAVINGS") does not read as a bare total. Consumed-prefix instead of
     /// lookbehind, same as ReceiptDateParser and for the same reason.
-    private static let despacedWordPatterns: [String: Regex<AnyRegexOutput>] = {
+    private nonisolated(unsafe) static let despacedWordPatterns: [String: Regex<AnyRegexOutput>] = {
         var patterns: [String: Regex<AnyRegexOutput>] = [:]
         for word in ["total", "hst", "gst", "tax", "bn"] {
             if let pattern = try? Regex("(?:^|[^A-Za-z])\(word)(?![A-Za-z])").ignoresCase() {

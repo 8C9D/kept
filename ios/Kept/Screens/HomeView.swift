@@ -6,10 +6,17 @@ import SwiftUI
 /// header - visible and slightly annoying, per spec §5.2a.
 struct HomeView: View {
     @EnvironmentObject private var session: SessionController
+    @EnvironmentObject private var outbox: OutboxController
     @StateObject private var model: ReceiptListModel
     @State private var showServerSettings = false
     @State private var showCaptureFlow = false
     @State private var showConfirmQueue = false
+    /// The needs-attention item a discard confirmation is showing for.
+    @State private var discardCandidate: OutboxController.Entry?
+    /// Coalesces list reloads while the outbox drains a batch: eighty
+    /// receipts landing server-side must not mean eighty full list
+    /// reloads under the user's thumb (reviewer finding).
+    @State private var listReloadDebounce: Task<Void, Never>?
 
     /// Kept only to hand onward to the capture, confirm, and detail flows.
     private let api: APIClient
@@ -25,6 +32,8 @@ struct HomeView: View {
                 Section {
                     captureButton
                 }
+
+                outboxSection
 
                 Section {
                     listContent
@@ -58,12 +67,49 @@ struct HomeView: View {
                 ServerSettingsView()
             }
             .fullScreenCover(isPresented: $showCaptureFlow) {
-                CaptureFlowView(api: api) { didChangeAnything in
+                CaptureFlowView(outbox: outbox) { didChangeAnything in
                     showCaptureFlow = false
                     if didChangeAnything {
                         Task { await model.loadFirstPage() }
                     }
                 }
+            }
+            // Each receipt the outbox lands server-side turns a queued row
+            // here into a real pending receipt there; refresh - debounced,
+            // so a draining batch coalesces into one reload at the end
+            // instead of one per receipt - and the person watches the
+            // queue drain into the list.
+            .onChange(of: outbox.serverConfirmedCount) {
+                listReloadDebounce?.cancel()
+                listReloadDebounce = Task {
+                    try? await Task.sleep(for: .milliseconds(600))
+                    guard !Task.isCancelled else { return }
+                    await model.loadFirstPage()
+                }
+            }
+            // Anchored to the List, not the outbox Section: a Section can
+            // disappear (the queue draining empty) while its dialog is up,
+            // and presentation modifiers on lazily-built containers are
+            // fragile ground (reviewer finding).
+            .confirmationDialog(
+                "Discard this receipt?",
+                isPresented: Binding(
+                    get: { discardCandidate != nil },
+                    set: { if !$0 { discardCandidate = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Discard receipt", role: .destructive) {
+                    if let candidate = discardCandidate {
+                        Task { await outbox.discardBlockedItem(id: candidate.id) }
+                    }
+                    discardCandidate = nil
+                }
+                Button("Keep it", role: .cancel) {
+                    discardCandidate = nil
+                }
+            } message: {
+                Text("Its scanned image is deleted from this phone and it never reaches your receipts. This cannot be undone.")
             }
             .fullScreenCover(isPresented: $showConfirmQueue) {
                 ConfirmQueueCover(api: api) {
@@ -107,6 +153,63 @@ struct HomeView: View {
         }
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
+    }
+
+    // MARK: - Outbox (spec §7.4: queued items surface here, with status)
+
+    @ViewBuilder
+    private var outboxSection: some View {
+        let hasNotes = outbox.otherAccountCount > 0
+            || outbox.unreadableCount > 0
+            || outbox.loadFailureNote != nil
+            || outbox.drainFailureNote != nil
+        if !outbox.entries.isEmpty || hasNotes {
+            Section {
+                ForEach(outbox.entries) { entry in
+                    OutboxEntryRow(
+                        entry: entry,
+                        onRetry: { retry(entry) },
+                        onDiscard: { discardCandidate = entry }
+                    )
+                }
+                outboxNotes
+            } header: {
+                Text("On this phone")
+            }
+        }
+    }
+
+    private func retry(_ entry: OutboxController.Entry) {
+        if case .needsAttention = entry.status {
+            Task { await outbox.retryBlockedItem(id: entry.id) }
+        } else {
+            outbox.externalTrigger()
+        }
+    }
+
+    /// Conditions about the queue as a whole, stated rather than implied.
+    @ViewBuilder
+    private var outboxNotes: some View {
+        if let note = outbox.loadFailureNote {
+            Text(note)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        if let note = outbox.drainFailureNote {
+            Text(note)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        if outbox.unreadableCount > 0 {
+            Text("\(outbox.unreadableCount) saved \(outbox.unreadableCount == 1 ? "receipt" : "receipts") could not be read from this phone's storage.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        if outbox.otherAccountCount > 0 {
+            Text("\(outbox.otherAccountCount) \(outbox.otherAccountCount == 1 ? "receipt" : "receipts") captured under another account will upload when that account signs in.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     // MARK: - List
@@ -224,6 +327,73 @@ struct ReceiptRow: View {
                     PendingBadge(text: "Pending")
                 }
             }
+        }
+    }
+}
+
+/// One queued receipt waiting on this phone: when it was captured, where
+/// it is in its journey, and - when it is stuck - the reason and the two
+/// human actions (spec §7.4: status and a manual retry, never a silent
+/// queue). Needs-attention rows get their reason in full; everything else
+/// is a single calm line, because a healthy queue should read as "handled".
+struct OutboxEntryRow: View {
+    let entry: OutboxController.Entry
+    let onRetry: () -> Void
+    let onDiscard: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Captured \(ReceiptFormat.captureMoment(entry.capturedAt))")
+                Spacer()
+                statusBadge
+            }
+            switch entry.status {
+            case .waiting, .processing:
+                EmptyView()
+            case .waitingToRetry(let message):
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Retry now", action: onRetry)
+                    .font(.caption.weight(.medium))
+                    .buttonStyle(.borderless)
+            case .needsAttention(let message):
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 16) {
+                    Button("Retry", action: onRetry)
+                    Button("Discard", role: .destructive, action: onDiscard)
+                }
+                .font(.caption.weight(.medium))
+                .buttonStyle(.borderless)
+            }
+        }
+        .font(.subheadline)
+    }
+
+    @ViewBuilder
+    private var statusBadge: some View {
+        switch entry.status {
+        case .waiting:
+            Text("Waiting to upload")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        case .processing:
+            HStack(spacing: 4) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Uploading")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        case .waitingToRetry:
+            Text("Will retry")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        case .needsAttention:
+            PendingBadge(text: "Needs attention")
         }
     }
 }

@@ -3,6 +3,44 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - Wave 5
+
+**The keychain stays `WhenUnlocked`; the outbox drains only while the app runs in the foreground (plus the ~30-second `beginBackgroundTask` tail after backgrounding).**
+Rejected: widening accessibility to `AfterFirstUnlock` for background upload (the wave-3 reversal would have been re-reversed for nothing: no code path reads the token while the device is locked, because none runs then), `BGTaskScheduler` processing tasks, and a background `URLSession` (both add the app's most complex machinery - state restoration across process death by the session daemon - to save latency nobody is waiting on).
+Why: the kickoff's own usage analysis holds - a person scans, pockets the phone, and the app has minutes to hours. With signal, the upload finishes in the foreground seconds or the backgrounding tail; without signal, background execution could not upload either. The receipt's safety never depends on upload timing - that is what the durable queue is for. A drain overtaken by the device locking fails the keychain read as a retryable error and the next foreground finishes the job. If a later wave adds real background upload, the accessibility question reopens with an actual requirement attached, and the save path still re-asserts accessibility so installs migrate on the next save.
+
+**Strict concurrency checking is on (`SWIFT_STRICT_CONCURRENCY = complete`) in Swift 5 language mode, whole target.**
+Rejected: full Swift 6 language mode (its remaining changes are annotation ceremony against §10's legibility mandate - the data-race checking is the part with three waves of defect evidence behind it), a separate Swift-6 module for the outbox alone (a hand-written framework target in the pbxproj to isolate what a build setting already isolates), and staying at minimal checking (the wave-3 deferral, now outweighed: the interleave class recurred in waves 3 AND 4, found by review each time, never by the compiler or the suite).
+Why: in Swift 5 mode `complete` emits the full Swift 6 data-race diagnostics as warnings, and the project's zero-warnings discipline makes warnings blocking - so the compiler now catches the recurring defect class while the code keeps its Swift 5 shape. The pre-existing codebase surfaced ~30 diagnostics, fixed structurally (Sendable protocols, a Sendable APIClient, value-typed Vision output) except six cached `Regex` statics marked `nonisolated(unsafe)` with the immutability argument stated inline.
+
+**Saving a capture writes image bytes and a minimal record to disk; OCR runs in the drain, not on the save path.**
+Rejected: OCR at enqueue (a sixty-page backlog scan would hold the person for a minute of recognition against §7.4's "return to Home immediately"), and never persisting the parse (re-running OCR on every retry burns battery for identical output).
+Why: the save path's only job is durability, and disk writes are milliseconds. The drain runs OCR once per receipt, persists the result on the item, and every later attempt reuses it.
+
+**The outbox is a per-item directory under Application Support: image first, `item.json` written atomically last as the commit point.**
+Rejected: Core Data/SQLite (a database for a queue of a dozen items whose payload is a JPEG is machinery without a reader), UserDefaults (wrong for blobs, wrong durability story), and a single queue file (every item update rewrites every item; one corruption loses the whole queue).
+Why: the commit point makes partial enqueues detectable, items fail independently, and `item.json` stays human-readable for diagnosing a stuck queue by hand. Application Support is in device backups, which tax records want. A directory without `item.json` - the process died between the two writes, a save the person was never told failed - is counted into the "could not be read" note and kept, never deleted (the first draft swept these silently; the reviewer called it a second deletion path, and it was).
+
+**Each item persists a step machine - captured → parsed → uploaded(objectKey) - re-written after every completed step.**
+Rejected: restarting items from scratch on relaunch (re-uploads bytes already in storage and re-runs OCR), and persisting nothing mid-item (a kill between the PUT and the create repeats the PUT; between create and cleanup it double-creates).
+Why: a kill at any boundary resumes instead of repeats. The one unavoidable replay - create succeeded, cleanup did not - lands on the server's 409 `duplicate_image`, which the drain counts as saved: the wave-4 ruling extended to the queue, for the same reason (the receipt exists; punishing recovery would fail the batch).
+
+**Failures classify four ways, in one place: 409 → saved; 401 → wait for sign-in; network/5xx/408/429/locked-keychain → retry with backoff; any other 4xx and a missing image file → block for a human.**
+Rejected: retrying everything (a permanent 400 would head-block the FIFO queue forever - kickoff §3 forbids exactly this), failing anything permanently on its own (a queued receipt silently dying is the one unforgivable outcome), and per-call-site error handling (the drain is where a swallowed failure is invisible by construction, so classification is a single audited function).
+Why: blocked items surface on Home with the server's reason and two human actions - retry and discard (discard confirms first and is the only deletion path in the whole outbox). A connectivity-shaped failure stops the pass, since it is almost always queue-wide; an OCR failure defers only its own item, because it never is (reviewer finding - one unreadable page must not stall a backlog behind it). Backoff doubles 2s → 5min, reset by any trigger: foreground, connectivity restored, fresh capture, sign-in, manual retry, or a completed upload.
+
+**Outbox items carry the capturing user's id, read from the session JWT's `sub` claim; the drain uploads only the signed-in user's items.**
+Rejected: a separate stored user id (a second source of truth beside the token, with a migration for the existing install), asking `/api/me` at enqueue (capture must work offline), and no scoping (user A's queued receipts would upload into user B's account after an account switch - a constraint-4 violation the server cannot detect, since the create is authenticated as B).
+Why: the client's own token already names its user; decoding the payload locally makes no trust decision (the server verifies every request cryptographically regardless). Items from another account are held and stated on Home, never dropped, never uploaded.
+
+**After a capture the app returns straight to Home; the wave-4 auto-transition into the confirm queue is removed.**
+Rejected: keeping the immediate confirm flow by waiting for the outbox to land the fresh captures (a network wait on the capture path is what §7.4 exists to abolish; offline it becomes an indefinite spinner or a two-mode UX), and a hybrid online-fast-path (two code paths through capture was rejected in wave 4 and is no better now).
+Why: the kickoff is explicit - "on save, write to a local queue and return to Home immediately". Confirmation is one tap away (the pending badge, or the receipt's own detail screen) once the upload lands, seconds later when there is signal. Cost stated honestly: the everyday connected capture now takes one more tap to reach the confirm screen than wave 4's device-verified flow. Flagged for ratification at the gate.
+
+**OCR failures retry up to 3 attempts (persisted on the item), then the receipt uploads with empty suggestions.**
+Rejected: blocking the receipt on OCR (its safety outranks its prefill; the confirm screen already handles empty suggestions), and unlimited OCR retries (a genuinely corrupt image would head-block the queue forever).
+Why: Vision failing can be transient (memory pressure) or permanent (broken bytes); a bounded retry distinguishes them cheaply, and the count persists so relaunches do not reset the meter. The fallback date is the capture day - recorded at enqueue - not the upload day, which after an offline weekend can differ.
+
 ## 2026-08-06 - Wave-4 gate review, second pass (the owner)
 
 **Vendor is the topmost line within 15% of the tallest letter-bearing line in the top quarter, not the single tallest.**

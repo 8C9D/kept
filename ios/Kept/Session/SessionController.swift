@@ -21,6 +21,16 @@ final class SessionController: ObservableObject {
     /// when a new attempt starts.
     @Published private(set) var signInMessage: String?
 
+    /// Fired after a sign-in completes. Wired by the composition root to
+    /// wake the outbox: receipts queued when a session expired resume
+    /// uploading the moment their owner is back (wave-5 kickoff §3).
+    var onSignedIn: (() -> Void)?
+
+    /// Fired after any transition to signed-out. The outbox drops its
+    /// scheduled retries (pointless until someone signs in) and stops
+    /// displaying the departed user's queue.
+    var onSignedOut: (() -> Void)?
+
     private let api: any KeptAPI
     private let tokenStore: SessionTokenStore
 
@@ -77,6 +87,7 @@ final class SessionController: ObservableObject {
             )
             try tokenStore.save(response.token)
             state = .signedIn
+            onSignedIn?()
         } catch {
             // A rejected identity token lands here as a plain request
             // failure and returns cleanly to signed-out - never a hang in
@@ -121,5 +132,6 @@ final class SessionController: ObservableObject {
         }
         state = .signedOut
         signInMessage = failureNote ?? message
+        onSignedOut?()
     }
 }

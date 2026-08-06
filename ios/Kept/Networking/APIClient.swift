@@ -1,27 +1,48 @@
 import Foundation
 
+/// Where "the server rejected the session" is delivered to whoever handles
+/// it (SessionController). A main-actor box rather than a settable closure
+/// property on APIClient: the client is Sendable and shared across actors,
+/// and a mutable property on it would be exactly the shared mutable state
+/// strict concurrency exists to forbid. The box is wired once by the
+/// composition root, after construction, because the SessionController
+/// that handles the event is itself constructed with the client.
+@MainActor
+final class SessionRejectionRelay {
+    var onSessionRejected: (() -> Void)?
+
+    func sessionRejected() {
+        onSessionRejected?()
+    }
+}
+
 /// The one place requests are built, the session token is attached, and
 /// responses - success or failure - are interpreted. Endpoint methods
 /// (APIClient+Endpoints) say *what* to call; everything about *how* lives
 /// here, so there is exactly one implementation of auth and error handling
 /// rather than one per call site.
-final class APIClient {
+///
+/// Sendable by construction - every stored property is immutable and
+/// itself Sendable - because view models on the main actor and the wave-5
+/// outbox share this one instance.
+final class APIClient: Sendable {
     /// Read per request rather than captured once, so changing the server
     /// address in settings applies to the next request immediately.
-    private let baseURL: () -> URL
+    private let baseURL: @Sendable () -> URL
     private let transport: HTTPTransport
     private let tokenStore: SessionTokenStore
+    private let rejectionRelay: SessionRejectionRelay
 
-    /// Fired when the server rejects the session (or none is stored) so the
-    /// app can return to signed-out. Set after construction by the
-    /// composition root, because the SessionController that handles it is
-    /// itself constructed with this client.
-    var onSessionRejected: (@MainActor () -> Void)?
-
-    init(baseURL: @escaping () -> URL, transport: HTTPTransport, tokenStore: SessionTokenStore) {
+    init(
+        baseURL: @escaping @Sendable () -> URL,
+        transport: HTTPTransport,
+        tokenStore: SessionTokenStore,
+        rejectionRelay: SessionRejectionRelay
+    ) {
         self.baseURL = baseURL
         self.transport = transport
         self.tokenStore = tokenStore
+        self.rejectionRelay = rejectionRelay
     }
 
     // MARK: - Requests
@@ -156,8 +177,7 @@ final class APIClient {
     }
 
     private func rejectSession() async {
-        guard let onSessionRejected else { return }
-        await MainActor.run { onSessionRejected() }
+        await rejectionRelay.sessionRejected()
     }
 
     // MARK: - Coding
@@ -165,18 +185,18 @@ final class APIClient {
     /// The server serializes timestamps with JavaScript's `toISOString()` -
     /// always UTC, always fractional seconds. The plain form is accepted
     /// too so a serialization-detail change server-side is not a client
-    /// crash.
+    /// crash. ISO8601FormatStyle rather than ISO8601DateFormatter because
+    /// the strategy closure is @Sendable and the format style is a Sendable
+    /// value; the formatter class is not.
     static let decoder: JSONDecoder = {
-        let withFractionalSeconds = ISO8601DateFormatter()
-        withFractionalSeconds.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
+        let withFractionalSeconds = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        let plain = Date.ISO8601FormatStyle()
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let value = try container.decode(String.self)
-            guard let date = withFractionalSeconds.date(from: value) ?? plain.date(from: value) else {
+            guard let date = (try? withFractionalSeconds.parse(value)) ?? (try? plain.parse(value)) else {
                 throw DecodingError.dataCorruptedError(
                     in: container,
                     debugDescription: "Not an ISO 8601 timestamp: \(value)"

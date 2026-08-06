@@ -6,8 +6,8 @@ final class ConfirmQueueModelTests: XCTestCase {
     private var api: StubKeptAPI!
     private var queue: ConfirmQueueModel!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         api = StubKeptAPI()
         queue = ConfirmQueueModel(api: api)
     }

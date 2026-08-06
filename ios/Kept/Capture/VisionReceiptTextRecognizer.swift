@@ -23,16 +23,19 @@ struct VisionReceiptTextRecognizer: ReceiptTextRecognizer {
     }
 
     func recognizeText(in imageData: Data) async throws -> RecognizedText {
-        let request = VNRecognizeTextRequest()
-        // .accurate over .fast: a receipt is read once and the numbers are
-        // tax figures; recognition quality outranks latency (spec §4.2).
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
-
-        let handler = VNImageRequestHandler(data: imageData)
         // Vision's perform is synchronous CPU-bound work; a detached task
-        // keeps it off the main actor without inventing a queue.
-        let observations = try await Task.detached(priority: .userInitiated) {
+        // keeps it off the main actor without inventing a queue. The whole
+        // Vision interaction lives inside the task - its request, handler,
+        // and observations are not Sendable, so only the value-typed lines
+        // may cross back out (strict concurrency, wave 5).
+        let lines = try await Task.detached(priority: .userInitiated) {
+            let request = VNRecognizeTextRequest()
+            // .accurate over .fast: a receipt is read once and the numbers
+            // are tax figures; recognition quality outranks latency (§4.2).
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+
+            let handler = VNImageRequestHandler(data: imageData)
             do {
                 try handler.perform([request])
             } catch {
@@ -41,25 +44,25 @@ struct VisionReceiptTextRecognizer: ReceiptTextRecognizer {
             // After a successful perform, Vision's contract is an array -
             // empty when the page has no text. nil is "never performed",
             // unreachable here, and an empty parse is its honest reading.
-            return request.results ?? []
-        }.value
+            let observations = request.results ?? []
 
-        let lines = observations.compactMap { observation -> RecognizedLine? in
-            guard let candidate = observation.topCandidates(1).first else {
-                return nil
+            return observations.compactMap { observation -> RecognizedLine? in
+                guard let candidate = observation.topCandidates(1).first else {
+                    return nil
+                }
+                // Vision's boundingBox is normalized with the origin at the
+                // BOTTOM-left; RecognizedLine's verticalCenter is 0 at the
+                // TOP (how a person reads a receipt), hence the flip.
+                // Horizontal needs no flip.
+                let box = observation.boundingBox
+                return RecognizedLine(
+                    text: candidate.string,
+                    verticalCenter: 1.0 - box.midY,
+                    height: box.height,
+                    horizontalCenter: box.midX
+                )
             }
-            // Vision's boundingBox is normalized with the origin at the
-            // BOTTOM-left; RecognizedLine's verticalCenter is 0 at the TOP
-            // (how a person reads a receipt), hence the flip. Horizontal
-            // needs no flip.
-            let box = observation.boundingBox
-            return RecognizedLine(
-                text: candidate.string,
-                verticalCenter: 1.0 - box.midY,
-                height: box.height,
-                horizontalCenter: box.midX
-            )
-        }
+        }.value
 
         // Rows as printed, not fragments as recognized: this is what lets
         // the stored raw text keep "Subtotal 13.50" together for a future

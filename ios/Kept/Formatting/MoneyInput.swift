@@ -17,7 +17,9 @@ enum MoneyInput: Equatable {
     /// two decimals ("45", "45.2", "$1,234.56", "-45.20" - which is also
     /// what text(fromCents:) produces for a negative, so a refund prefill
     /// round-trips instead of blocking its own confirmation).
-    private static let pattern = #/^(-)?\$?\s*(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d{1,2}))?$/#
+    /// nonisolated(unsafe): Regex is not (yet) Sendable, but the pattern is
+    /// immutable and matching does not mutate it.
+    private nonisolated(unsafe) static let pattern = #/^(-)?\$?\s*(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d{1,2}))?$/#
 
     static func parse(_ text: String) -> MoneyInput {
         let trimmed = text.trimmingCharacters(in: .whitespaces)

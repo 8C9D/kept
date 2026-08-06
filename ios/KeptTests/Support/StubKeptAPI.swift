@@ -4,6 +4,10 @@ import Foundation
 /// A KeptAPI whose behaviour each test scripts with closures, recording
 /// calls for assertion. Model tests use this; transport-level behaviour
 /// (headers, error mapping) is APIClientTests' job against StubTransport.
+/// @MainActor satisfies the protocol's Sendable bound (wave 5) while
+/// keeping the scripted state actor-protected; the async requirements
+/// hop here implicitly.
+@MainActor
 final class StubKeptAPI: KeptAPI {
     struct UnstubbedCall: Error {
         let endpoint: String

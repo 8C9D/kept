@@ -54,4 +54,27 @@ final class ReceiptFormatTests: XCTestCase {
     func testUnparseableDateFallsBackToTheRawValue() {
         XCTAssertEqual(ReceiptFormat.purchaseDate("not-a-date", locale: enUS), "not-a-date")
     }
+
+    // MARK: - API-syntax timestamps (moved from CaptureFlowModel in wave 5)
+
+    func testCalendarDateUsesLocalDayInApiOrder() {
+        // Expected value built through DateFormatter - an independent
+        // implementation path from the Calendar components the code uses -
+        // so a wrong calendar, zone, or component order fails the test.
+        let instant = Date(timeIntervalSince1970: 1_775_000_000)
+        let independent = DateFormatter()
+        independent.locale = Locale(identifier: "en_US_POSIX")
+        independent.timeZone = .current
+        independent.dateFormat = "yyyy-MM-dd"
+        XCTAssertEqual(ReceiptFormat.calendarDate(of: instant), independent.string(from: instant))
+    }
+
+    func testTimestampIsIso8601Utc() {
+        // The other API-syntax string the client emits; the server's
+        // schema requires an offset (Z counts).
+        let instant = Date(timeIntervalSince1970: 1_775_000_000)
+        let rendered = ReceiptFormat.timestamp(of: instant)
+        XCTAssertNotNil(rendered.wholeMatch(of: #/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/#))
+        XCTAssertEqual(ISO8601DateFormatter().date(from: rendered), instant)
+    }
 }

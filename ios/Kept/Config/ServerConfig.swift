@@ -60,6 +60,18 @@ final class ServerConfig: ObservableObject {
         baseURL != Self.defaultBaseURL
     }
 
+    /// The address APIClient's per-request closure reads. A static read of
+    /// UserDefaults (thread-safe, Sendable) rather than a capture of this
+    /// ObservableObject, which belongs to the UI and is not Sendable; both
+    /// paths share parseBaseURL, so they cannot disagree about validity.
+    static func currentBaseURL(defaults: UserDefaults) -> URL {
+        if let stored = defaults.string(forKey: defaultsKey),
+           let url = parseBaseURL(stored) {
+            return url
+        }
+        return defaultBaseURL
+    }
+
     func setOverride(_ input: String) throws {
         guard let url = Self.parseBaseURL(input) else {
             throw InvalidBaseURL(input: input)

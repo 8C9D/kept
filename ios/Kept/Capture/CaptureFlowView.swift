@@ -1,30 +1,27 @@
 import SwiftUI
 
-/// The whole capture journey in one full-screen presentation: scanner →
-/// per-page saving → the confirm queue → back to Home. One receipt or a
+/// The capture journey (spec §7.4): scanner → per-page save into the
+/// outbox → straight back to Home. Saving is a local disk write, so this
+/// screen is on screen for moments; the outbox uploads behind Home, where
+/// queued items show with their status, and confirmation happens from the
+/// pending badge once each receipt reaches the server. One receipt or a
 /// batch of eighty follows the same path, because a single capture is a
 /// batch of one (spec §6A).
 struct CaptureFlowView: View {
     private enum Stage {
         case scanning
         case saving
-        case confirming
     }
 
     @StateObject private var captureModel: CaptureFlowModel
-    @StateObject private var queue: ConfirmQueueModel
     @State private var stage: Stage = .scanning
 
     /// Called on the way out; true when anything might have changed and
     /// Home should refresh its list.
     private let onFinished: (_ didChangeAnything: Bool) -> Void
 
-    init(api: APIClient, onFinished: @escaping (_ didChangeAnything: Bool) -> Void) {
-        _captureModel = StateObject(wrappedValue: CaptureFlowModel(
-            api: api,
-            recognizer: VisionReceiptTextRecognizer()
-        ))
-        _queue = StateObject(wrappedValue: ConfirmQueueModel(api: api))
+    init(outbox: OutboxController, onFinished: @escaping (_ didChangeAnything: Bool) -> Void) {
+        _captureModel = StateObject(wrappedValue: CaptureFlowModel(outbox: outbox))
         self.onFinished = onFinished
     }
 
@@ -49,14 +46,6 @@ struct CaptureFlowView: View {
 
         case .saving:
             savingBody
-
-        case .confirming:
-            NavigationStack {
-                ConfirmQueueView(queue: queue) {
-                    onFinished(true)
-                }
-            }
-            .interactiveDismissDisabled()
         }
     }
 
@@ -73,7 +62,7 @@ struct CaptureFlowView: View {
                     Text("Saving receipt…")
                         .font(.headline)
                 }
-                Text("Reading the text on device.")
+                Text("Saved on this phone; uploads on its own.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -83,10 +72,10 @@ struct CaptureFlowView: View {
             failedBody(message)
 
         case .saved:
-            // Straight into confirming - no success modal, ever (§10A.1).
+            // Straight back to Home - the receipts are safe in the outbox,
+            // and no success modal, ever (§10A.1).
             Color.clear.onAppear {
-                stage = .confirming
-                Task { await queue.loadNext() }
+                onFinished(true)
             }
         }
     }
@@ -104,9 +93,9 @@ struct CaptureFlowView: View {
             }
             .buttonStyle(.borderedProminent)
             Button("Give up on the rest") {
-                // Pages already saved are pending receipts; the queue
-                // still offers them, so finishing here loses only the
-                // unsaved scans - and the paper is still in hand.
+                // Pages already saved are queued in the outbox and shown
+                // on Home; finishing here loses only the unsaved scans -
+                // and the paper is still in hand.
                 onFinished(true)
             }
         }

@@ -8,7 +8,9 @@ import Foundation
 /// parser can produce the same shape to augment or override these
 /// suggestions, including re-parsing old receipts from their stored raw
 /// text, without the confirm screen changing at all.
-struct ReceiptSuggestions: Equatable {
+/// Codable because the wave-5 outbox persists the parse result with each
+/// queued receipt.
+struct ReceiptSuggestions: Codable, Equatable {
     /// Integer cents, like every money value in the system. Never a float.
     var totalCents: Int?
     var hstCents: Int?

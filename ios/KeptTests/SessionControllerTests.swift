@@ -9,8 +9,8 @@ final class SessionControllerTests: XCTestCase {
     private var api = StubKeptAPI()
     private var tokenStore = InMemoryTokenStore()
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         api = StubKeptAPI()
         tokenStore = InMemoryTokenStore()
     }
@@ -55,6 +55,42 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertEqual(controller.state, .signedIn)
         XCTAssertEqual(tokenStore.stored, "issued-session-jwt")
         XCTAssertNil(controller.signInMessage)
+    }
+
+    func testSignInSuccessFiresOnSignedInAndFailureDoesNot() async {
+        // The wave-5 outbox resumes on this callback: receipts queued when
+        // a session expired must start uploading the moment their owner is
+        // back - and must NOT be poked by a failed attempt.
+        api.signInHandler = { _, _ in
+            Fixtures.signInResponse(token: "issued-session-jwt")
+        }
+        let controller = makeController()
+        var signedInCalls = 0
+        controller.onSignedIn = { signedInCalls += 1 }
+
+        await controller.signIn(identityToken: "token", displayName: nil)
+        XCTAssertEqual(signedInCalls, 1)
+
+        struct Boom: Error {}
+        api.signInHandler = { _, _ in throw Boom() }
+        await controller.signIn(identityToken: "token", displayName: nil)
+        XCTAssertEqual(signedInCalls, 1, "a failed sign-in fires nothing")
+    }
+
+    func testEveryTransitionToSignedOutFiresOnSignedOut() {
+        // The outbox listens on this to stop displaying the departed
+        // user's queue; both flavours of sign-out must reach it.
+        tokenStore.stored = "a-token"
+        let controller = makeController()
+        var signedOutCalls = 0
+        controller.onSignedOut = { signedOutCalls += 1 }
+
+        controller.signOut()
+        XCTAssertEqual(signedOutCalls, 1)
+
+        tokenStore.stored = "another-token"
+        controller.handleSessionRejected()
+        XCTAssertEqual(signedOutCalls, 2)
     }
 
     func testRejectedIdentityTokenReturnsCleanlyToSignedOut() async {

@@ -1,0 +1,725 @@
+import CryptoKit
+import Foundation
+
+/// The saving side of capture (spec §7.4): CaptureFlowModel hands each
+/// scanned page here and returns to Home without touching the network.
+/// Split from OutboxController's full surface so its tests script a stub
+/// instead of a real queue.
+@MainActor
+protocol OutboxEnqueuing: AnyObject {
+    /// Durably queues one scanned page as a receipt-to-be. When this
+    /// returns, the receipt is safe on the phone; when it throws (a full
+    /// disk, mainly), the capture flow must say so - the paper is still in
+    /// the person's hand, and a false "saved" is the one unforgivable
+    /// answer (wave-5 kickoff §1).
+    func enqueue(imageData: Data) async throws
+}
+
+/// The offline outbox (spec §7.4): owns the durable queue of captured
+/// receipts and drains it to the server - OCR, presigned upload, create -
+/// retrying with backoff, pausing for sign-in, and surfacing anything
+/// stuck on Home. The person is never blocked on any of this and never
+/// told something succeeded that has not: an outbox row means "on this
+/// phone", a receipt in the list means the server confirmed it, and there
+/// is no state in between.
+///
+/// Concurrency shape, learned the hard way over waves 3-4: all state
+/// lives on the main actor, and the drain is single-flight by task
+/// identity - requestDrain() while a drain runs is a no-op, so a
+/// double-tapped retry cannot start a second pass over the same item. The
+/// drain re-reads `items` and re-checks the signed-in user at every step
+/// boundary, because every await is a suspension point where an enqueue,
+/// a discard, or a whole account switch may have run (the reviewer found
+/// the first draft checking ownership only at pass start, which left a
+/// mid-flight sign-out able to upload one user's receipt under another's
+/// session - constraint 4's worst case).
+@MainActor
+final class OutboxController: ObservableObject {
+    /// One queued receipt as Home renders it.
+    struct Entry: Equatable, Identifiable {
+        let id: UUID
+        let capturedAt: Date
+        let status: Status
+
+        enum Status: Equatable {
+            /// In line; the drain will reach it.
+            case waiting
+            /// Being worked on right now (OCR, upload, or create).
+            case processing
+            /// A retryable failure (no signal, server down, an image OCR
+            /// keeps choking on) paused this item; the message is the most
+            /// recent reason.
+            case waitingToRetry(message: String)
+            /// A permanent failure stopped this item. It never auto-runs
+            /// again: a human retries it or discards it (kickoff §3).
+            case needsAttention(message: String)
+        }
+    }
+
+    /// The signed-in user's queue, oldest capture first.
+    @Published private(set) var entries: [Entry] = []
+    /// Queued receipts captured under a different account than the one
+    /// signed in. Held, stated, and never uploaded until their owner signs
+    /// back in (constraint 4).
+    @Published private(set) var otherAccountCount = 0
+    /// Records on disk that could not be read back - a record that fails
+    /// to decode, or an image whose commit record never got written
+    /// because the process died mid-save. Counted and stated on Home,
+    /// kept on disk, never silently dropped or deleted.
+    @Published private(set) var unreadableCount = 0
+    /// Bumps once per receipt the server confirmed (created, or 409 -
+    /// already there). Home refreshes its list when this changes, which is
+    /// how a queued row turns into a real pending receipt on screen.
+    @Published private(set) var serverConfirmedCount = 0
+    /// Non-nil when the queue itself could not be loaded from disk. The
+    /// load is retried on every drain trigger, so the condition heals
+    /// itself if the disk does.
+    @Published private(set) var loadFailureNote: String?
+    /// A queue-wide condition the drain hit that belongs to no single
+    /// item: the keychain refusing to read (device locked mid-drain), or
+    /// a finished receipt's local copy refusing to delete. Stated, never
+    /// swallowed - a background failure nobody can see is the worst kind
+    /// (wave-5 kickoff §5).
+    @Published private(set) var drainFailureNote: String?
+
+    /// After this many failed OCR attempts an image uploads with empty
+    /// suggestions: the receipt's safety outranks its prefill, and the
+    /// confirm screen already handles a suggestion-less receipt.
+    static let maxOcrAttempts = 3
+
+    private let store: OutboxStore
+    private let api: any KeptAPI
+    private let recognizer: any ReceiptTextRecognizer
+    private let tokenStore: SessionTokenStore
+    private let connectivity: ConnectivityMonitor
+    private let backgroundContinuation: BackgroundContinuation
+    private let now: @Sendable () -> Date
+
+    /// The in-memory mirror of the store, sorted by sequence. Mutations
+    /// write the store first, then this (the one exception, OCR attempt
+    /// counting, is argued at its site), so the two cannot disagree for
+    /// longer than one failed write - which is surfaced, not swallowed.
+    private var items: [OutboxItem] = []
+    /// Set once the first successful loadAll has run; enqueues and drains
+    /// both ensure it, so a failed load at launch is retried rather than
+    /// permanent (reviewer finding: start() loading exactly once made a
+    /// transient disk error at launch hide the queue for the whole run).
+    private var hasLoadedOnce = false
+    /// The next FIFO position, claimed synchronously at enqueue - two
+    /// interleaved enqueues can never share a sequence, which is what
+    /// keeps "two receipts captured offline both arrive, in order" true.
+    private var nextSequence = 1
+    /// The item a drain pass is working on, for status display.
+    private var activeItemId: UUID?
+    /// Most recent retryable failure per item, in-memory only: a relaunch
+    /// retries immediately anyway, so persisting the message would only
+    /// preserve staleness.
+    private var retryMessages: [UUID: String] = [:]
+
+    /// Single-flight drain (see the type comment).
+    private var drainTask: Task<Void, Never>?
+    /// Whether a drain pass is running. Tests poll this to wait for the
+    /// fire-and-forget drain to settle; nothing in the app reads it.
+    var isDraining: Bool { drainTask != nil }
+    /// The scheduled backoff retry, if one is waiting. Any external
+    /// trigger - foreground, connectivity, a new capture, sign-in, a tap
+    /// on Retry - cancels it and drains immediately with the delay reset.
+    private var pendingRetry: Task<Void, Never>?
+    private var retryDelay: TimeInterval = OutboxController.baseRetryDelay
+
+    private static let baseRetryDelay: TimeInterval = 2
+    private static let maxRetryDelay: TimeInterval = 300
+
+    init(
+        store: OutboxStore,
+        api: any KeptAPI,
+        recognizer: any ReceiptTextRecognizer,
+        tokenStore: SessionTokenStore,
+        connectivity: ConnectivityMonitor,
+        backgroundContinuation: BackgroundContinuation,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.store = store
+        self.api = api
+        self.recognizer = recognizer
+        self.tokenStore = tokenStore
+        self.connectivity = connectivity
+        self.backgroundContinuation = backgroundContinuation
+        self.now = now
+    }
+
+    /// Called once at launch: watch for connectivity and start draining.
+    /// The first drain pass loads whatever survived the last run.
+    func start() async {
+        connectivity.start { [weak self] in
+            self?.externalTrigger()
+        }
+        requestDrain()
+    }
+
+    // MARK: - Session identity
+
+    /// The signed-in user, decoded from the session token. One derivation
+    /// for the whole type, with one error policy: nil means signed out
+    /// (or a token this app cannot read - the same thing here), a throw
+    /// means the keychain read itself failed, which callers surface
+    /// rather than fold into "signed out" (reviewer finding: an earlier
+    /// draft's `try?` paused the queue in silence when the device locked
+    /// mid-drain).
+    private func currentUserId() throws -> UUID? {
+        guard let token = try tokenStore.load() else { return nil }
+        return SessionTokenClaims.userId(inToken: token)
+    }
+
+    /// Wired to sign-out - user-initiated or a rejected session. Any
+    /// scheduled retry is pointless until someone signs back in (sign-in
+    /// is itself a trigger), and the display must stop claiming the
+    /// signed-out user's items. An in-flight drain pass is left to stop
+    /// itself: its per-step ownership checks refuse to continue another
+    /// account's work.
+    func sessionDidEnd() {
+        pendingRetry?.cancel()
+        pendingRetry = nil
+        retryDelay = Self.baseRetryDelay
+        rebuildEntries()
+    }
+
+    // MARK: - Enqueue (the §7.4 save path)
+
+    func enqueue(imageData: Data) async throws {
+        // Best-effort: loading first keeps new sequence numbers above the
+        // stored ones, but a failed load must never block a save - this
+        // receipt's durability outranks the ordering nicety.
+        try? await ensureLoaded()
+        guard let userId = try currentUserId() else {
+            throw NotSignedInError()
+        }
+        // Claimed before any await: an interleaved enqueue gets the next
+        // number, never this one.
+        let sequence = nextSequence
+        nextSequence += 1
+        let item = OutboxItem(
+            id: UUID(),
+            userId: userId,
+            sequence: sequence,
+            capturedAt: now(),
+            sha256: Self.sha256Hex(imageData),
+            progress: .captured,
+            ocrAttempts: 0,
+            blockedMessage: nil
+        )
+        try await store.add(item, imageData: imageData)
+        items.append(item)
+        items.sort { $0.sequence < $1.sequence }
+        rebuildEntries()
+        // A fresh capture is the natural moment to try the network again,
+        // whatever backoff an earlier failure left behind.
+        externalTrigger()
+    }
+
+    /// Enqueue was asked for while no session exists - unreachable through
+    /// the UI (capture lives behind sign-in) but stated, not assumed.
+    struct NotSignedInError: LocalizedError {
+        var errorDescription: String? {
+            "You are signed out. Sign in and scan this receipt again."
+        }
+    }
+
+    // MARK: - Triggers
+
+    /// Foreground, connectivity back, sign-in, fresh capture, or a tap on
+    /// Retry: reset the backoff and drain now.
+    func externalTrigger() {
+        pendingRetry?.cancel()
+        pendingRetry = nil
+        retryDelay = Self.baseRetryDelay
+        requestDrain()
+    }
+
+    /// Clears a needs-attention item back into the queue and drains. The
+    /// failure was called permanent, but the human asked - maybe the
+    /// server was misbehaving, maybe an app update fixed the contract.
+    func retryBlockedItem(id: UUID) async {
+        guard let index = items.firstIndex(where: { $0.id == id }),
+              items[index].blockedMessage != nil else {
+            return
+        }
+        var item = items[index]
+        item.blockedMessage = nil
+        do {
+            try await store.update(item)
+        } catch {
+            // The tap must not fail into silence: the item stays blocked,
+            // and its message now says why the retry could not start.
+            if let index = items.firstIndex(where: { $0.id == id }) {
+                items[index].blockedMessage = "Retry could not start: \(error.localizedDescription)"
+            }
+            rebuildEntries()
+            return
+        }
+        // Re-find: the awaited write is a suspension point and the queue
+        // may have changed shape.
+        if let index = items.firstIndex(where: { $0.id == id }) {
+            items[index] = item
+        }
+        rebuildEntries()
+        externalTrigger()
+    }
+
+    /// Deletes a needs-attention item, image and all. Only the UI's
+    /// confirmed, human-initiated path calls this - the queue itself never
+    /// discards anything (kickoff §3: no silent vanishing).
+    func discardBlockedItem(id: UUID) async {
+        guard let index = items.firstIndex(where: { $0.id == id }),
+              items[index].blockedMessage != nil else {
+            return
+        }
+        do {
+            try await store.remove(itemId: id)
+        } catch {
+            if let index = items.firstIndex(where: { $0.id == id }) {
+                items[index].blockedMessage = "Could not discard: \(error.localizedDescription)"
+            }
+            rebuildEntries()
+            return
+        }
+        items.removeAll { $0.id == id }
+        rebuildEntries()
+    }
+
+    // MARK: - Drain
+
+    private func requestDrain() {
+        guard drainTask == nil else { return }
+        drainTask = Task {
+            await drain()
+            drainTask = nil
+        }
+    }
+
+    /// Loads the queue from disk once per run, retried on every drain
+    /// until it succeeds.
+    private func ensureLoaded() async throws {
+        guard !hasLoadedOnce else { return }
+        let loaded = try await store.loadAll()
+        // Replace, not merge: the store is the source of truth, and any
+        // item enqueued before this load ran was written to the store
+        // first, so it is in `loaded` too.
+        items = loaded.items
+        unreadableCount = loaded.unreadableCount
+        nextSequence = (loaded.items.map(\.sequence).max() ?? 0) + 1
+        hasLoadedOnce = true
+        loadFailureNote = nil
+        rebuildEntries()
+    }
+
+    private func drain() async {
+        // Keep an in-flight pass alive briefly if the app is pocketed
+        // mid-upload; ending the grant is idempotent.
+        let endContinuation = backgroundContinuation.begin()
+        defer { endContinuation() }
+
+        do {
+            try await ensureLoaded()
+        } catch {
+            loadFailureNote = "Queued receipts could not be loaded. \(error.localizedDescription)"
+            scheduleRetry()
+            return
+        }
+
+        drainFailureNote = nil
+        // Items set aside for this pass only: a failure that is one
+        // item's own (OCR choking on one image) must not stall the queue
+        // behind it. Backoff comes back for them.
+        var deferredThisPass: Set<UUID> = []
+
+        while true {
+            let userId: UUID?
+            do {
+                userId = try currentUserId()
+            } catch {
+                // The keychain read itself failed - the device locked
+                // mid-drain, most likely (WhenUnlocked accessibility, by
+                // design). Say so and back off; the next foreground is by
+                // definition unlocked.
+                drainFailureNote = "Uploads are paused: \(error.localizedDescription)"
+                scheduleRetry()
+                break
+            }
+            guard let userId,
+                  let item = items.first(where: {
+                      $0.userId == userId
+                          && $0.blockedMessage == nil
+                          && !deferredThisPass.contains($0.id)
+                  }) else {
+                break
+            }
+
+            activeItemId = item.id
+            retryMessages[item.id] = nil
+            rebuildEntries()
+
+            do {
+                try await advance(item)
+            } catch {
+                switch classify(error) {
+                case .blockItem(let message):
+                    await blockItem(item.id, message: message)
+                    // The failure is this item's alone and permanent; the
+                    // queue behind it keeps moving.
+                case .deferItem(let message):
+                    // This item's alone but worth retrying (OCR, so far):
+                    // set it aside for the pass and keep moving.
+                    retryMessages[item.id] = message
+                    deferredThisPass.insert(item.id)
+                case .retryLater(let message):
+                    // Almost always connectivity- or server-wide, so the
+                    // whole pass stops and backs off rather than burning
+                    // an attempt per item.
+                    retryMessages[item.id] = message
+                    activeItemId = nil
+                    rebuildEntries()
+                    scheduleRetry()
+                    return
+                case .pauseForSignIn:
+                    // The session died (expired, or revoked via
+                    // token_version). APIClient has already returned the
+                    // app to sign-in; the queue simply waits - sign-in
+                    // success is a trigger, so it resumes by itself
+                    // (kickoff §3: wait, never fail permanently).
+                    activeItemId = nil
+                    rebuildEntries()
+                    return
+                }
+            }
+        }
+        activeItemId = nil
+        rebuildEntries()
+        if !deferredThisPass.isEmpty {
+            scheduleRetry()
+        }
+    }
+
+    /// Runs the item's remaining steps in order, persisting after each so
+    /// a kill resumes rather than repeats. Two re-checks bracket every
+    /// step, because each await is a suspension point:
+    /// - ownership: the signed-in user must still be the item's owner, or
+    ///   a step begun now would run under someone else's session and
+    ///   upload this receipt into their account (constraint 4);
+    /// - existence: the item must still be in `items`, or its result
+    ///   belongs to a receipt that was discarded meanwhile. (Defensive:
+    ///   today only blocked items can be discarded and blocked items are
+    ///   never advanced, but that is a UI invariant, not a structural one.)
+    ///
+    /// Honest residual: ownership is checked here, on the main actor, but
+    /// the token itself is read again inside APIClient microseconds later.
+    /// A full sign-out-and-different-sign-in landing inside that gap is
+    /// not physically achievable by a human; the realistic window - a
+    /// switch during a multi-second upload or create - is what these
+    /// checks close. Recorded for the pre-wave-6 security review.
+    private func advance(_ startingItem: OutboxItem) async throws {
+        var item = startingItem
+        while true {
+            guard try currentUserId() == item.userId else { return }
+            switch item.progress {
+            case .captured:
+                item = try await runOcr(on: item)
+            case .parsed(let parsed):
+                let image = try await store.imageData(itemId: item.id)
+                let target = try await api.uploadTarget(contentType: .jpeg)
+                // The presigned key was issued for whoever the session
+                // names NOW. If that is no longer this item's owner, the
+                // key must not stick to the item: a later create under
+                // the owner's session would name a foreign object key
+                // and be refused permanently.
+                guard try currentUserId() == item.userId else { return }
+                try await api.uploadImage(to: target, data: image, contentType: .jpeg)
+                item.progress = .uploaded(parsed, objectKey: target.objectKey)
+                try await persist(item)
+            case .uploaded(let parsed, let objectKey):
+                do {
+                    _ = try await api.createReceipt(
+                        createRequest(for: item, parsed: parsed, objectKey: objectKey)
+                    )
+                } catch let apiError as APIError where Self.isDuplicateImage(apiError) {
+                    // 409 from the create - and only from the create; a
+                    // duplicate_image anywhere else must not delete a
+                    // receipt that was never created (reviewer finding).
+                    // These exact bytes are already attached to one of
+                    // this user's receipts, so the receipt exists: the
+                    // classic cause is a create whose response was lost.
+                    // Counting it saved is recovery, not masking - the
+                    // wave-4 ruling, extended to the queue.
+                }
+                await finishItem(item.id)
+                return
+            }
+            guard let current = items.first(where: { $0.id == item.id }) else {
+                return
+            }
+            item = current
+        }
+    }
+
+    /// An OCR failure wrapped so the classifier can tell "this one image
+    /// is trouble" apart from "the world is trouble" - the former defers
+    /// one item, the latter pauses the queue (reviewer finding: treating
+    /// OCR failures as queue-wide let one unreadable page stall a whole
+    /// backlog behind it).
+    private struct OcrFailure: LocalizedError {
+        let underlying: Error
+        var errorDescription: String? {
+            underlying.localizedDescription
+        }
+    }
+
+    /// OCR with a bounded number of attempts, persisted on the item so
+    /// relaunches do not reset the meter. Vision failing can mean a
+    /// transient condition (memory pressure) or a genuinely unreadable
+    /// image; retrying distinguishes them, and after maxOcrAttempts the
+    /// receipt uploads with empty suggestions rather than staying hostage
+    /// to its prefill.
+    private func runOcr(on startingItem: OutboxItem) async throws -> OutboxItem {
+        var item = startingItem
+        let image = try await store.imageData(itemId: item.id)
+        do {
+            let recognized = try await recognizer.recognizeText(in: image)
+            let suggestions = ReceiptParser.parse(lines: recognized.lines)
+            item.progress = .parsed(ParsedReceipt(
+                suggestions: suggestions,
+                ocrRawText: recognized.rawText.isEmpty ? nil : recognized.rawText
+            ))
+        } catch {
+            item.ocrAttempts += 1
+            if item.ocrAttempts >= Self.maxOcrAttempts {
+                item.progress = .parsed(ParsedReceipt(suggestions: ReceiptSuggestions(), ocrRawText: nil))
+            } else {
+                // Memory first, disk best-effort - the one inversion of
+                // the persist() convention, for two reviewer-found
+                // reasons: a failing disk write must not replace the OCR
+                // error (the signal the queue needs to carry), and the
+                // attempt count must advance in memory regardless, or a
+                // persistently failing store would make the cap
+                // unreachable and retry this image forever.
+                applyInMemory(item)
+                try? await store.update(item)
+                throw OcrFailure(underlying: error)
+            }
+        }
+        try await persist(item)
+        return item
+    }
+
+    private func createRequest(
+        for item: OutboxItem,
+        parsed: ParsedReceipt,
+        objectKey: String
+    ) -> CreateReceiptRequest {
+        let suggestions = parsed.suggestions
+        return CreateReceiptRequest(
+            // The parser's date when it found one; otherwise the capture
+            // day - the day the person scanned it, not the day the upload
+            // finally went through, which after an offline weekend can
+            // differ. The confirm screen presents either amber (§7.2).
+            purchasedAt: suggestions.purchasedAt ?? ReceiptFormat.calendarDate(of: item.capturedAt),
+            capturedAt: ReceiptFormat.timestamp(of: item.capturedAt),
+            vendor: suggestions.vendor,
+            vendorTaxNumber: suggestions.vendorTaxNumber,
+            subtotalCents: suggestions.subtotalCents,
+            hstCents: suggestions.hstCents,
+            totalCents: suggestions.totalCents,
+            ocrRawText: parsed.ocrRawText,
+            ocrSuggestions: OcrSuggestionsPayload(suggestions),
+            image: CreateReceiptRequest.Image(objectKey: objectKey, sha256: item.sha256)
+        )
+    }
+
+    // MARK: - Item state changes
+
+    /// The server has the receipt; the local copy has done its job.
+    private func finishItem(_ id: UUID) async {
+        do {
+            try await store.remove(itemId: id)
+        } catch {
+            // The receipt IS on the server, so it leaves the visible
+            // queue regardless; the undeleted files resurface at next
+            // launch and their retried create lands on the 409 path -
+            // saved exactly once either way. Stated, because if the disk
+            // stays broken this repeats every launch and an unexplained
+            // reappearing receipt would look like a haunting.
+            drainFailureNote = "A saved receipt's local copy could not be removed: \(error.localizedDescription)"
+        }
+        items.removeAll { $0.id == id }
+        retryMessages[id] = nil
+        // A confirmed receipt proves the path works; the next failure, if
+        // any, deserves a fresh backoff clock.
+        retryDelay = Self.baseRetryDelay
+        serverConfirmedCount += 1
+        rebuildEntries()
+    }
+
+    private func blockItem(_ id: UUID, message: String) async {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        var item = items[index]
+        item.blockedMessage = message
+        // If persisting the block fails, it holds in memory for this run;
+        // after a relaunch the item auto-retries once more and either the
+        // 4xx reproduces (re-blocked, one wasted request per launch) or
+        // it does not (the retry was right). Both outcomes are correct,
+        // just not silent-forever loops.
+        try? await store.update(item)
+        if let index = items.firstIndex(where: { $0.id == id }) {
+            items[index] = item
+        }
+        rebuildEntries()
+    }
+
+    private func persist(_ item: OutboxItem) async throws {
+        try await store.update(item)
+        applyInMemory(item)
+    }
+
+    private func applyInMemory(_ item: OutboxItem) {
+        if let index = items.firstIndex(where: { $0.id == item.id }) {
+            items[index] = item
+        }
+    }
+
+    // MARK: - Failure classification
+
+    /// Every failure in the drain is routed through here or the create's
+    /// own duplicate-409 catch; there is no other catch. This is the map
+    /// the kickoff's §3 failure modes hang off, and the place a swallowed
+    /// error would be invisible - so every case carries its message to
+    /// the UI.
+    private enum FailureAction {
+        case retryLater(message: String)
+        case deferItem(message: String)
+        case blockItem(message: String)
+        case pauseForSignIn
+    }
+
+    private func classify(_ error: Error) -> FailureAction {
+        switch error {
+        case let apiError as APIError:
+            switch apiError {
+            case .sessionRejected:
+                return .pauseForSignIn
+            case .requestFailed(_, let message, let status):
+                // Timeout-shaped and rate-limit statuses are the server
+                // asking for patience, not refusing the request.
+                if status == 408 || status == 429 {
+                    return .retryLater(message: message)
+                }
+                if (400..<500).contains(status) {
+                    // A request the server will refuse every time - a
+                    // contract bug, not weather. Retrying forever would
+                    // burn the queue behind it; the item blocks instead
+                    // and waits for a human (kickoff §3).
+                    return .blockItem(message: message)
+                }
+                return .retryLater(message: message)
+            case .network(let urlError):
+                return .retryLater(message: urlError.localizedDescription)
+            case .unexpectedResponse(let status):
+                // Includes presigned PUT failures (storage answers XML,
+                // not the API envelope). A 403 there usually means the
+                // URL expired while queued - the retry gets a fresh one,
+                // so this is never permanent.
+                return .retryLater(message: "The server answered unexpectedly (HTTP \(status)).")
+            case .undecodableResponse:
+                // A 2xx whose body we couldn't read - the create may well
+                // have landed. The retry either succeeds or hits the 409
+                // recovery path; both end with the receipt saved once.
+                return .retryLater(message: "The server's answer could not be read.")
+            }
+        case let ocrFailure as OcrFailure:
+            // One image's trouble, not the queue's: set this item aside
+            // and keep the rest moving. The persisted attempt cap bounds
+            // how long a genuinely broken image can keep this up.
+            return .deferItem(message: ocrFailure.localizedDescription)
+        case let missingImage as OutboxMissingImageError:
+            // The image bytes are gone from disk; no retry can bring them
+            // back. Block and tell the human - the paper may still exist.
+            return .blockItem(message: missingImage.localizedDescription)
+        case let keychainError as KeychainError:
+            // The device locked mid-drain (WhenUnlocked accessibility, by
+            // design). The next foreground is by definition unlocked.
+            return .retryLater(message: keychainError.localizedDescription)
+        default:
+            // Store read/write failures and anything unforeseen: retry
+            // with backoff, reason attached.
+            return .retryLater(message: error.localizedDescription)
+        }
+    }
+
+    private func scheduleRetry() {
+        guard pendingRetry == nil else { return }
+        let delay = retryDelay
+        retryDelay = min(retryDelay * 2, Self.maxRetryDelay)
+        pendingRetry = Task {
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            pendingRetry = nil
+            requestDrain()
+        }
+    }
+
+    // MARK: - Presentation
+
+    private func rebuildEntries() {
+        let userId: UUID?
+        do {
+            userId = try currentUserId()
+        } catch {
+            userId = nil
+        }
+        guard let userId else {
+            // Signed out (or the keychain is refusing reads, which the
+            // drain reports separately). Nobody's items render - above
+            // all, the signed-out user's own captures must not be
+            // mislabelled "another account's" (reviewer finding).
+            entries = []
+            otherAccountCount = 0
+            return
+        }
+        var visible: [Entry] = []
+        var foreign = 0
+        for item in items {
+            guard item.userId == userId else {
+                foreign += 1
+                continue
+            }
+            let status: Entry.Status
+            if let message = item.blockedMessage {
+                status = .needsAttention(message: message)
+            } else if item.id == activeItemId {
+                status = .processing
+            } else if let message = retryMessages[item.id] {
+                status = .waitingToRetry(message: message)
+            } else {
+                status = .waiting
+            }
+            visible.append(Entry(id: item.id, capturedAt: item.capturedAt, status: status))
+        }
+        entries = visible
+        otherAccountCount = foreign
+    }
+
+    // MARK: - Hashing
+
+    private static func isDuplicateImage(_ error: APIError) -> Bool {
+        if case .requestFailed(let code, _, _) = error {
+            return code == "duplicate_image"
+        }
+        return false
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+}
+
+extension OutboxController: OutboxEnqueuing {}

@@ -2,8 +2,9 @@ import Foundation
 
 /// The seam between APIClient and the network. Production uses URLSession;
 /// tests substitute a stub and the whole networking layer above this line
-/// becomes unit-testable on the simulator (spec §10.2).
-protocol HTTPTransport {
+/// becomes unit-testable on the simulator (spec §10.2). Sendable because
+/// APIClient is shared across actors and holds it.
+protocol HTTPTransport: Sendable {
     func send(_ request: URLRequest) async throws -> (data: Data, response: HTTPURLResponse)
 }
 

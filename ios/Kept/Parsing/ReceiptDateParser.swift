@@ -13,16 +13,21 @@ enum ReceiptDateParser {
     /// fabricated 2030 date. Swift's regex engine has no lookbehind, hence
     /// the consumed prefix group rather than `(?<!\d)`.
 
+    // nonisolated(unsafe) on the cached patterns here and below: Regex is
+    // not (yet) marked Sendable, but these are immutable after
+    // initialization and matching does not mutate the value, so sharing
+    // them across tasks is safe. (Strict concurrency, wave 5.)
+
     /// yyyy-mm-dd, yyyy/mm/dd, yyyy.mm.dd
-    private static let yearFirst = #/(?:^|\D)(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)/#
+    private nonisolated(unsafe) static let yearFirst = #/(?:^|\D)(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)/#
     /// dd/mm/yyyy or mm/dd/yyyy - disambiguated below.
-    private static let yearLast = #/(?:^|\D)(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})(?!\d)/#
+    private nonisolated(unsafe) static let yearLast = #/(?:^|\D)(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})(?!\d)/#
     /// mm/dd/yy (two-digit year, assumed 20xx; receipts do print these).
-    private static let shortYear = #/(?:^|\D)(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})(?!\d)/#
+    private nonisolated(unsafe) static let shortYear = #/(?:^|\D)(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})(?!\d)/#
     /// "Jan 14, 2026" / "January 14 2026"
-    private static let monthNameFirst = #/([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(20\d{2})(?!\d)/#
+    private nonisolated(unsafe) static let monthNameFirst = #/([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(20\d{2})(?!\d)/#
     /// "14 Jan 2026"
-    private static let dayFirst = #/(?:^|\D)(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(20\d{2})(?!\d)/#
+    private nonisolated(unsafe) static let dayFirst = #/(?:^|\D)(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(20\d{2})(?!\d)/#
 
     /// The first valid date found in the text, or nil.
     static func firstDate(in text: String) -> String? {

@@ -3,8 +3,9 @@ import Foundation
 /// The seam between the capture flow and OCR, mirroring HTTPTransport's
 /// role for networking: models depend on this protocol, the Vision
 /// implementation is plumbing only a device can exercise, and tests script
-/// recognition results without a camera (spec §10.2).
-protocol ReceiptTextRecognizer {
+/// recognition results without a camera (spec §10.2). Sendable because the
+/// wave-5 outbox holds it across actor boundaries.
+protocol ReceiptTextRecognizer: Sendable {
     func recognizeText(in imageData: Data) async throws -> RecognizedText
 }
 

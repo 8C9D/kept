@@ -9,8 +9,8 @@ import XCTest
 final class ConfirmReceiptModelTests: XCTestCase {
     private var api: StubKeptAPI!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         api = StubKeptAPI()
     }
 

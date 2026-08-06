@@ -5,6 +5,9 @@ import Foundation
 /// test consumes them in order, and every request is recorded for
 /// assertion. This is the seam spec §10.2 requires - the entire networking
 /// layer above it runs for real.
+/// @MainActor for the protocol's Sendable bound (wave 5), like
+/// StubKeptAPI; the async requirement hops here implicitly.
+@MainActor
 final class StubTransport: HTTPTransport {
     enum Outcome {
         case respond(status: Int, body: Data)

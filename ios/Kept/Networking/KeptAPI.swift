@@ -4,8 +4,9 @@ import Foundation
 /// against a stub API without building HTTP responses. APIClient is the
 /// production implementation; endpoints are added here as waves need them,
 /// not speculatively. (Waves 1-3 added the first three; wave 4 added the
-/// capture-and-confirm four.)
-protocol KeptAPI {
+/// capture-and-confirm four.) Sendable because the main-actor models hand
+/// it into nonisolated request tasks.
+protocol KeptAPI: Sendable {
     func signInWithApple(identityToken: String, displayName: String?) async throws -> SignInResponse
     func receiptsPage(cursor: String?, status: ReceiptStatus?, limit: Int?) async throws -> ReceiptListPage
     func receiptDetail(id: UUID) async throws -> ReceiptDetail
