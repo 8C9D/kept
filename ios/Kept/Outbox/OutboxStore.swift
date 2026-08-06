@@ -75,7 +75,15 @@ actor FileOutboxStore: OutboxStore {
         var result = OutboxLoadResult(items: [], unreadableCount: 0)
         for entry in entries where entry.hasDirectoryPath {
             let itemFile = entry.appending(path: Self.itemFileName)
-            guard fileManager.fileExists(atPath: itemFile.path()) else {
+            // percentEncoded: false, here and in remove below: URL.path()
+            // percent-encodes by default, and the production directory has
+            // a space ("Application Support"), so the encoded string names
+            // a path that does not exist. fileExists then answered false
+            // for every real file - which made this guard misfile every
+            // healthy item as unreadable at launch, while remove's guard
+            // returned success without removing (wave-5 device run; the
+            // test directory had no space, so the suite was blind to it).
+            guard fileManager.fileExists(atPath: itemFile.path(percentEncoded: false)) else {
                 // No commit file. add() cleans up after its own failures,
                 // so the only way this state survives is the process dying
                 // between the image write and the record write - a save
@@ -134,7 +142,7 @@ actor FileOutboxStore: OutboxStore {
 
     func remove(itemId: UUID) async throws {
         let itemDirectory = self.itemDirectory(itemId)
-        guard fileManager.fileExists(atPath: itemDirectory.path()) else {
+        guard fileManager.fileExists(atPath: itemDirectory.path(percentEncoded: false)) else {
             return
         }
         try fileManager.removeItem(at: itemDirectory)

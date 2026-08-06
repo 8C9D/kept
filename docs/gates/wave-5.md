@@ -131,6 +131,16 @@ The re-test prefilled HST as **17.84 - the total** - the third wrong value from 
 
 **Also banked from this exchange:** §9 step 2 ("Later" queues pending, uploads, badge appears) and the §8 pairing check's upload half are effectively verified; the queued receipt now pending server-side is real data for the accuracy table once confirmed - correct its HST to 2.05 through the badge queue and `parse-accuracy` records the wave's whole story.
 
-## 12 · Stopping here
+## 12 · Airplane-mode run (the owner, 2026-08-06): a store defect, diagnosed evidence-first
 
-Wave 6 not started. The next session, per kickoff §7, is **the consolidated security review** (§7 above), then wave 6. The wave-5 gate closes when the device script (§9's version) passes on the phone, resuming from step 1.
+The run reported one correct new list row plus "2 saved receipts could not be read" - and per the owner's instruction the diagnosis came entirely from the device state before any code moved. What the evidence showed: the "airplane" capture had actually reached the server (Wi-Fi stays available under airplane mode - the 19:30:19 confirmed row was the tell, so the offline test is still to run, Wi-Fi explicitly off), the new row was genuinely server-backed, and the phone held **three** outbox directories - every item ever enqueued - each with a perfectly decodable `item.json` at `uploaded` and a matching server row. Nothing was lost and nothing was unreadable.
+
+**Root cause, reproduced before fixing:** both `fileExists` checks in `FileOutboxStore` used `URL.path()`, which percent-encodes by default - production lives under "Application Support", so every check asked about `Application%20Support` and got `false`. Remove's idempotency guard therefore reported success without removing (cleanup has never once run on device), and loadAll misfiled every healthy item as "no commit record → could not be read". The count accounted exactly: two leftovers at the last relaunch, the third added by the run itself. **The masking casualty:** items invisible to loadAll never re-entered the queue, so their retried creates never ran - the 409 self-heal, built precisely for replayed uploads, could not reach the very items it existed for.
+
+**Fixed:** `path(percentEncoded: false)` at all five call sites (two production, three in tests), and the store suite's temp directory now carries a deliberate space - the production-shaped path. Falsification verified both ways: with the bug reverted, all 8 store tests fail; restored, 169 iOS green, zero warnings. **Why the suite had been blind:** the test path had no space - the third instance in three waves of a test environment diverging from production in exactly the load-bearing dimension (fabricated Vision geometry; `.env.local` never loaded by the real entry point; now this), recorded as framework §9.3 candidate rule 5 with the strongest evidence of any candidate there.
+
+**Watch on next launch:** the three leftover directories should load as normal items, drain, land on 409, and clean themselves up - the recovery path's first real run, now actually reachable.
+
+## 13 · Stopping here
+
+Wave 6 not started. The next session, per kickoff §7, is **the consolidated security review** (§7 above), then wave 6. The wave-5 gate closes when the device script (§9's version) passes on the phone: the three-receipt offline test re-runs with Wi-Fi explicitly off, then force-quit, stuck-item, and pocket cases.

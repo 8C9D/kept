@@ -11,8 +11,16 @@ final class FileOutboxStoreTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        // The space is load-bearing: production lives under "Application
+        // Support", and URL.path()'s default percent-encoding turned that
+        // space into %20 - so fileExists denied every real file, remove
+        // never removed, and loadAll misfiled every healthy item as
+        // unreadable, while this suite, testing a space-free tmp path,
+        // stayed green (wave-5 device run). Every store test now walks a
+        // production-shaped path so that class of divergence cannot pass
+        // silently again.
         directory = FileManager.default.temporaryDirectory
-            .appending(path: "outbox-tests-\(UUID().uuidString)")
+            .appending(path: "outbox tests \(UUID().uuidString)")
         store = FileOutboxStore(directory: directory)
     }
 
@@ -110,7 +118,7 @@ final class FileOutboxStoreTests: XCTestCase {
         let loaded = try await store.loadAll()
         XCTAssertEqual(loaded.items.count, 1)
         XCTAssertEqual(loaded.unreadableCount, 1)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: interrupted.path()))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: interrupted.path(percentEncoded: false)))
     }
 
     func testCorruptItemFileIsCountedNotDroppedOrFatal() async throws {
@@ -123,7 +131,7 @@ final class FileOutboxStoreTests: XCTestCase {
         XCTAssertEqual(loaded.items.count, 1, "the healthy item still loads")
         XCTAssertEqual(loaded.unreadableCount, 1, "the corrupt one is stated, not vanished")
         XCTAssertTrue(
-            FileManager.default.fileExists(atPath: corrupt.path()),
+            FileManager.default.fileExists(atPath: corrupt.path(percentEncoded: false)),
             "the files stay on disk for diagnosis"
         )
     }
@@ -173,7 +181,7 @@ final class FileOutboxStoreTests: XCTestCase {
         // The directory itself must be gone - anything less would leave a
         // commit-less directory that loadAll then reports as an
         // unreadable receipt the person never had.
-        XCTAssertFalse(FileManager.default.fileExists(atPath: itemDirectory.path()))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: itemDirectory.path(percentEncoded: false)))
         let loaded = try await store.loadAll()
         XCTAssertTrue(loaded.items.isEmpty)
         XCTAssertEqual(loaded.unreadableCount, 0)

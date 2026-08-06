@@ -3,6 +3,14 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - Wave-5 airplane-mode run (the owner): the outbox store checks paths unencoded, and store tests walk a space-bearing path
+
+**Both `fileExists` checks in FileOutboxStore use `path(percentEncoded: false)`, and the store test suite's temporary directory deliberately contains a space.**
+Rejected: `URL.path()` bare (the defect: it percent-encodes by default, production lives under "Application Support", and the encoded string names a path that does not exist - so remove's idempotency guard answered "already gone" and returned success without ever removing, and loadAll's commit-file check misfiled every healthy item as unreadable at launch; three uploaded-and-created receipts left three undeleted directories and a false "2 saved receipts could not be read" on Home); the deprecated `.path` property (works, but the modern API with the explicit argument states the intent); and keeping the space-free test directory (the suite was green through the whole failure - reverting the fix now fails all 8 store tests, verified both ways).
+Why: diagnosed entirely from the device evidence before any code moved (the owner's instruction): all three "unreadable" item.json files pulled off the phone decoded perfectly, each at `uploaded` with a matching server row - nothing was lost and nothing was unreadable; the cleanup and the visibility check were lying about the same paths.
+**The masking casualty, named:** items invisible to loadAll never re-entered the queue, so their retried creates never ran - and the 409 duplicate-image self-heal, built precisely to absorb replayed uploads, could not reach the very items it existed for. A masked read defeated the recovery machinery downstream of it; the "N could not be read" note was the only symptom that survived, and it pointed away from the truth.
+**The general lesson (third instance; recorded in the framework, §9.3 candidate rule 5):** the test environment differed from production in exactly the dimension that mattered - fabricated Vision geometry (wave 4), `.env.local` never loaded by the real entry point (wave 3), and now a test path without the space production paths carry.
+
 ## 2026-08-06 - Wave-5 device re-test (the owner): column de-skew in row assembly
 
 **The row assembler estimates the receipt-wide vertical skew of the amount column (median of each amount fragment's delta to its nearest other-column neighbour, zero under 3 samples) and removes it before band-merging; emitted rows keep the measured geometry.**
