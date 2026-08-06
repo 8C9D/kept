@@ -183,13 +183,12 @@ final class ReceiptParserTests: XCTestCase {
     // MARK: - HST label priority (wave-5 device step 1)
 
     func testLabelledZeroGstRowDoesNotShadowTheHstRow() {
-        // Reconstructed from the wave-5 device receipt: a
-        // tax block printing "GST: $0.00" above "HST: $2.05" suggested
-        // the GST zero into the HST field - the input tax credit - under
-        // the old lumped HST|GST|TAX first match. ⚠ NOT a Vision dump:
-        // that scan was never queued, so its bytes exist nowhere to
-        // re-run Vision over; the real-geometry fixture is owed and
-        // lands with the device re-test (DECISIONS.md).
+        // The ranking rule in isolation, on already-clean rows: a tax
+        // block printing "GST: $0.00" above "HST: $2.05" must not put the
+        // GST zero into the HST field (the old lumped HST|GST|TAX first
+        // match did). The real-geometry version of this receipt lives in
+        // testRealSkewedReceiptPairsTheTaxBlockCorrectly, which also
+        // exercises the assembly that feeds this rule.
         let suggestions = ReceiptParser.parse(lines: [
             line("Subtotal $15.79", y: 0.60),
             line("GST: $0.00", y: 0.64),

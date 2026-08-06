@@ -3,6 +3,13 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - Wave-5 device re-test (the owner): column de-skew in row assembly
+
+**The row assembler estimates the receipt-wide vertical skew of the amount column (median of each amount fragment's delta to its nearest other-column neighbour, zero under 3 samples) and removes it before band-merging; emitted rows keep the measured geometry.**
+Rejected: any pairing rule change without geometry in hand (the owner's instruction, and the wave-4 fabricated-fixture lesson - the diagnosis came from `vision-dump` over the exact uploaded bytes); tightening or loosening the band threshold (the Food Court dump proves no threshold works - the amount column measured ~0.013 above its labels against a ~0.022 row pitch, so each amount's *nearest* label was genuinely the wrong one, and the tax block "GST $0.00 / HST $2.05 / Total $17.84" assembled as "GST $2.05 / HST $17.84" with both ends orphaned); nearest-center or stable matching (same defeat - proximity itself lies under skew); and full sequence-alignment assignment (correct in principle, heavyweight against §7.3's humble-heuristic doctrine, and unnecessary once the skew - which is one coherent camera/curl artifact, not per-row noise - is removed).
+Why: both real receipts to date show a coherent column offset (Food Court +0.013, Noodle House -0.008 - opposite signs, so the fixture pair covers both), and the median-of-nearest-deltas estimator is robust because most nearest pairings are true pairings even when the tax block's are not. Three different wrong HST suggestions from one paper (0.00, then 17.84 - the total - into the input tax credit field) were all this one structural misread.
+Stated limits: a skew at or beyond a full row pitch shifts every pairing by one row and is undetectable by any local geometry - the human confirming each value (constraint 2) remains the real floor. The total heuristic was re-checked for the reverse mispairing per the owner: it survived even the broken assembly here because "largest across total-labelled lines" plus the receipt's redundant contiguous `TOTAL: $ 17.84` line made it insensitive to losing one pairing; its residual exposure is an *inflating* mispair (a larger neighbour amount attaching to a Total label), which the de-skew now covers in the partial-pitch case and full-pitch skew still could defeat - accepted under the same constraint-2 floor.
+
 ## 2026-08-06 - Wave-5 device step 1 (the owner): HST/GST label priority
 
 **Tax labels are ranked, never lumped: non-zero HST > non-zero GST > non-zero TAX > zero HST > zero GST > zero TAX; topmost within a tier; total-mentioning TAX lines stay excluded.**
