@@ -32,6 +32,21 @@ final class APIClientTests: XCTestCase {
         )
     }
 
+    // MARK: - Transport configuration
+
+    func testProductionTransportNeverUsesAnHTTPCache() {
+        // A production-environment behaviour no request-level test can
+        // see (the same lesson as the space-free test path and the
+        // fabricated Vision geometry - framework §9.3 candidate 5): with
+        // the default policy, CFNetwork heuristically cached list
+        // responses and answered an OFFLINE pull-to-refresh with a stale
+        // 200, so the failure UI never fired. The configuration is the
+        // behaviour, so the configuration is what this asserts.
+        let configuration = URLSessionTransport().session.configuration
+        XCTAssertNil(configuration.urlCache)
+        XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+    }
+
     // MARK: - Token attachment
 
     func testAuthenticatedRequestCarriesBearerToken() async throws {

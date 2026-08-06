@@ -141,6 +141,14 @@ The run reported one correct new list row plus "2 saved receipts could not be re
 
 **Watch on next launch:** the three leftover directories should load as normal items, drain, land on 409, and clean themselves up - the recovery path's first real run, now actually reachable.
 
-## 13 · Stopping here
+## 13 · Offline diagnostic (the owner, 2026-08-06): the transport was lying, not the app
 
-Wave 6 not started. The next session, per kickoff §7, is **the consolidated security review** (§7 above), then wave 6. The wave-5 gate closes when the device script (§9's version) passes on the phone: the three-receipt offline test re-runs with Wi-Fi explicitly off, then force-quit, stuck-item, and pocket cases.
+The owner's pre-test check - both radios off, pull to refresh - produced no error and a current-looking empty list, and his framing named the stakes: a person can pull to refresh, see stale data, and believe it is current. The server keeps no request log, so the verdict came from the phone: its URL cache database held the post-wipe `{"receipts":[],"nextCursor":null,"pendingCount":0}` verbatim, and CFNetwork - given no cache directive by the API - had heuristically cached it and served it offline as a fresh 200. **The app's error handling was checked in the same pass and is correct**: a real network failure drops the rows and shows the failure view with reason and Retry, and an empty list does not suppress it. The masking lived a layer below; the app was lied to along with the user. (Same mechanism also served stale detail responses carrying expired presigned image URLs, and a stale pending badge.)
+
+**Fixed both sides, tested both sides:** the API transport now runs a cache-free session (`urlCache = nil` plus `.reloadIgnoringLocalCacheData` - either suffices; both set so neither is load-bearing), and every server response carries `Cache-Control: no-store` from app-wide middleware, so the contract is stated at the source for every future client. The iOS test asserts the transport's *configuration* - CFNetwork's cache behaviour being unreachable from a simulator test, the configuration is the behaviour - and the server tests assert the header on a 200 and a 401. That makes this the **fourth instance of framework §9.3 candidate rule 5**, with the sub-lesson recorded in `DECISIONS.md` per the owner: an unconfigured default in the layer beneath is still a decision, and masking there defeats correct error handling above it. Suites: iOS 170 green, server 152 green, zero warnings.
+
+**Re-test precondition now establishable:** with both radios off, pull-to-refresh must show the failure view - the honest offline signal the earlier runs could never produce.
+
+## 14 · Stopping here
+
+Wave 6 not started. The next session, per kickoff §7, is **the consolidated security review** (§7 above), then wave 6. The wave-5 gate closes when the device script (§9's version) passes on the phone: offline refresh failing honestly, then the three-receipt offline test with Wi-Fi explicitly off, force-quit, stuck-item, and pocket cases.

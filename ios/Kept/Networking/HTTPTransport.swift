@@ -9,7 +9,22 @@ protocol HTTPTransport: Sendable {
 }
 
 struct URLSessionTransport: HTTPTransport {
-    var session: URLSession = .shared
+    var session: URLSession = URLSessionTransport.uncachedSession
+
+    /// API traffic must never be answered from a local HTTP cache: with
+    /// the shared session's default policy, CFNetwork heuristically
+    /// cached list responses and served one to an OFFLINE pull-to-refresh
+    /// as a fresh 200 - the app's failure UI never fired because the app
+    /// was lied to along with the user (wave-5 device diagnostic; the
+    /// server now also sends Cache-Control: no-store). No cache object
+    /// and an ignore-cache policy each suffice alone; both are set so
+    /// neither is load-bearing.
+    static let uncachedSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
 
     func send(_ request: URLRequest) async throws -> (data: Data, response: HTTPURLResponse) {
         let (data, response) = try await session.data(for: request)

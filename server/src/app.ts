@@ -27,6 +27,18 @@ export function createApp(deps: AppDependencies): Hono {
   const app = new Hono();
   app.onError(renderError);
 
+  // Every API response is live state and must never be served from an
+  // HTTP cache. Without this header, iOS's CFNetwork heuristically cached
+  // list responses and answered an OFFLINE pull-to-refresh with a stale
+  // 200 - the app's failure UI never fired because, as far as the app
+  // could see, the request succeeded (wave-5 device diagnostic). The
+  // client also disables its cache; this states the contract at the
+  // source so every future client inherits it.
+  app.use("*", async (c, next) => {
+    await next();
+    c.header("Cache-Control", "no-store");
+  });
+
   app.route("/api/auth", authRoutes(deps));
   app.route("/api/receipts", receiptRoutes(deps));
   app.route("/api/export", exportRoutes(deps));

@@ -3,6 +3,13 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - Wave-5 offline diagnostic (the owner): the API transport carries no HTTP cache, and the server says so
+
+**Client: `URLSessionTransport` uses a session with `urlCache = nil` and `requestCachePolicy = .reloadIgnoringLocalCacheData` (either alone suffices; both are set so neither is load-bearing). Server: every API response carries `Cache-Control: no-store`, applied as app-wide middleware. Tests on both sides: the iOS suite asserts the transport's configuration (the configuration IS the behaviour - no request-level simulator test can see CFNetwork's cache), and the server suite asserts the header on a 200 and a 401.**
+Rejected: client-only (the very next client would re-discover this the same way; the header states the contract at the source), server-only (a client's explicit cache policy should not depend on every server being configured right), and `.ephemeral` session configuration (discards cookies and credentials storage too - broader than the defect, and the two explicit settings say precisely what is meant).
+Why: with both radios off, pull-to-refresh in the app showed no error and a current-looking empty list. The device's own cache database (`Library/Caches/…/Cache.db`) held the post-wipe list response verbatim; CFNetwork had heuristically cached it - Hono sent no cache directive - and served it offline as a fresh 200. Stale receipt-detail responses with expired presigned image URLs and a stale pending badge ride the same mechanism.
+**The lesson, per the owner, is not about error handling.** The app's own error path was verified correct at the same time: a network failure drops the rows and shows the failure view with the reason and a Retry, and an empty list does not suppress it. The masking lived **below** the app - the transport reported success because, as far as it knew, the request succeeded. The trap is trusting the layer beneath to behave as the code above assumes: URLSession's default is a component with its own policy, and an unconfigured default is still a decision. Fourth instance of the framework's §9.3 candidate rule 5 - a production-environment behaviour (CFNetwork cache heuristics) that no simulator unit test exercised, alongside the fabricated Vision geometry, the unloaded `.env.local`, and the space-free test path.
+
 ## 2026-08-06 - Wave-5 airplane-mode run (the owner): the outbox store checks paths unencoded, and store tests walk a space-bearing path
 
 **Both `fileExists` checks in FileOutboxStore use `path(percentEncoded: false)`, and the store test suite's temporary directory deliberately contains a space.**
