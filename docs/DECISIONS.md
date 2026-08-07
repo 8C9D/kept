@@ -3,6 +3,106 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - The owner's rulings on the security review, applied
+
+Every open finding from `docs/security/review-2026-08.md` and `docs/security/audit-2026-08.md` was ruled on and implemented.
+Recorded as one entry because the rulings were made together and several depend on each other.
+
+**Deployment target: Node on Fly.io for the origin, with Cloudflare proxying in front of it. R2 and Neon unchanged.**
+Rejected: **Cloudflare Workers, which was this same day's first ruling and was reversed within the hour.**
+Also rejected: a Worker origin with export generation moved to a Container or queue consumer (real work to buy a property nothing needs), and cutting the export budget to fit a 128 MB isolate (it would refuse longer periods to satisfy a platform we chose voluntarily).
+
+**The reversal is the part worth keeping.**
+The first ruling picked Workers because Hono was chosen at §4.2 partly for Workers portability, so the bet should be cashed, and because it puts the §10B rate limiter at the edge.
+Writing that into the spec is what surfaced the disqualifying fact - checked against Cloudflare's documentation rather than assumed: **a Workers isolate is capped at 128 MB on both the free and paid plans, per *isolate* and shared across concurrent requests, not per request.**
+`DEFAULT_EXPORT_LIMITS` is **256 MiB**, so the budget alone was double the ceiling before accounting for the zip existing twice during assembly.
+**the owner's reasoning on reversing: forcing a memory-heavy export onto a 128 MB isolate was buying portability we do not need at three users.**
+Cloudflare in front of a Node origin still supplies the edge rate limiter and DDoS protection that motivated the choice; only the origin's runtime changed, and `@hono/node-server`, `pg`, `archiver` and `exceljs` all stay as they are with no export rewrite.
+Workers is not foreclosed - it becomes available if `buildZip` ever streams to R2 instead of buffering - but nothing needs it today.
+
+**The export budget under a Node origin: measured, not argued.**
+Predicted first, per the standing rule, and the prediction was wrong in the direction that matters, which is why it was measured.
+A 250 MiB export (25 images just under the budget, against a storage double producing incompressible bytes on demand and discarding uploads, the way R2 behaves) peaked at **891 MiB RSS, 693 MiB above baseline - about 2.8x the payload**, against a prediction of roughly 2x.
+The multiplier is structural: `buildZip` accumulates the archive's output chunks and then `Buffer.concat`s them, so a fully-assembled incompressible zip exists twice, alongside the image buffer in flight.
+**Conclusion: the budget is sound but it sizes the machine.** Roughly 1 GB carries a single export with little margin, so **2 GB is the provision** - within `shared-cpu-1x`, since Fly's ceiling is 2 GB per shared CPU.
+⚠ Nothing serializes concurrent exports, so two at once doubles this. Acceptable at three users; the first thing to revisit if that changes.
+The measurement was a one-off (a 250 MiB allocation has no business in `npm test`) and is reproducible from this description.
+
+**The Debug and Release `Info.plist` are separate files, and a test asserts it.**
+Rejected: one plist with `INFOPLIST_PREPROCESS` conditionals (obscure, and a preprocessor in a plist is a worse thing to inherit than a duplicated key); and shipping the exception on the argument that `NSAllowsLocalNetworking` only relaxes local and link-local hosts (true, and still wrong - `ServerConfig` accepts any `http://` host, so a Release build would carry bearer-token traffic in cleartext to any LAN address typed into the settings sheet).
+Why the test matters more than the split: this defect lived **entirely in a build setting** and no runtime test could ever have caught it.
+`InfoPlistConfigurationTests` reads the source tree and `project.pbxproj` and asserts the shipping plist has no ATS keys, that Debug still has them (deleting the affordance would also make the first assertion pass), that the two files agree on every other key, and that the two configurations point at different files.
+Verified by restoring the pre-fix state: all four assertions fail.
+The cost taken knowingly: two files that must agree, which is what the third assertion is for.
+
+**Outbox files write with `.completeFileProtection`, and a locked read is no longer mistaken for a lost receipt.**
+Rejected: leaving the iOS default (`completeUntilFirstUserAuthentication`, which stops protecting after the first unlock following a boot - in practice, always) on files holding the vendor, tax number, every amount, the payment method, the notes, the full OCR text and the receipt image itself.
+**⚠ The ruling was safe on its stated reasoning and unsafe as a literal edit, which is worth recording.**
+The drain constraint is indeed unchanged - the keychain is already `WhenUnlocked`, so the drain cannot run locked.
+But `FileOutboxStore.imageData` mapped *any* read failure to `OutboxMissingImageError`, which the controller treats as **permanent** and reports to the person as "the saved image could not be read back from this phone".
+With complete protection, a locked read raises exactly that failure, so the edit as stated would have converted a healthy receipt on a locked phone into an unrecoverable one.
+A locked read now throws `OutboxLockedError` and classifies as `.retryLater`, next to the keychain case that already had this shape.
+`loadAll` fails the whole load rather than counting healthy items as unreadable, which keeps `hasLoadedOnce` false so the next foreground retries.
+Tested with a scripted locked read asserting `waitingToRetry`.
+Unverifiable, stated as a limit: the simulator does not enforce data protection, so the protection class is asserted as configuration (framework §9.3 rule 5, sixth instance).
+
+**`renderError` strips database detail unconditionally, and so does anything that stores an error message.**
+Rejected: keeping the raw log for diagnostic power now that the int4 bound removed the trigger.
+Why: the bound removed *a* trigger, not the class - any future failed query prints the same way, and the error monitor §10B plans is what turns a terminal on the owner's Mac into an exfiltration path.
+**⚠ The review's own recommended fix would not have worked, which is the useful part.**
+It proposed logging `error.message` and the constructor name instead of the object.
+But `DrizzleQueryError`'s constructor builds its message as `` `Failed query: ${query}\nparams: ${params}` `` - the bound parameters are **inside `error.message`**, not merely on a side property, and they are in `error.stack` too, whose first line is name + message.
+So redaction had to be structural rather than textual: an error carrying any database-error marker is described by its schema-identifying fields alone (`code`, `constraint`, `table`, ...), never its message, stack or properties.
+Our own errors keep their message and frames, because that text is ours.
+**Found while implementing, and fixed under the same ruling:** `runExportJob` stored `error.message` in `export_jobs.error`, which `GET /api/export/:id` **returns to the client** and the export screen renders.
+A failed query there would have handed a client the SQL and its bound parameters.
+That column is now redacted too, with the over-redaction direction tested - the size-limit message, which is written to be read by the person who hit it, still passes through.
+
+**`db:seed` and `db:claim` refuse any database that is not on this machine.**
+Rejected: guarding only `db:seed` (both rewrite tax records, and `db:claim` was already being edited); and comparing against a known dev URL rather than requiring loopback (the deployment target is Neon, whose hostnames are remote by construction, so loopback-only cannot be argued with in the moment someone exports a `DATABASE_URL` to try something).
+A `.local` mDNS name is refused too: it names *a* machine on the network, not necessarily this one.
+The URL-identity helpers moved to `src/db/databaseUrl.ts` and wave 4's `assertSeparateTestDatabase` now shares them rather than keeping a second copy of the same parsing.
+Verified on the real script, not only in unit tests: `DATABASE_URL=<neon-shaped> npm run db:seed` throws at module load, before the pool is constructed, and exits 1.
+
+**`db:claim` refuses receipts that carry image rows.**
+Rejected: rewriting `object_key` to the new owner's prefix - the bytes in storage stay at the old key, so the row would point at an object that does not exist, which is a quiet wrong answer in place of a loud refusal.
+Why refusing costs nothing: seed data creates no image rows at all, so this refuses nothing the script is used for.
+It closes the state the audit reached by hand - a receipt owned by one user whose image key names another.
+
+**`cents()` is narrowed to the int4 range; the test that asserted otherwise is replaced, not deleted.**
+Rejected: leaving the domain wider than its storage on the principle that the domain should not know about storage.
+Why: a value the type calls valid money and the database cannot store is not a storage detail, it is a contradiction, and where it surfaced was a 500 that logged the whole receipt.
+The bounds now live in `domain/money.ts` and `schemas.ts` imports them, so the HTTP boundary cannot stop short of what the column accepts.
+The superseded assertion (`cents(MAX_SAFE_INTEGER)` is accepted) encoded deliberate intent, so its replacement says so in place rather than vanishing.
+
+**Export zips move to `exports/{userId}/{jobId}/...`.**
+Rejected: one lifecycle rule per user (three today, and silently one more at every sign-up, remembered by nobody) and object tags at upload.
+Why: S3 and R2 lifecycle rules match a **literal** prefix, so `{userId}/exports/...` cannot express §10B's rule at all - no single prefix selects every user's exports without also selecting their receipt images, which must never expire.
+Pre-existing zips keep the old layout and fall outside the rule; there are none outside dev.
+**The general lesson: a retention rule written against a path that varies per user is not a rule, it is a description**, and this one survived two gate reviews because nobody wrote it out as the bucket would receive it.
+
+**Stored object keys are re-validated on read, in both places one is dereferenced.**
+Rejected: write-time validation alone.
+Why: it says "we issued every key we accepted", which is not the same as "we issued every key we are about to hand out" - rows change by paths that are not the create route.
+`assertIssuedObjectKey` now runs in the detail route before presigning and in `generateExport` before downloading, and throws (a 500, correctly - no client caused it) rather than returning false.
+The key shapes moved to `src/storage/objectKeys.ts` so the layout an isolation rule and a retention rule are both written against is stated in one place.
+Falsified: removing the check makes the new isolation test return **200 with a presigned URL naming another user's namespace**, which is exactly what the audit produced by hand.
+
+**`npm run dev` names a stale listener on port 3000.**
+Rejected: leaving `EADDRINUSE`, which reports the wrong fact.
+Found four times across waves 3-6, and the risk was never the failed start - it is that **a stale server serves the code it was started with**, so a measurement taken against it looks exactly like a passing one.
+The message names the pid, when it started, and the full argv, and says plainly what that means for anything measured against the port.
+Verified by starting two servers.
+
+**Deferred, recorded as open rather than closed.**
+The **orphaned-object policy**: an image uploaded whose create never completed, inert today - unguessable keys under the uploader's own prefix, no endpoint lists them, no lifecycle rule touches them - but it should be a written policy rather than an absence.
+And **per-request token pinning**: `OutboxController` re-checks ownership, then `APIClient` re-reads the token from the keychain, and the window between them requires a full Apple sign-in to complete in microseconds.
+That change lands in the drain's session handling, which the wave-5 reviewer named the weakest code in the wave.
+
+Suites after these changes: **server 195** (was 169), **iOS 177** (was 170), `tsc --noEmit` clean, zero iOS warnings.
+Every new test was falsified in both directions.
+Guardrail 7 re-run: `npm run dev` from the real entrypoint, one real `GET /api/me` answering 401 with `Cache-Control: no-store`.
+
 ## 2026-08-06 - Adversarial audit of the security review: money is bounded at the storable range, not the safe-integer one
 
 **`centsSchema` bounds every money field to the Postgres `int4` range (-2 147 483 648 to 2 147 483 647), so an unstorable amount is a 400 naming the field instead of a 500.**

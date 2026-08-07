@@ -189,4 +189,48 @@ describe("per-user isolation", () => {
     expect(detailText).not.toContain(bObjectKey as string);
     expect(detailText).not.toContain(userIdB);
   });
+
+  /**
+   * Write-time validation cannot answer this, which is the whole point.
+   * The August 2026 audit reached this state by hand and got back a 200
+   * carrying a presigned URL that named another user's namespace: the
+   * create route had validated the key it accepted, and the detail route
+   * then presigned whatever the row held *now*.
+   *
+   * The row is edited directly rather than through the API on purpose - no
+   * API route can produce this state, and a check that only defends against
+   * reachable states is not defending the invariant, it is restating the
+   * create route.
+   */
+  it("refuses to presign a stored key that no longer matches its owner", async () => {
+    const ownImage = imageFor(userIdA, "2".repeat(64));
+    const created = await harness.request(tokenA, "POST", "/api/receipts",
+      receiptBody({ image: ownImage }),
+    );
+    expect(created.status).toBe(201);
+    const { id: receiptOfA } = (await created.json()) as { id: string };
+
+    const bImage = await harness.db
+      .select()
+      .from(receiptImages)
+      .where(eq(receiptImages.userId, userIdB));
+    const bObjectKey = bImage[0]?.objectKey as string;
+    expect(bObjectKey).toBeDefined();
+
+    // A's row, A's user_id, B's object key. Exactly the state db:claim used
+    // to be able to produce, and the state a migration or an admin tool
+    // could produce tomorrow.
+    await harness.db
+      .update(receiptImages)
+      .set({ objectKey: bObjectKey })
+      .where(eq(receiptImages.receiptId, receiptOfA));
+
+    const detail = await harness.request(tokenA, "GET",
+      `/api/receipts/${receiptOfA}`,
+    );
+    expect(detail.status).toBe(500);
+    const text = await detail.text();
+    expect(text).not.toContain(bObjectKey);
+    expect(text).not.toContain(userIdB);
+  });
 });

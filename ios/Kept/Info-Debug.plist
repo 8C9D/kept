@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	The DEBUG configuration's Info.plist. Info.plist is the Release one and
+	is what ships; this file exists so the development networking
+	affordances below can never reach the App Store.
+
+	Until August 2026 there was one plist for both configurations, so
+	NSAllowsLocalNetworking and NSLocalNetworkUsageDescription would have
+	shipped in the TestFlight and App Store builds - the security review's
+	wave-6 blocker. Splitting the file is what makes "development only"
+	true rather than merely written down.
+
+	⚠ Every key except the two ATS ones must match Info.plist exactly.
+	InfoPlistConfigurationTests asserts that, because two files that are
+	meant to agree are two files that will eventually disagree.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Kept</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!--
+		Development builds talk to a server on this Mac (simulator) or on
+		the local network (device) over plain http. NSAllowsLocalNetworking
+		relaxes App Transport Security for local and link-local hosts only;
+		https to the real API is unaffected, and arbitrary internet hosts
+		are still refused.
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Kept uses the camera to scan paper receipts.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Kept connects to a development server on your local network during development builds.</string>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+</dict>
+</plist>

@@ -695,6 +695,14 @@ final class OutboxController: ObservableObject {
             // The image bytes are gone from disk; no retry can bring them
             // back. Block and tell the human - the paper may still exist.
             return .blockItem(message: missingImage.localizedDescription)
+        case let locked as OutboxLockedError:
+            // Complete file protection refused the read because the phone
+            // is locked. Same shape as the keychain case below, and the
+            // same answer: the next foreground is by definition unlocked.
+            // Never .blockItem - the bytes are intact, and telling someone
+            // a receipt is unrecoverable because their phone was in their
+            // pocket is the worst answer this queue can give.
+            return .retryLater(message: locked.localizedDescription)
         case let keychainError as KeychainError:
             // The device locked mid-drain (WhenUnlocked accessibility, by
             // design). The next foreground is by definition unlocked.

@@ -1,11 +1,23 @@
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { LOCAL_DEV_DATABASE_URL } from "./client.js";
+import { assertLocalDatabase } from "./databaseUrl.js";
 import { receiptImages, receipts, users } from "./schema.js";
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL ?? LOCAL_DEV_DATABASE_URL,
-});
+const databaseUrl = process.env.DATABASE_URL ?? LOCAL_DEV_DATABASE_URL;
+
+// Before the pool, before any connection: this script's first act is three
+// unconditional deletes, which take soft-deleted tombstones with them - the
+// rows §10B's six-year retention exists to keep. `npm test` has refused to
+// aim at the wrong database since wave 4; this is the same guard on the
+// more destructive of the two scripts, which had none at all.
+assertLocalDatabase(
+  databaseUrl,
+  "DATABASE_URL",
+  "db:seed deletes every user, receipt and image row",
+);
+
+const pool = new Pool({ connectionString: databaseUrl });
 const db = drizzle(pool);
 
 async function seed() {

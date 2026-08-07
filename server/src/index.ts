@@ -4,6 +4,10 @@ import { createAppleIdentityVerifier } from "./auth/appleVerifier.js";
 import { createSessionTokens } from "./auth/session.js";
 import { createDb } from "./db/client.js";
 import {
+  findPortListeners,
+  formatPortInUseMessage,
+} from "./observability/portInUse.js";
+import {
   LOCAL_DEV_STORAGE_CONFIG,
   createBucketIfMissing,
   createS3ObjectStorage,
@@ -72,6 +76,17 @@ const app = createApp({
   storage: createS3ObjectStorage(storageConfig),
 });
 
-serve({ fetch: app.fetch, port }, (info) => {
+const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`Kept API listening on port ${info.port}`);
+});
+
+// Same philosophy as the env and MinIO checks above: stop with the fix
+// named. A bare EADDRINUSE reports the wrong fact - the useful one is
+// which build is answering on that port (see portInUse).
+server.on("error", (error: NodeJS.ErrnoException) => {
+  if (error.code !== "EADDRINUSE") {
+    throw error;
+  }
+  console.error(formatPortInUseMessage(port, findPortListeners(port)));
+  process.exit(1);
 });

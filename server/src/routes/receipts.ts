@@ -23,6 +23,11 @@ import {
   uuidParamOrNotFound,
 } from "../http/validate.js";
 import { sessionAuth, type AuthedEnv } from "../http/sessionAuth.js";
+import {
+  assertIssuedObjectKey,
+  isIssuedObjectKey,
+  receiptImageObjectKey,
+} from "../storage/objectKeys.js";
 import type { ObjectStorage } from "../storage/objectStorage.js";
 
 interface ReceiptRouteDependencies {
@@ -43,11 +48,12 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
    */
   router.post("/upload-url", async (c) => {
     const body = parseOrThrow(uploadUrlSchema, await readJsonBody(c));
-    const extension = EXTENSION_BY_CONTENT_TYPE[body.contentType];
-    const now = new Date();
-    const year = now.getUTCFullYear();
-    const month = String(now.getUTCMonth() + 1).padStart(2, "0");
-    const objectKey = `${c.get("userId")}/${year}/${month}/${randomUUID()}.${extension}`;
+    const objectKey = receiptImageObjectKey(
+      c.get("userId"),
+      new Date(),
+      randomUUID(),
+      body.contentType,
+    );
     if (!isIssuedObjectKey(objectKey, c.get("userId"))) {
       // The shape this route issues and the shape the create route accepts
       // are one rule; if they ever disagree, uploads would succeed and
@@ -252,11 +258,19 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
         ),
       )
       .orderBy(receiptImages.page);
+    // Re-checked on the way out, not only on the way in: the create route
+    // validates what it accepts, which says nothing about what the row
+    // holds now. This is the one place a stored key becomes a URL somebody
+    // can fetch, so it is the last place the ownership question can be
+    // asked (see assertIssuedObjectKey).
     const images = await Promise.all(
-      imageRows.map(async (image) => ({
-        page: image.page,
-        downloadUrl: await deps.storage.presignDownload(image.objectKey),
-      })),
+      imageRows.map(async (image) => {
+        assertIssuedObjectKey(image.objectKey, userId);
+        return {
+          page: image.page,
+          downloadUrl: await deps.storage.presignDownload(image.objectKey),
+        };
+      }),
     );
 
     return c.json({
@@ -472,46 +486,6 @@ function normalizeOcrSuggestions(
     vendorTaxNumber: suggestions.vendorTaxNumber ?? null,
   };
 }
-
-const EXTENSION_BY_CONTENT_TYPE = {
-  "image/jpeg": "jpg",
-  "image/png": "png",
-  "application/pdf": "pdf",
-} as const;
-
-/**
- * Exactly the keys the upload-url route issues: `{userId}/yyyy/mm/{uuid}.ext`,
- * and nothing else.
- *
- * A prefix test (`startsWith(userId + "/")`) is not enough. It admits dot
- * segments - `{userIdA}/../{userIdB}/2026/03/theirs.jpg` starts with A's
- * prefix but names B's namespace - and whether such a key resolves into
- * another user's objects is then decided by the storage layer's path
- * normalization rather than by us. Against MinIO today those keys fail
- * (the SDK collapses the segments in the URL while signing the
- * uncollapsed key, so the signature mismatches), but that is the layer
- * beneath deciding an isolation question, which is the trust this project
- * has been burned by twice (wave-5 CFNetwork cache, wave-5 URL encoding).
- * A whole-string match settles it here instead.
- */
-function isIssuedObjectKey(objectKey: string, userId: string): boolean {
-  const prefix = `${userId}/`;
-  if (!objectKey.startsWith(prefix)) {
-    return false;
-  }
-  if (!ISSUED_KEY_REMAINDER.test(objectKey.slice(prefix.length))) {
-    return false;
-  }
-  // The extensions come from the same map the issuing route uses, so the
-  // two cannot drift apart.
-  return Object.values(EXTENSION_BY_CONTENT_TYPE).some((extension) =>
-    objectKey.endsWith(`.${extension}`),
-  );
-}
-
-/** `yyyy/mm/{uuid}.{extension}` - what follows the user prefix. */
-const ISSUED_KEY_REMAINDER =
-  /^\d{4}\/\d{2}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[a-z]+$/;
 
 /** Treat %, _ and \ in a search term as literals, not LIKE wildcards. */
 function escapeLikePattern(term: string): string {

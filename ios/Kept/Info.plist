@@ -1,5 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	The RELEASE configuration's Info.plist - the one that ships. Debug uses
+	Info-Debug.plist, which is where the local-network development
+	affordances live.
+
+	⚠ Nothing that relaxes App Transport Security belongs in this file.
+	Until August 2026 a single plist served both configurations, so
+	NSAllowsLocalNetworking and an NSLocalNetworkUsageDescription reading
+	"during development builds" would have shipped to TestFlight and the
+	App Store - the security review's wave-6 blocker. A plist has no
+	conditional compilation, so two files is the mechanism.
+
+	⚠ Every key here must match Info-Debug.plist except the ATS pair.
+	InfoPlistConfigurationTests asserts both halves of that.
+-->
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
@@ -20,22 +35,8 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
-	<!--
-		Development builds talk to a server on this Mac (simulator) or on
-		the local network (device) over plain http. NSAllowsLocalNetworking
-		relaxes App Transport Security for local hosts only; https to the
-		real API is unaffected. Revisit both keys before distribution
-		(wave 6).
-	-->
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
-	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Kept uses the camera to scan paper receipts.</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Kept connects to a development server on your local network during development builds.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

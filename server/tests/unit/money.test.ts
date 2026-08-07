@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   InvalidMoneyError,
+  MAX_STORABLE_CENTS,
+  MIN_STORABLE_CENTS,
   cents,
   centsToDecimalString,
 } from "../../src/domain/money.js";
@@ -12,8 +14,9 @@ describe("cents", () => {
     expect(cents(-4200)).toBe(-4200); // a refund receipt is a real receipt
   });
 
-  it("accepts amounts at the safe-integer boundary", () => {
-    expect(cents(Number.MAX_SAFE_INTEGER)).toBe(Number.MAX_SAFE_INTEGER);
+  it("accepts amounts at the storable boundary", () => {
+    expect(cents(MAX_STORABLE_CENTS)).toBe(MAX_STORABLE_CENTS);
+    expect(cents(MIN_STORABLE_CENTS)).toBe(MIN_STORABLE_CENTS);
   });
 
   it("rejects fractional cents - floats never enter the money path", () => {
@@ -25,6 +28,28 @@ describe("cents", () => {
     expect(() => cents(Number.NaN)).toThrow(InvalidMoneyError);
     expect(() => cents(Number.POSITIVE_INFINITY)).toThrow(InvalidMoneyError);
     expect(() => cents(Number.MAX_SAFE_INTEGER + 1)).toThrow(InvalidMoneyError);
+  });
+
+  /**
+   * This replaces a test that asserted cents(MAX_SAFE_INTEGER) is accepted.
+   * That assertion encoded a deliberate intent - the domain does not know
+   * about storage - which the August 2026 audit showed to be wrong: every
+   * money column is int4, so the domain was promising a range the database
+   * refuses, and the refusal surfaced as a 500 that logged the whole
+   * receipt. Recorded here rather than silently deleted, because the old
+   * test was not failing by accident.
+   */
+  it("rejects amounts the money columns cannot store", () => {
+    expect(() => cents(MAX_STORABLE_CENTS + 1)).toThrow(InvalidMoneyError);
+    expect(() => cents(MIN_STORABLE_CENTS - 1)).toThrow(InvalidMoneyError);
+    expect(() => cents(Number.MAX_SAFE_INTEGER)).toThrow(InvalidMoneyError);
+  });
+
+  it("names the range as the reason, not fractional cents", () => {
+    expect(() => cents(MAX_STORABLE_CENTS + 1)).toThrow(
+      /outside the storable amount range/,
+    );
+    expect(() => cents(113.5)).toThrow(/must be an integer number of cents/);
   });
 });
 

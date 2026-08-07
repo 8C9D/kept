@@ -42,6 +42,22 @@ struct OutboxMissingImageError: LocalizedError {
     }
 }
 
+/// The queue is on disk and intact, but this phone is locked, so complete
+/// file protection is refusing the read.
+///
+/// ⚠ This exists only because the files are written with
+/// `.completeFileProtection`. Without it, a locked read raises the same
+/// kind of failure a *destroyed* file does, and the drain treats destroyed
+/// as permanent - so a healthy receipt on a locked phone would be blocked
+/// and reported to the person as lost. Transient and permanent failures of
+/// the same call have to be told apart at the point where the difference is
+/// still visible, which is here.
+struct OutboxLockedError: LocalizedError {
+    var errorDescription: String? {
+        "This phone is locked, so the saved receipts cannot be read yet."
+    }
+}
+
 /// One directory per item under Application Support:
 ///
 ///   Outbox/<item id>/image.jpg     - written first
@@ -96,6 +112,14 @@ actor FileOutboxStore: OutboxStore {
             do {
                 let data = try Data(contentsOf: itemFile)
                 result.items.append(try Self.decoder.decode(OutboxItem.self, from: data))
+            } catch let error as CocoaError where error.code == .fileReadNoPermission {
+                // Not this item's problem - the phone is locked, and every
+                // remaining item would answer the same way. Failing the
+                // whole load is what keeps `hasLoadedOnce` false so the
+                // next foreground retries; counting these as unreadable
+                // would tell the person their queue was corrupt when it is
+                // merely encrypted, which is what it is supposed to be.
+                throw OutboxLockedError()
             } catch {
                 result.unreadableCount += 1
             }
@@ -108,11 +132,18 @@ actor FileOutboxStore: OutboxStore {
         try ensureDirectory()
         let itemDirectory = self.itemDirectory(item.id)
         do {
-            try fileManager.createDirectory(at: itemDirectory, withIntermediateDirectories: true)
-            try imageData.write(to: itemDirectory.appending(path: Self.imageFileName), options: .atomic)
+            try fileManager.createDirectory(
+                at: itemDirectory,
+                withIntermediateDirectories: true,
+                attributes: Self.protectedDirectoryAttributes
+            )
+            try imageData.write(
+                to: itemDirectory.appending(path: Self.imageFileName),
+                options: Self.writeOptions
+            )
             try Self.encoder.encode(item).write(
                 to: itemDirectory.appending(path: Self.itemFileName),
-                options: .atomic
+                options: Self.writeOptions
             )
         } catch {
             // A half-written item must not linger; without its commit file
@@ -128,13 +159,18 @@ actor FileOutboxStore: OutboxStore {
     func update(_ item: OutboxItem) async throws {
         try Self.encoder.encode(item).write(
             to: itemDirectory(item.id).appending(path: Self.itemFileName),
-            options: .atomic
+            options: Self.writeOptions
         )
     }
 
     func imageData(itemId: UUID) async throws -> Data {
         do {
             return try Data(contentsOf: itemDirectory(itemId).appending(path: Self.imageFileName))
+        } catch let error as CocoaError where error.code == .fileReadNoPermission {
+            // Locked, not gone. The distinction decides whether the drain
+            // waits for the next unlock or tells the person their receipt
+            // is unrecoverable - see OutboxLockedError.
+            throw OutboxLockedError()
         } catch {
             throw OutboxMissingImageError(itemId: itemId)
         }
@@ -158,7 +194,41 @@ actor FileOutboxStore: OutboxStore {
     }
 
     private func ensureDirectory() throws {
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: Self.protectedDirectoryAttributes
+        )
+    }
+
+    /// ⚠ These two are the reason the outbox is not a plaintext copy of the
+    /// user's tax records sitting on the disk.
+    ///
+    /// `item.json` carries the vendor, the tax number, every amount, the
+    /// payment method, the notes and the full OCR text; `image.jpg` is the
+    /// receipt itself. Without an explicit class they inherit iOS's default,
+    /// `completeUntilFirstUserAuthentication`, which stops protecting the
+    /// moment the phone is unlocked once after a boot - that is, essentially
+    /// always. `.complete` keeps them encrypted whenever the phone is
+    /// locked, which is the posture the session token already has in the
+    /// keychain (`kSecAttrAccessibleWhenUnlocked`).
+    ///
+    /// The directory attribute matters as well as the per-file option: files
+    /// created inside it inherit the class, so a future write site that
+    /// forgets `writeOptions` still lands protected.
+    ///
+    /// ⚠ Unverifiable from a test. The simulator does not enforce data
+    /// protection, so no test here can observe a locked read failing; what
+    /// the tests assert is the *configuration* that selects the behaviour
+    /// (framework §9.3 rule 5).
+    /// Internal rather than private so the configuration assertion in
+    /// FileOutboxStoreTests can read them; there is nothing else to assert.
+    static let writeOptions: Data.WritingOptions = [
+        .atomic, .completeFileProtection,
+    ]
+
+    static var protectedDirectoryAttributes: [FileAttributeKey: Any] {
+        [.protectionKey: FileProtectionType.complete]
     }
 
     // MARK: - Coding

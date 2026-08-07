@@ -29,6 +29,28 @@ final class FileOutboxStoreTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+    // MARK: - File protection configuration
+
+    func testQueuedReceiptsAreWrittenWithCompleteFileProtection() {
+        // item.json holds the vendor, the tax number, every amount, the
+        // payment method and the notes; image.jpg is the receipt itself.
+        // Without an explicit class they inherit
+        // completeUntilFirstUserAuthentication, which stops protecting
+        // after the first unlock following a boot - so in practice, never.
+        //
+        // The simulator does not enforce data protection, so no test here
+        // can watch a locked read fail. The configuration is the
+        // behaviour, so the configuration is what this asserts - the same
+        // shape as the transport-cache assertion (framework §9.3 rule 5,
+        // now at six instances on this project).
+        XCTAssertTrue(FileOutboxStore.writeOptions.contains(.completeFileProtection))
+        XCTAssertTrue(FileOutboxStore.writeOptions.contains(.atomic))
+        XCTAssertEqual(
+            FileOutboxStore.protectedDirectoryAttributes[.protectionKey] as? FileProtectionType,
+            .complete
+        )
+    }
+
     private func makeItem(
         sequence: Int = 1,
         progress: OutboxItem.Progress = .captured

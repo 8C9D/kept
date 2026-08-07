@@ -13,6 +13,7 @@ import {
   uuidParamOrNotFound,
 } from "../http/validate.js";
 import { sessionAuth, type AuthedEnv } from "../http/sessionAuth.js";
+import { errorSummary } from "../observability/errorSummary.js";
 import { runExportJob } from "../export/runExportJob.js";
 import type { ObjectStorage } from "../storage/objectStorage.js";
 
@@ -85,7 +86,7 @@ export function exportRoutes(deps: ExportRouteDependencies): Hono<AuthedEnv> {
     // fires if even that recording failed - which must stay loud in the log.
     void runExportJob({ db: deps.db, storage: deps.storage }, job.id).catch(
       (error) => {
-        console.error(`Export job ${job.id} failed:`, error);
+        console.error(`Export job ${job.id} failed:`, errorSummary(error));
       },
     );
 

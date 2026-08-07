@@ -1,7 +1,8 @@
-import { inArray, notLike, like } from "drizzle-orm";
+import { inArray, notLike, like, sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { LOCAL_DEV_DATABASE_URL } from "./client.js";
+import { assertLocalDatabase } from "./databaseUrl.js";
 import { receiptImages, receipts, users } from "./schema.js";
 
 /**
@@ -11,9 +12,17 @@ import { receiptImages, receipts, users } from "./schema.js";
  * is missing or ambiguous. (Wave-3 gate review: this was a documented SQL
  * snippet run by hand during device verification.)
  */
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL ?? LOCAL_DEV_DATABASE_URL,
-});
+const databaseUrl = process.env.DATABASE_URL ?? LOCAL_DEV_DATABASE_URL;
+
+// Dev-only, like the seed: this rewrites who owns a set of tax records, so
+// it gets the same refusal to run anywhere but this machine.
+assertLocalDatabase(
+  databaseUrl,
+  "DATABASE_URL",
+  "db:claim rewrites the owner of every synthetic receipt",
+);
+
+const pool = new Pool({ connectionString: databaseUrl });
 const db = drizzle(pool);
 
 async function claim() {
@@ -42,20 +51,38 @@ async function claim() {
     throw new Error("No synthetic users found - run db:seed first");
   }
 
-  // Receipts and their denormalized image rows move together, in one
-  // transaction, or the (user_id, sha256) uniqueness story fractures.
-  const moved = await db.transaction(async (tx) => {
-    const movedReceipts = await tx
-      .update(receipts)
-      .set({ userId: realUser.id })
-      .where(inArray(receipts.userId, syntheticIds))
-      .returning({ id: receipts.id });
-    await tx
-      .update(receiptImages)
-      .set({ userId: realUser.id })
-      .where(inArray(receiptImages.userId, syntheticIds));
-    return movedReceipts;
-  });
+  // ⚠ Refusing rather than moving. Changing `user_id` on an image row does
+  // not change its `object_key`, which begins with the *synthetic* user's
+  // id - so a claimed receipt would be owned by the real user while its
+  // image lives under someone else's prefix. That is precisely the state
+  // the create route's whole-key match exists to make impossible, and it
+  // would defeat the read-time check in the detail route (the August 2026
+  // audit reached it by hand-editing a row and got back a presigned URL
+  // naming another user's namespace).
+  //
+  // Rewriting the key was the alternative and is worse: the bytes in
+  // storage stay at the old key, so the row would point at an object that
+  // does not exist - a quiet wrong answer in place of a loud refusal.
+  // Seed data carries no image rows at all, so this refuses nothing the
+  // script is actually used for.
+  const imageRows = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(receiptImages)
+    .where(inArray(receiptImages.userId, syntheticIds));
+  const imageCount = imageRows[0]?.count ?? 0;
+  if (imageCount > 0) {
+    throw new Error(
+      `Refusing to claim: ${imageCount} synthetic image row(s) carry object keys ` +
+        `under the synthetic user's prefix, which claiming cannot move. ` +
+        `Re-run db:seed (it creates no image rows) or delete those rows first.`,
+    );
+  }
+
+  const moved = await db
+    .update(receipts)
+    .set({ userId: realUser.id })
+    .where(inArray(receipts.userId, syntheticIds))
+    .returning({ id: receipts.id });
 
   console.log(
     `Moved ${moved.length} receipts to ${realUser.displayName ?? realUser.id}.`,

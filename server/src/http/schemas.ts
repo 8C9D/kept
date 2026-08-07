@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { InvalidDateError, parseIsoDate } from "../domain/calendarDate.js";
-import { cents } from "../domain/money.js";
+import {
+  MAX_STORABLE_CENTS,
+  MIN_STORABLE_CENTS,
+  cents,
+} from "../domain/money.js";
 import { receiptStatus } from "../db/schema.js";
 
 /**
@@ -10,22 +14,14 @@ import { receiptStatus } from "../db/schema.js";
  */
 
 /**
- * Every money column is a Postgres `integer` (see db/schema.ts), so the
- * storable range is int4's, not the safe-integer range the domain's cents()
- * accepts. Bounding it here is what keeps an out-of-range amount a stated
- * 400 instead of an insert that fails inside the transaction: that failure
- * surfaced as a 500, and the unhandled-error log printed every bound
- * parameter of the insert - vendor, tax number, notes, OCR text - alongside
- * it. A validation boundary that stops short of what the column accepts is
- * not a boundary.
- */
-const MAX_STORABLE_CENTS = 2_147_483_647;
-const MIN_STORABLE_CENTS = -2_147_483_648;
-
-/**
  * Money arrives as integer cents; 42.5 is a validation error, not rounded.
  * The transform brands the validated number as Cents, so everything past
  * this boundary carries the domain's money type.
+ *
+ * The range bounds come from the domain rather than being restated here:
+ * `cents()` throws outside them, and a boundary that stops short of what
+ * the layer behind it accepts is not a boundary. Stating them as zod checks
+ * is what turns that throw into a 400 naming the field instead of a 500.
  */
 const centsSchema = z
   .number()

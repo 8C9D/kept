@@ -25,6 +25,7 @@
 		AA0000000000000000000050 /* Exceptions for "Kept" folder in "Kept" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Info-Debug.plist,
 				Info.plist,
 			);
 			target = AA0000000000000000000010 /* Kept */;
@@ -276,7 +277,7 @@
 				DEVELOPMENT_TEAM = <team-id>;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = Kept/Info.plist;
+				INFOPLIST_FILE = Kept/Info-Debug.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

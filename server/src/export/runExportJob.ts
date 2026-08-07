@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { exportJobs } from "../db/schema.js";
+import { redactedMessage } from "../observability/errorSummary.js";
 import type { ObjectStorage } from "../storage/objectStorage.js";
 import { generateExport } from "./generateExport.js";
 
@@ -49,7 +50,12 @@ export async function runExportJob(
     // The error is recorded on the job AND rethrown to the caller's
     // handler: recording is for the polling client, rethrowing keeps the
     // failure loud server-side.
-    const message = error instanceof Error ? error.message : String(error);
+    //
+    // Redacted, because this column is not internal: GET /api/export/:id
+    // returns it and the export screen renders it. A failed query's message
+    // carries the statement and its bound parameters, so storing it raw
+    // would hand a client the SQL and the row values behind it.
+    const message = redactedMessage(error);
     await deps.db
       .update(exportJobs)
       .set({ status: "failed", error: message, completedAt: new Date() })

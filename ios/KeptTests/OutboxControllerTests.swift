@@ -415,6 +415,26 @@ final class OutboxControllerTests: XCTestCase {
         }
     }
 
+    func testLockedPhoneRetriesInsteadOfBlocking() async throws {
+        // The same call failing, with the opposite meaning. Complete file
+        // protection refuses the read while the phone is locked, and the
+        // bytes are perfectly intact - so this must land on the retry path
+        // the test above deliberately avoids. Telling someone a receipt is
+        // unrecoverable because their phone was in their pocket is the
+        // worst answer this queue can give, and it is the failure mode the
+        // protection class introduced.
+        let item = seededItem(progress: .parsed(Self.parsedFixture))
+        store.seed(item, imageData: Data("page one bytes".utf8))
+        store.imageDataError = OutboxLockedError()
+
+        let controller = await makeController()
+
+        XCTAssertEqual(controller.entries.count, 1)
+        guard case .waitingToRetry = controller.entries.first?.status else {
+            return XCTFail("Expected waitingToRetry, got \(String(describing: controller.entries.first?.status))")
+        }
+    }
+
     // MARK: - §3: device storage full
 
     func testFullDiskFailsTheEnqueueLoudly() async {

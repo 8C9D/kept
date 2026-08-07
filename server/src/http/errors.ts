@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { errorSummary } from "../observability/errorSummary.js";
 
 /**
  * The one error shape every route uses: throw an ApiError anywhere in a
@@ -37,9 +38,12 @@ export function renderError(error: unknown, c: Context): Response {
       error.status,
     );
   }
-  // Unknown errors are logged with detail server-side and rendered without
-  // detail client-side; internals never leak into a response.
-  console.error("Unhandled error:", error);
+  // Unknown errors are logged server-side and rendered without detail
+  // client-side; internals never leak into a response. The log line is
+  // redacted too: a failed query's error carries the statement's bound
+  // parameters - vendor, notes, amounts - in its own message, so the error
+  // object is never handed to console directly (see errorSummary).
+  console.error("Unhandled error:", errorSummary(error));
   return c.json(
     { error: { code: "internal_error", message: "Internal server error" } },
     500,

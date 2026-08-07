@@ -6,6 +6,10 @@ import { listExportableReceipts } from "../db/receiptQueries.js";
 import { receiptImages, users } from "../db/schema.js";
 import { exportImagePath } from "../domain/exportFilename.js";
 import { cents } from "../domain/money.js";
+import {
+  assertIssuedObjectKey,
+  exportObjectKey,
+} from "../storage/objectKeys.js";
 import type { ObjectStorage } from "../storage/objectStorage.js";
 import type { ExportRow } from "./exportRows.js";
 import { writeCsv, writeXlsx } from "./writeFiles.js";
@@ -106,6 +110,11 @@ export async function generateExport(
     if (imageObjectKey === undefined) {
       throw new Error(`Receipt ${receipt.id} has no page-1 image`);
     }
+    // The export is the other place a stored key is dereferenced, so it
+    // asks the same ownership question the detail route does. A zip is
+    // exactly the wrong artifact to discover a mislabelled key in: it
+    // leaves the server and lands in an accountant's inbox.
+    assertIssuedObjectKey(imageObjectKey, input.userId);
     // Only confirmed receipts export, and the receipts_confirmed_complete_ck
     // constraint guarantees a confirmed receipt has both values. Null here
     // means that guarantee broke, and the job must fail loudly rather than
@@ -165,7 +174,11 @@ export async function generateExport(
     }
   });
 
-  const objectKey = `${input.userId}/exports/${input.jobId}/Receipts-${label}.zip`;
+  const objectKey = exportObjectKey(
+    input.userId,
+    input.jobId,
+    `Receipts-${label}.zip`,
+  );
   await deps.storage.upload(objectKey, zip, "application/zip");
   return { objectKey, receiptCount: rows.length };
 }

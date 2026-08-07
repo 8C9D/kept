@@ -1,9 +1,14 @@
 import AdmZip from "adm-zip";
 import ExcelJS from "exceljs";
+import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { exportJobs } from "../../src/db/schema.js";
+import { exportJobs, receiptImages } from "../../src/db/schema.js";
 import { generateExport } from "../../src/export/generateExport.js";
+import {
+  EXPORTS_PREFIX,
+  receiptImageObjectKey,
+} from "../../src/storage/objectKeys.js";
 import {
   createTestHarness,
   imageFor,
@@ -130,7 +135,13 @@ describe("the export pipeline", () => {
     const zipKey = decodeURIComponent(
       (job.downloadUrl as string).replace("https://fake-r2.test/download/", ""),
     );
-    expect(zipKey).toBe(`${userId}/exports/${jobId}/Receipts-2026.zip`);
+    expect(zipKey).toBe(`exports/${userId}/${jobId}/Receipts-2026.zip`);
+    // The property behind the layout, not just the string: §10B's 30-day
+    // expiry is a bucket lifecycle rule, and those match a literal prefix.
+    // Every user's zips must sit under one, and no receipt image may.
+    expect(zipKey.startsWith(EXPORTS_PREFIX)).toBe(true);
+    expect(receiptImageObjectKey(userId, new Date(), randomUUID(), "image/jpeg")
+      .startsWith(EXPORTS_PREFIX)).toBe(false);
     const zip = new AdmZip(Buffer.from(await harness.storage.download(zipKey)));
     const entryNames = zip.getEntries().map((entry) => entry.entryName);
     expect(entryNames).toContain("receipts-2026.xlsx");
@@ -274,6 +285,35 @@ describe("the export pipeline", () => {
         { maxTotalBytes: 10 },
       ),
     ).rejects.toThrow(/size limit.*shorter period/);
+  });
+
+  /**
+   * The export is the second place a stored key is dereferenced, and the
+   * worse of the two to get wrong: a receipt detail leaks a URL, a zip
+   * leaks the bytes themselves into a file that leaves the building. Same
+   * hand-edited row as the isolation suite's read-time test, because no API
+   * route can produce this state.
+   */
+  it("refuses to bundle an image whose stored key names another owner", async () => {
+    const receipt = await createReceiptWithImage(token, userId, "d2".repeat(32), {
+      status: "confirmed",
+    });
+    const foreignKey = `00000000-0000-4000-8000-000000000000/2026/01/${randomUUID()}.jpg`;
+    await harness.db
+      .update(receiptImages)
+      .set({ objectKey: foreignKey })
+      .where(eq(receiptImages.receiptId, receipt.id));
+
+    await expect(
+      generateExport(
+        { db: harness.db, storage: harness.storage },
+        {
+          jobId: "99999999-8888-7777-6666-555555555555",
+          userId,
+          period: { start: "2026-01-01", end: "2026-12-31" },
+        },
+      ),
+    ).rejects.toThrow(/does not match the shape issued/);
   });
 
   it("reports a completed job past the storage lifecycle as expired and re-runnable", async () => {

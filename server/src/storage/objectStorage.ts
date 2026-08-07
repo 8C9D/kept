@@ -9,10 +9,11 @@
  * the local waves).
  *
  * ⚠ Bucket requirement for the real adapter: a 30-day lifecycle expiry on
- * the exports prefix - keys shaped `{userId}/exports/...` (spec §10B).
- * Export zips are artifacts, not records - regenerable from the retained
- * receipts and images - and the API already reports jobs past that window
- * as "expired". Receipt images must NOT be under any lifecycle rule.
+ * the literal prefix `exports/` and nothing else (spec §10B; the shapes are
+ * in objectKeys.ts). Export zips are artifacts, not records - regenerable
+ * from the retained receipts and images - and the API already reports jobs
+ * past that window as "expired". Receipt images live under `{userId}/...`
+ * and must NOT be under any lifecycle rule.
  */
 export interface ObjectStorage {
   /** A URL the client can PUT the image bytes to, valid briefly. */

@@ -1,4 +1,5 @@
 import { LOCAL_DEV_DATABASE_URL } from "../../src/db/client.js";
+import { databaseIdentity } from "../../src/db/databaseUrl.js";
 
 /**
  * The integration-test database: a distinct database name in the same
@@ -45,33 +46,3 @@ export function assertSeparateTestDatabase(
   }
 }
 
-function databaseIdentity(
-  url: string,
-  label: string,
-): { host: string; port: string; database: string } {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch (error) {
-    throw new Error(`${label} is not a parseable URL: ${url}`, {
-      cause: error,
-    });
-  }
-  return {
-    host: normalizeHost(parsed.hostname),
-    // Postgres URLs may omit the port; both sides then default alike.
-    port: parsed.port === "" ? "5432" : parsed.port,
-    database: parsed.pathname.replace(/^\//, ""),
-  };
-}
-
-/**
- * The loopback spellings all reach the same local Postgres; comparing them
- * literally would let "127.0.0.1" slip past a guard written as
- * "localhost". General DNS aliases stay unresolved - this guard protects
- * the local dev database, not every topology.
- */
-function normalizeHost(host: string): string {
-  const loopbackAliases = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
-  return loopbackAliases.has(host.toLowerCase()) ? "localhost" : host.toLowerCase();
-}

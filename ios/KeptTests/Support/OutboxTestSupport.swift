@@ -18,6 +18,11 @@ final class InMemoryOutboxStore: OutboxStore {
     var addError: Error?
     var updateError: Error?
     var removeError: Error?
+    /// Scripted failure for reading image bytes back. Distinct from
+    /// `removeImage`, which models bytes genuinely gone: this models the
+    /// read being refused while the bytes are intact, which is what
+    /// complete file protection does on a locked phone.
+    var imageDataError: Error?
     /// Scripted loadAll result; when nil, loadAll derives from `items`.
     var loadAllResult: OutboxLoadResult?
 
@@ -69,6 +74,9 @@ final class InMemoryOutboxStore: OutboxStore {
     }
 
     func imageData(itemId: UUID) async throws -> Data {
+        if let imageDataError {
+            throw imageDataError
+        }
         guard let data = images[itemId] else {
             throw OutboxMissingImageError(itemId: itemId)
         }
