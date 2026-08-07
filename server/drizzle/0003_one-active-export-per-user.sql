@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "export_jobs_one_active_per_user_uq" ON "export_jobs" USING btree ("user_id") WHERE "export_jobs"."status" in ('queued', 'running');

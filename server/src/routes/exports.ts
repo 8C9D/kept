@@ -1,7 +1,8 @@
 import { Hono } from "hono";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, lt, or } from "drizzle-orm";
 import type { SessionTokens } from "../auth/session.js";
 import type { Db } from "../db/client.js";
+import { isUniqueViolation } from "../db/errors.js";
 import { exportJobs, users } from "../db/schema.js";
 import { toIsoDate } from "../domain/calendarDate.js";
 import { fiscalPeriodEndingIn } from "../domain/fiscalPeriod.js";
@@ -72,10 +73,31 @@ export function exportRoutes(deps: ExportRouteDependencies): Hono<AuthedEnv> {
     const userId = c.get("userId");
     const period = await resolvePeriod(deps.db, userId, body);
 
-    const inserted = await deps.db
-      .insert(exportJobs)
-      .values({ userId, periodStart: period.start, periodEnd: period.end })
-      .returning();
+    // Abandoned jobs are retired before the insert, or the one-live-export
+    // index below would turn a process that died mid-run into a permanent
+    // lockout for this user. The pair is argued at the index itself.
+    await failAbandonedJobs(deps.db, userId, new Date());
+
+    let inserted;
+    try {
+      inserted = await deps.db
+        .insert(exportJobs)
+        .values({ userId, periodStart: period.start, periodEnd: period.end })
+        .returning();
+    } catch (error) {
+      if (isUniqueViolation(error, "export_jobs_one_active_per_user_uq")) {
+        // Refused, deliberately not queued. A queue would need a worker,
+        // a fairness rule and a way to cancel; refusing needs a sentence,
+        // and the person can simply press Export again when the running
+        // one finishes - which the client already polls for.
+        throw new ApiError(
+          409,
+          "export_already_running",
+          "An export is already running. Wait for it to finish, then start the next one.",
+        );
+      }
+      throw error;
+    }
     const job = inserted[0];
     if (job === undefined) {
       throw new Error("Export job insert returned no row");
@@ -167,6 +189,58 @@ function reportedStatus(
     }
   }
   return job.status;
+}
+
+/**
+ * Retire this user's abandoned jobs so a new one can start.
+ *
+ * `reportedStatus` already tells a *client* that such a job is "stale" and
+ * re-runnable, computed and never written back, on the reasoning that the
+ * row stays the truthful history. That reasoning still holds - and writing
+ * `failed` here is not in tension with it, because a job whose process died
+ * did fail; the row is more truthful afterwards, not less. What changed is
+ * that the fact now has to be durable: the one-live-export index reads
+ * stored status, not a computed one, so a row nothing will ever finish
+ * would block this user's exports forever.
+ *
+ * Scoped to the caller's own jobs. Nothing here sweeps for anyone else -
+ * this is not a background reaper, it is a precondition of one insert.
+ */
+async function failAbandonedJobs(
+  db: Db,
+  userId: string,
+  now: Date,
+): Promise<void> {
+  await db
+    .update(exportJobs)
+    .set({
+      status: "failed",
+      error:
+        "The export stopped before it finished, most likely because the server restarted. Run it again.",
+      completedAt: now,
+    })
+    .where(
+      and(
+        eq(exportJobs.userId, userId),
+        // Same two clocks reportedStatus uses, from the same constants, so
+        // a client can never be told "stale" by one rule and blocked by
+        // another.
+        or(
+          and(
+            eq(exportJobs.status, "queued"),
+            lt(exportJobs.createdAt, minutesBefore(now, STALE_QUEUED_AFTER_MINUTES)),
+          ),
+          and(
+            eq(exportJobs.status, "running"),
+            lt(exportJobs.createdAt, minutesBefore(now, STALE_RUNNING_AFTER_MINUTES)),
+          ),
+        ),
+      ),
+    );
+}
+
+function minutesBefore(now: Date, minutes: number): Date {
+  return new Date(now.getTime() - minutes * 60 * 1000);
 }
 
 async function resolvePeriod(

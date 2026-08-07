@@ -3,6 +3,31 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-07 - One live export per user, and the method note behind the memory number
+
+**Provisioning ratified: `shared-cpu-1x` at 2 GB** (§4.2), on the measurement recorded in the previous entry.
+
+**One live export per user, enforced by a partial unique index, and refused rather than queued.**
+Rejected: **deferring it** - it was originally written up as acceptable at three users, and the owner's correction is the better reasoning: **on a fixed 2 GB ceiling the relevant number is not how many users there are, it is how many exports can overlap**, and this removes the only path that doubles peak RSS. It is also cheap right now, while the export code is loaded.
+Rejected: **queueing the second request** - a queue needs a worker, a fairness rule, and a way to cancel. Refusing needs one sentence, and the client already polls the running job, so the person can press Export again when it finishes. 409 `export_already_running`.
+Rejected: **a check in the handler**, which cannot be made race-free. Generation runs *after* the 202 response, so no transaction spans the thing being serialized, and Postgres takes no lock on rows that do not exist yet - two taps of Export would pass the check twice and start two generations. The invariant has to live where the state lives, so it is a partial unique index on `export_jobs (user_id) WHERE status IN ('queued','running')`, and the insert's unique violation becomes the 409 (the same `isUniqueViolation` shape wave 4 used for duplicate images). Migration `0003_one-active-export-per-user`.
+
+**⚠ The index needed a companion, and it is not optional.**
+A job whose process dies leaves its row `running` forever, and the index reads *stored* status - so on its own the constraint would convert a single crash into a permanent, silent lockout of that user's exports.
+`POST /api/export` now retires jobs past the staleness windows before inserting, using the same two clocks and constants `reportedStatus` already reports `stale` with, so a client can never be told "stale, re-run it" by one rule and blocked by another.
+This does write back to a row the §8 design deliberately left computed, and that is consistent rather than in tension: a job whose process died *did* fail, so the row is more truthful afterwards, not less. What changed is that the fact now has to be durable, because an index cannot read a computed status.
+Both halves are tested and both were falsified: removing the reap fails the lockout test, and dropping the index makes two concurrent exports succeed.
+
+**One pre-existing test asserted a state that is now impossible**, and was moved rather than weakened.
+`reports a job stranded in running as stale on a longer clock` inserted two concurrent `running` jobs for one user to compare the two clocks. The second job now belongs to a second user: both assertions survive intact - the clock depends on a job's age and status, not on its owner - and the comparison is still needed, since a rule that called every running job stale would satisfy the first assertion alone.
+
+**Method note, recorded because the number it produced is now sizing hardware.**
+The export memory measurement could not use the project's shared `fakeObjectStorage`: it retains every uploaded object in a `Map`, so measuring against it would have counted roughly 250 MiB of the double's own retention as the export's cost and produced a figure that was mostly test harness.
+It used a double that generates incompressible bytes on demand and discards uploads, which is what R2 actually does.
+**This is framework §9.3 rule 5 again** - a test double diverging from production in exactly the load-bearing dimension - and the first instance where the divergence would have corrupted a *measurement* rather than a test.
+That distinction is the part worth keeping: **a failing test is red, while a plausible wrong number is not**, so a double that is merely convenient becomes dangerous the moment something is provisioned from what it reports.
+(Instance count: this is the eighth on Kept. The owner's note said six, which counts the five recorded before this session's two configuration assertions were added.)
+
 ## 2026-08-06 - The owner's rulings on the security review, applied
 
 Every open finding from `docs/security/review-2026-08.md` and `docs/security/audit-2026-08.md` was ruled on and implemented.

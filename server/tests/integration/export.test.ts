@@ -265,6 +265,104 @@ describe("the export pipeline", () => {
     expect(response.status).toBe(404);
   });
 
+  /**
+   * One export at a time per user, because an export at the budget peaks
+   * near 890 MB RSS and the origin is provisioned at a fixed 2 GB - two at
+   * once does not fit. The live job is inserted directly rather than
+   * started through the API: a real one can finish in milliseconds here,
+   * which would make the assertion race.
+   */
+  describe("one live export per user", () => {
+    async function insertJob(
+      owner: string,
+      status: "queued" | "running" | "complete",
+      createdAt: Date,
+    ) {
+      const [job] = await harness.db
+        .insert(exportJobs)
+        .values({
+          userId: owner,
+          status,
+          periodStart: "2026-01-01",
+          periodEnd: "2026-12-31",
+          createdAt,
+        })
+        .returning();
+      return job;
+    }
+
+    function startExport() {
+      return harness.request(token, "POST", "/api/export", {
+        periodStart: "2026-01-01",
+        periodEnd: "2026-12-31",
+      });
+    }
+
+    it("refuses a second export while one is running, with a reason", async () => {
+      await insertJob(userId, "running", new Date());
+
+      const response = await startExport();
+
+      expect(response.status).toBe(409);
+      const body = (await response.json()) as {
+        error: { code: string; message: string };
+      };
+      expect(body.error.code).toBe("export_already_running");
+      expect(body.error.message).toMatch(/already running/i);
+    });
+
+    it("refuses a second export while one is still queued", async () => {
+      await insertJob(userId, "queued", new Date());
+      expect((await startExport()).status).toBe(409);
+    });
+
+    /**
+     * The over-blocking direction. A constraint that also refused exports
+     * after a finished one would be worse than the problem it solves.
+     */
+    it("accepts a new export once the previous one has finished", async () => {
+      await insertJob(userId, "complete", new Date());
+      expect((await startExport()).status).toBe(202);
+    });
+
+    it("never lets one user's export block another's", async () => {
+      const other = await harness.signIn("export-other");
+      await insertJob(other.userId, "running", new Date());
+
+      expect((await startExport()).status).toBe(202);
+    });
+
+    /**
+     * The lockout this index would otherwise create. A process that dies
+     * mid-run leaves its row 'running' forever, and the stored status is
+     * what the index reads - so without the reap, one crash would end that
+     * user's ability to export, permanently and silently.
+     */
+    it("is not blocked forever by a job whose process died", async () => {
+      const abandoned = await insertJob(
+        userId,
+        "running",
+        new Date(Date.now() - 31 * 60 * 1000),
+      );
+
+      expect((await startExport()).status).toBe(202);
+
+      const [reaped] = await harness.db
+        .select()
+        .from(exportJobs)
+        .where(eq(exportJobs.id, abandoned!.id));
+      expect(reaped!.status).toBe("failed");
+      expect(reaped!.error).toMatch(/stopped before it finished/i);
+      expect(reaped!.completedAt).not.toBeNull();
+    });
+
+    it("does not retire a job that is merely slow", async () => {
+      // Inside the 30-minute running window: still live, still blocking.
+      await insertJob(userId, "running", new Date(Date.now() - 5 * 60 * 1000));
+      expect((await startExport()).status).toBe(409);
+    });
+  });
+
   it("rejects a period with start after end", async () => {
     const response = await harness.request(token, "POST", "/api/export", {
       periodStart: "2026-12-31",
@@ -368,7 +466,13 @@ describe("the export pipeline", () => {
   it("reports a job stranded in running as stale on a longer clock", async () => {
     // The crashed-mid-run case: claimed but never finished. Thirty-one
     // minutes old is past the running threshold; a fresh running job is not.
-    const thirtyOneMinutesAgo = new Date(Date.now() - 31 * 60 * 1000);
+    //
+    // The two jobs belong to two users because one live export per user is
+    // now a database constraint, so a single user cannot hold both. Both
+    // assertions survive the move - the clock that reportedStatus applies
+    // depends on the job's age and status, not on who owns it - and the
+    // pair still has to be compared, since a rule that called every
+    // running job stale would satisfy the first assertion alone.
     const stranded = await harness.db
       .insert(exportJobs)
       .values({
@@ -376,13 +480,14 @@ describe("the export pipeline", () => {
         status: "running",
         periodStart: "2026-01-01",
         periodEnd: "2026-12-31",
-        createdAt: thirtyOneMinutesAgo,
+        createdAt: new Date(Date.now() - 31 * 60 * 1000),
       })
       .returning({ id: exportJobs.id });
+    const second = await harness.signIn("export-fresh-runner");
     const fresh = await harness.db
       .insert(exportJobs)
       .values({
-        userId,
+        userId: second.userId,
         status: "running",
         periodStart: "2026-01-01",
         periodEnd: "2026-12-31",
@@ -400,7 +505,7 @@ describe("the export pipeline", () => {
     );
 
     const freshResponse = await harness.request(
-      token,
+      second.token,
       "GET",
       `/api/export/${fresh[0]?.id}`,
     );

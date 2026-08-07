@@ -123,7 +123,33 @@ export const exportJobs = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
   },
-  (t) => [index("export_jobs_user_id_created_at_idx").on(t.userId, t.createdAt)],
+  (t) => [
+    index("export_jobs_user_id_created_at_idx").on(t.userId, t.createdAt),
+    /**
+     * One live export per user, enforced by the database rather than by a
+     * check in the handler.
+     *
+     * Generation runs *after* the 202 response, so the thing that has to be
+     * held for the duration is the job row's own status - a transaction
+     * cannot span it, and a read-then-insert in the handler is racy no
+     * matter how it is written, because Postgres takes no lock on rows that
+     * do not exist yet. Two taps of Export land two rows and two concurrent
+     * generations.
+     *
+     * That matters for memory, not for tidiness: an export at the 256 MiB
+     * budget was measured peaking at ~890 MB RSS (roughly 2.8x its payload,
+     * since the assembled zip exists twice), and the origin is provisioned
+     * at a fixed 2 GB. One at a time fits; two does not.
+     *
+     * ⚠ A crashed job leaves its row 'running' forever, which this index
+     * would otherwise turn into a permanent lockout for that user. The
+     * export route reaps rows past their staleness window before inserting;
+     * the two are a pair, and neither is safe alone.
+     */
+    uniqueIndex("export_jobs_one_active_per_user_uq")
+      .on(t.userId)
+      .where(sql`${t.status} in ('queued', 'running')`),
+  ],
 );
 
 export const receiptImages = pgTable(
