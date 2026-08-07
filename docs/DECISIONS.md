@@ -3,6 +3,19 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - Security review, second pass: request bodies are bounded, and the first pass's blind spot named
+
+**Every request body is capped at 1 MiB by `bodyLimit` (from hono itself - no new dependency), mounted app-wide ahead of all routes, answering 413 in the app's own error envelope.**
+Rejected: no limit (the status quo - `POST /api/auth/apple` is the one route reachable without a session, so anyone holding the unlisted install link could make the server buffer arbitrary bytes before verification could reject them; measured against the real server, six concurrent 50 MB posts took resident memory from 285 MB to 654 MB and left it there, each request dutifully returning a correct 401); a limit on the auth route alone (the same buffering exists on every route, and one rule is one thing to reason about); a *chosen* round number (the value must not be able to refuse a request the schemas accept); and streaming the body (real work for a case a cap solves, the same reasoning §8's export budget already settled).
+Why 1 MiB specifically: images never transit the API, so every body is JSON the schemas already bound - `ocrRawText` at 100 000 characters, `notes` at 5 000, all other strings under 1 400 together. zod counts characters and JSON can spend six bytes on one (`\uXXXX`), putting the worst legitimate case near 640 KB. **The limit is derived, not picked**, and a test sends a create at exactly that worst case to prove the cap cannot reject a real request - it fails if the limit is ever tightened below what the schemas allow.
+Verified after the fix against the real entrypoint: the same six concurrent 50 MB posts leave memory flat at 265 MB, and a 5 MB body is refused in 9 ms.
+
+**Rate limiting is re-ranked from low to moderate, and still not built.**
+The first pass called it low priority because the auth endpoint is not brute-forceable - which answered a question about credentials and never asked the adjacent one about resources. The body cap bounds what one request costs; nothing bounds how many arrive, and each well-formed attempt still buys a signature verification. Still not built for the reason already recorded: the limiter's shape needs a deployment to name what identifies a client, and there is no deployment. It should land *with* the deployment, at the edge if the API ends up behind Cloudflare.
+
+**The lesson, recorded because it generalizes.** A review that only *reads* finds only the defects visible in a line of code. The absence of a control has no source line to inspect, so availability and resource-consumption defects are invisible to reading by construction - this one took sending 50 MB and watching a memory number move. Operational form: for every externally reachable entry point, ask not only "is what it does correct" but "what does it cost, who can make it cost that, and what bounds it", and answer the second by measuring. Offered as a framework §9.3 candidate, tagged `Kept` only, on one observation.
+Also cleared on this pass, by probe rather than by reading: no auth-middleware bypass across 17 path spellings and 8 methods; `web/` is genuinely empty (one `.gitkeep`), so wave 7 has no surface yet; CORS is unconfigured, which is fail-safe for native clients today and becomes a wave-7 decision - an explicit origin allowlist, never `*`, since `*` plus a bearer token is how a hostile page reads someone's receipts.
+
 ## 2026-08-06 - Consolidated security review: object keys are matched whole, not by prefix
 
 **`POST /api/receipts` accepts an `image.objectKey` only if it matches the entire shape the upload-url route issues - `{userId}/yyyy/mm/{uuid}.{ext}` - and the issuing route asserts its own output against the same predicate.**
