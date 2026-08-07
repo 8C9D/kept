@@ -159,6 +159,16 @@ The owner's pre-test check - both radios off, pull to refresh - produced no erro
 
 **Stated gap, honestly:** one receipt only. Multi-item queue drain and cross-item ordering on device remain unverified - unit tests cover them, but the §6 gate's three-receipt run is what closes them, and it is still ahead.
 
-## 15 · Stopping here
+## 15 · GATE CLOSED (the owner, 2026-08-06)
 
-Wave 6 not started. The next session, per kickoff §7, is **the consolidated security review** (§7 above), then wave 6. Remaining for the wave-5 gate, all on the phone with the cable out: the three-receipt offline run (§9 step 3-4 - the multi-item drain and ordering check), the force-quit-with-two-queued case (§9 step 5), stuck-item manual retry, and the pocket case.
+**The three-receipt offline run passed, cable out, both radios off** - the §6 gate scenario, at last on honest ground. Device-observed: three separate capture sessions queued three receipts; the drain **serialized** (one "Uploading" while two waited - FIFO by design, §7.4); force-quit and reopen while offline kept all three; Wi-Fi back drained all three into the Receipts list and emptied "On this phone". No duplicates, no orphans. The 10-second timeout confirmed on device: offline refresh fails in ~10s, not a minute.
+
+**Server-side, verified against the artifacts:** exactly three receipts from the run (created 00:11:18.647 / .772 / .881 - the serialization visible in the timestamps, arrival in capture order), each `confirmed`, each with a **distinct** SHA-256 and object key; every stored object's actual bytes downloaded and re-hashed, **each matching its own row's digest** - correct bytes on correct records, byte-verified, which is §6's core demand. Four objects under the user's prefix equals four image rows (these three plus §14's single) - no orphans. The phone's outbox directory: empty.
+
+**Multi-item queue drain and cross-item ordering are no longer unverified** - §14's stated gap is closed. Not run, closed under the owner's call (same form as wave 4's waived ten-receipt session): the §9 stuck-item manual-retry tap (its automatic sibling was device-verified in §14, and the manual path is unit-tested) and the pocket case (the ~30s background grant; foreground drain - the design's actual load-bearing path - is device-proven). Both fold into ordinary use, where any failure surfaces on Home by construction.
+
+**The wave-5 gate is closed.** Every §7.4 pillar is device-verified: the receipt is safe the moment Save is tapped, survives process death, reports its status honestly, retries with backoff on its own, never blocks the person on the network, and never claims success the server has not confirmed.
+
+## 16 · Next
+
+Per kickoff §7: **the consolidated security review** - §10B's pass 1 (never run) merged with pass 2, plus this wave's §7 contributions (per-request token pinning, outbox file protection class, client-side JWT read, orphaned-object policy) - in its own session, before wave 6. Wave 6 not started.
