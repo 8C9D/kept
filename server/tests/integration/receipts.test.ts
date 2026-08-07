@@ -111,6 +111,45 @@ describe("POST /api/receipts", () => {
     expect(body.error.message).toContain("integer number of cents");
   });
 
+  // Every money column is a Postgres integer, so an amount above int4 is
+  // unstorable. Before this bound it passed validation and failed inside
+  // the insert instead: a 500, and an unhandled-error log carrying every
+  // bound parameter of the statement - vendor, tax number, notes, OCR text.
+  // Each money field is checked, because one shared schema definition is
+  // exactly the thing that can be edited to cover only some of them.
+  it.each([
+    ["totalCents", 2_147_483_648],
+    ["subtotalCents", 2_147_483_648],
+    ["hstCents", 2_147_483_648],
+    ["otherTaxCents", 2_147_483_648],
+    ["totalCents", -2_147_483_649],
+  ])("rejects %s of %d as unstorable, with a 400 not a 500", async (field, value) => {
+    const response = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ [field as string]: value }),
+    );
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: { message: string } };
+    expect(body.error.message).toContain("storable amount range");
+  });
+
+  it("still accepts an amount at the storable boundary", async () => {
+    const response = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ totalCents: 2_147_483_647, subtotalCents: -2_147_483_648 }),
+    );
+    expect(response.status).toBe(201);
+  });
+
+  it("rejects an unstorable amount on update too", async () => {
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ sha: "9".repeat(64) }),
+    );
+    const { id } = (await created.json()) as { id: string };
+    const response = await harness.request(token, "PATCH",
+      `/api/receipts/${id}`, { totalCents: 2_147_483_648 },
+    );
+    expect(response.status).toBe(400);
+  });
+
   // Wave 4: a batch-scanned receipt is created pending with whatever the
   // parser found, so total and the business choice may be absent - but only
   // while pending. Confirmed always requires both (schema + DB constraint).

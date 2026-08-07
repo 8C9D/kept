@@ -28,4 +28,18 @@ describe("Cache-Control", () => {
     expect(response.status).toBe(401);
     expect(response.headers.get("cache-control")).toBe("no-store");
   });
+
+  // The two assertions above both pass through a route. This one never
+  // reaches one: bodyLimit answers 413 without calling the next handler,
+  // so if the cache middleware is not the outermost layer the header is
+  // silently absent on exactly the responses no route produced.
+  it("marks a 413 refused before any route no-store", async () => {
+    const response = await harness.app.request("/api/auth/apple", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ identityToken: "a".repeat(2 * 1024 * 1024) }),
+    });
+    expect(response.status).toBe(413);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
 });

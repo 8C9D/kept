@@ -10,6 +10,19 @@ import { receiptStatus } from "../db/schema.js";
  */
 
 /**
+ * Every money column is a Postgres `integer` (see db/schema.ts), so the
+ * storable range is int4's, not the safe-integer range the domain's cents()
+ * accepts. Bounding it here is what keeps an out-of-range amount a stated
+ * 400 instead of an insert that fails inside the transaction: that failure
+ * surfaced as a 500, and the unhandled-error log printed every bound
+ * parameter of the insert - vendor, tax number, notes, OCR text - alongside
+ * it. A validation boundary that stops short of what the column accepts is
+ * not a boundary.
+ */
+const MAX_STORABLE_CENTS = 2_147_483_647;
+const MIN_STORABLE_CENTS = -2_147_483_648;
+
+/**
  * Money arrives as integer cents; 42.5 is a validation error, not rounded.
  * The transform brands the validated number as Cents, so everything past
  * this boundary carries the domain's money type.
@@ -18,6 +31,8 @@ const centsSchema = z
   .number()
   .int({ error: "must be an integer number of cents" })
   .refine(Number.isSafeInteger, { error: "must be an integer number of cents" })
+  .min(MIN_STORABLE_CENTS, { error: "is outside the storable amount range" })
+  .max(MAX_STORABLE_CENTS, { error: "is outside the storable amount range" })
   .transform(cents);
 
 /** yyyy-mm-dd and a real calendar date (2026-02-30 is rejected). */

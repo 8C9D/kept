@@ -168,8 +168,25 @@ describe("per-user isolation", () => {
     );
     expect(byKey.status).toBe(400);
 
-    // And nothing A can see anywhere in its own API surface mentions B's key.
-    const ownList = await harness.request(tokenA, "GET", "/api/receipts");
-    expect(await ownList.text()).not.toContain(bObjectKey as string);
+    // And the one response that DOES carry presigned download URLs - A's own
+    // receipt detail - signs only A's key. Asserting this on A's list would
+    // pass for two reasons that are not isolation: A owns nothing yet, and
+    // the list projection carries no object keys at all. A owns a receipt
+    // here, and the assertion is made where a leak could actually appear.
+    const ownImage = imageFor(userIdA, "1".repeat(64));
+    const ownCreated = await harness.request(tokenA, "POST", "/api/receipts",
+      receiptBody({ image: ownImage }),
+    );
+    expect(ownCreated.status).toBe(201);
+    const { id: receiptOfA } = (await ownCreated.json()) as { id: string };
+
+    const ownDetail = await harness.request(tokenA, "GET",
+      `/api/receipts/${receiptOfA}`,
+    );
+    expect(ownDetail.status).toBe(200);
+    const detailText = await ownDetail.text();
+    expect(detailText).toContain(ownImage.objectKey);
+    expect(detailText).not.toContain(bObjectKey as string);
+    expect(detailText).not.toContain(userIdB);
   });
 });
