@@ -47,7 +47,9 @@ export interface TestHarness {
   close(): Promise<void>;
 }
 
-export function createTestHarness(): TestHarness {
+export function createTestHarness(
+  options: { edgeSharedSecret?: string } = {},
+): TestHarness {
   const { db, pool } = createDb(TEST_DATABASE_URL);
   const storage = fakeObjectStorage();
   const app = createApp({
@@ -55,6 +57,9 @@ export function createTestHarness(): TestHarness {
     appleVerifier: fakeAppleVerifier(),
     sessionTokens: createSessionTokens(TEST_SESSION_SECRET),
     storage,
+    ...(options.edgeSharedSecret !== undefined && {
+      edgeSharedSecret: options.edgeSharedSecret,
+    }),
   });
 
   return {

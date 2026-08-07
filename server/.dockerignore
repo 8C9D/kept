@@ -1,0 +1,8 @@
+node_modules
+.env.local
+.env
+*.log
+tests
+docker-compose.yml
+fly.toml
+Dockerfile

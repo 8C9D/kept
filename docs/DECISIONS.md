@@ -3,6 +3,58 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-07 - Wave 6: the deployment exists as configuration, and the backup is tested
+
+Recorded as one entry because the pieces depend on each other: the privacy label could not be written until the deployment named where data goes, and the rate limiter could not be shaped until something sat in front of the origin.
+**Nothing was deployed and nothing was submitted to Apple.** No secret was seen, generated, stored or printed.
+
+**A shipped build reaches exactly one address, and cannot be redirected. `ServerConfig` splits into a `ServerEnvironment`: production is `https://api.keptapp.net` and does not read the stored override at all; development keeps `http://localhost:3000` and the settings sheet.**
+Rejected: **keeping the settings sheet in Release** (the owner's ruling, and the reasoning generalizes now that the ATS exception is gone: an `http://` address can no longer carry cleartext, so what remains is *redirection* - a control on every installed phone that sends the session bearer token, and every request made with it, to an address of the holder's choosing, under a link anyone can install from).
+Rejected: **a build setting or `.xcconfig` holding the URL** - making the production address configurable is precisely what must not be true of it.
+Rejected: **`#if DEBUG` at each call site** in favour of one compile-time branch in `ServerEnvironment.current`, so both environments stay exercisable from a test build - which is always the Debug one.
+Cost taken knowingly: moving the API to another host now needs an app update.
+⚠ Stated rather than smoothed over: `localhost:3000` still appears twice in the Release binary, as the development case's literal and as an example inside an error message. Both are dead - nothing in Release constructs `.development`, and the message's only caller is compiled out - and fencing the enum case would spread conditional compilation through a switch to delete a string, the same trade the `INFOPLIST_PREPROCESS` ruling already rejected. **A string constant is not an affordance**, but the honest claim is "no reachable path to localhost", not "no localhost in the binary".
+
+**The origin refuses to serve unless Cloudflare put it there: `EDGE_SHARED_SECRET` in an `x-kept-edge-secret` header, compared in constant time ahead of every route.**
+Rejected: **relying on the edge alone** - Fly gives every app a public `*.fly.dev` hostname, so §10B's rate limiter at the edge would guard one door of a two-door building, and a limiter that can be walked around is the decorative-control pattern this project caught at wave 3.
+Rejected: **requiring the secret** - the origin has to answer before Cloudflare can be pointed at it, so a required secret makes the first deploy impossible. Optional, with its absence a checklist step rather than a footnote.
+Rejected: an IP allowlist of Cloudflare's ranges (a list that changes, maintained by nobody here).
+
+**Production configuration is checked at startup, not at the first request that needed it (`src/productionEnv.ts`, under `NODE_ENV=production` only).**
+Rejected: **letting the existing checks stand alone.** They cover missing variables; they say nothing about four configurations under which the server would happily *run* while being quietly wrong - no `STORAGE_*` at all (which silently falls back to a MinIO that does not exist on a Fly machine), a plain-http storage endpoint (presigned URLs inherit it, so receipt images cross the network in the clear - the audit's N5), a loopback `DATABASE_URL`, and a session secret too short for HS256's security argument.
+Rejected: **checking everywhere** - `npm run dev` would then demand R2 credentials to serve a laptop, and the pressure to weaken the check would land on the production case. It is the mirror image of `assertLocalDatabase`: that one keeps destructive dev scripts *off* remote databases, this one keeps the server *off* local ones.
+Verified by making the real Docker image refuse each one, not only by unit test.
+
+**The Dockerfile runs `tsx` on the TypeScript, with dev dependencies installed.**
+Rejected: **a compiled build step** - it produces a second code shape that exists only in production, which is framework §9.3 rule 5's exact failure and has cost this project eight times. It also keeps `drizzle-kit` on the machine, so `fly ssh console -C "npm run db:migrate"` works from where the database is reachable. At one always-on machine the startup cost is nothing.
+Also decided: **`auto_stop_machines = "off"`** - a cold start on pull-to-refresh would read as the honest 10-second timeout wave 5 put in front of people; scale-to-zero saves dollars and spends the success test.
+
+**§10B's tested backup restore has now been run, and the verifier was falsified.**
+`npm run db:verify-restore` compares row counts source-vs-restored and then follows every live image row in the *restored* database out into object storage, re-hashing the bytes against the digest that row carries.
+Rejected: **checking that the object key resolves** - a key that resolves proves an object is there, and only the digest proves it is the *right* object. Rejected: **restoring into the live database to check a backup**, which is a destructive test of a non-destructive property.
+Run against the dev database, which holds real captured receipts and their real stored bytes: 3/9/4/0 rows, four images all re-hashing, dev database left exactly as found.
+Then damaged deliberately: it reports a deleted row, a corrupted digest and a missing object, and exits 1. It also refuses when both URLs name the same database, and **refuses to report success when the restored database holds no images** - a restore verified against zero images has verified nothing, which is the vacuous-assertion shape the August audit found in the isolation suite.
+
+**⚠ A §10B assumption that only became checkable once a provider was chosen.** §10B says "managed Postgres with point-in-time recovery", and **Neon's history window is 6 hours on the Free plan** (7 days on Launch, 30 on Scale). That answers "I ran the wrong thing twenty minutes ago"; it is **not** a six-year retention story. Retention rests on the scheduled dump, which is now a checklist item rather than an implication.
+
+**The privacy manifest ships and the label is written out word for word.**
+Six data types - other financial info, photos or videos, other user content, user ID, email address, name - **all linked to identity, none for tracking**, plus `NSPrivacyAccessedAPICategoryUserDefaults` with reason `CA92.1`.
+Rejected: **declaring only the three the review named** (financial info, user content, identifiers) - the server also stores the Apple relay email and, when Apple provides it, the display name. Declaring less than is stored would be the flattering answer and the false one.
+
+**R2's key normalization is still unmeasured, and is now one command instead of an assumption.**
+`npm run storage:probe-keys` probes nine spellings against a planted victim object, with a control that proves it can observe a leak and a refusal to report anything if the control fails. Against MinIO it reproduces the audit exactly: leading slash and double leading slash serve the victim's bytes, every dot-segment spelling refused.
+Rejected: **inferring R2's behaviour from MinIO's** - the audit was explicit that one normalization class already goes the opposite way, so either result would be unfounded. Nothing in the API depends on the answer: keys are matched whole on write and re-checked on read.
+
+**A test that could not fail for the case it existed for - found by falsifying it, and the lesson is not about this test.**
+`testEverySettingsScreenReferenceIsFencedOutOfReleaseBuilds` searched for `ServerSettingsView` outside a `#if DEBUG` region. Unfencing the settings *button* left it passing, because the button's line says `Button("Server settings")` and never names the type - so the falsification produced a Release build with a **visible button whose sheet is compiled out**, a dead control shipped, and the test guarding exactly that said nothing.
+It now checks the user-facing label as well as the type, and its "still exists in Debug" pair does too, so neither can guard an absence.
+**The general form: an assertion aimed at how a thing is *built* rather than at the thing a person *sees* tracks the author's mental model of the code - which is where the defect already is.** Second instance of the August audit's N3 in a different costume. When a test guards a user-visible property, assert the user-visible string.
+
+**A measurement method note, on the same theme.** The first `strings` check of the Release binary read the Debug `Kept` executable as its comparison and got zero hits for a control string - that binary is a 58 KB stub, with the code in a separate `Kept.debug.dylib`. Reading the wrong file would have produced a comfortable and meaningless "nothing there". The control is what caught it, which is the same discipline the probe script now enforces on itself.
+
+Suites: **server 214** (was 201), **iOS 194** (was 177), `tsc --noEmit` clean, zero iOS warnings; every new test falsified in both directions.
+Guardrail 7 twice: the real entrypoint (no stale listener on port 3000 for the first wave in five), and the production Docker image, which answered a real 401 with `Cache-Control: no-store` and a 403 with the edge secret set and no header.
+
 ## 2026-08-07 - One live export per user, and the method note behind the memory number
 
 **Provisioning ratified: `shared-cpu-1x` at 2 GB** (§4.2), on the measurement recorded in the previous entry.

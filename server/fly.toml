@@ -1,0 +1,27 @@
+# Fly.io configuration for the Kept API origin (spec §4.2, ratified
+# Aug 7 2026: Node on Fly behind a Cloudflare proxy).
+#
+# Secrets are NOT set here - fly.toml is committed. They are set once with
+# `fly secrets set` (see docs/Runbook.md): DATABASE_URL, SESSION_JWT_SECRET,
+# APPLE_CLIENT_ID, STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID,
+# STORAGE_SECRET_ACCESS_KEY, and later EDGE_SHARED_SECRET.
+
+app = "kept-api"
+primary_region = "yyz"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # Never scaled to zero: a cold start on pull-to-refresh would read as the
+  # honest-failure timeout (10 s) the wave-5 offline work put in front of
+  # people, and at one always-on shared-cpu machine the cost is dollars.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  # 2 GB, measured rather than guessed: a 250 MiB export peaks at 891 MiB
+  # RSS (2.8x the payload), exports are serialized one-per-user, and 2 GB
+  # is Fly's ceiling per shared CPU (spec §4.2, ratified Aug 7 2026).
+  memory = "2gb"

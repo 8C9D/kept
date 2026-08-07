@@ -7,6 +7,7 @@ import {
   findPortListeners,
   formatPortInUseMessage,
 } from "./observability/portInUse.js";
+import { assertProductionEnv } from "./productionEnv.js";
 import {
   LOCAL_DEV_STORAGE_CONFIG,
   createBucketIfMissing,
@@ -37,6 +38,11 @@ if (missingEnv.length > 0) {
 const databaseUrl = process.env.DATABASE_URL as string;
 const sessionSecret = process.env.SESSION_JWT_SECRET as string;
 const appleClientId = process.env.APPLE_CLIENT_ID as string;
+
+// Under NODE_ENV=production (the Dockerfile sets it) the deployed shape is
+// checked too: real storage configured over https, a non-loopback database,
+// a full-strength session secret. A no-op in local development.
+assertProductionEnv(process.env);
 
 const port = Number(process.env.PORT ?? "3000");
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -74,6 +80,9 @@ const app = createApp({
   appleVerifier: createAppleIdentityVerifier(appleClientId),
   sessionTokens: createSessionTokens(sessionSecret),
   storage: createS3ObjectStorage(storageConfig),
+  // Set once Cloudflare fronts the origin (see docs/Runbook.md); unset,
+  // the origin answers anyone - correct for dev and for the first deploy.
+  edgeSharedSecret: process.env.EDGE_SHARED_SECRET,
 });
 
 const server = serve({ fetch: app.fetch, port }, (info) => {

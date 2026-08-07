@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { AppleIdentityVerifier } from "./auth/appleVerifier.js";
@@ -22,6 +23,16 @@ export interface AppDependencies {
   appleVerifier: AppleIdentityVerifier;
   sessionTokens: SessionTokens;
   storage: ObjectStorage;
+  /**
+   * When set, every request must carry this value in `x-kept-edge-secret`,
+   * which a Cloudflare Transform Rule adds at the edge. This is what makes
+   * the edge rate limiter (spec §4.2 / §10B) enforceable rather than
+   * decorative: without it, anyone who guesses the origin's fly.dev
+   * hostname talks to the origin directly and the limiter never sees them.
+   * Optional so a fresh deployment works before Cloudflare is in front,
+   * and absent in local development.
+   */
+  edgeSharedSecret?: string;
 }
 
 /**
@@ -65,6 +76,29 @@ export function createApp(deps: AppDependencies): Hono {
     c.header("Cache-Control", "no-store");
   });
 
+  // Between the cache header (which must cover this middleware's own 403)
+  // and the body limit (a request refused here must be refused before its
+  // body is buffered). Comparison is constant-time over digests so neither
+  // length nor prefix leaks through timing.
+  const edgeSecret = deps.edgeSharedSecret;
+  if (edgeSecret !== undefined && edgeSecret !== "") {
+    app.use("*", async (c, next) => {
+      const presented = c.req.header("x-kept-edge-secret") ?? "";
+      if (!digestsMatch(presented, edgeSecret)) {
+        return c.json(
+          {
+            error: {
+              code: "forbidden",
+              message: "Requests must arrive through the configured edge",
+            },
+          },
+          403,
+        );
+      }
+      await next();
+    });
+  }
+
   // Ahead of every route, so an oversized body is refused before any
   // handler, verifier, or database query does work on it.
   app.use(
@@ -90,4 +124,12 @@ export function createApp(deps: AppDependencies): Hono {
   app.route("/api/me", meRoutes(deps));
 
   return app;
+}
+
+/** Constant-time string comparison; hashing first makes unequal lengths
+ * comparable without an early return. */
+function digestsMatch(presented: string, expected: string): boolean {
+  const presentedDigest = createHash("sha256").update(presented).digest();
+  const expectedDigest = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(presentedDigest, expectedDigest);
 }

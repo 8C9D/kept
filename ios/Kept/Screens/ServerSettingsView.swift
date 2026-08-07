@@ -1,5 +1,12 @@
 import SwiftUI
 
+// Development only. The whole screen is compiled out of a shipped
+// build: in production the server address is not configuration
+// (see ServerEnvironment), so a screen for editing it would be a
+// control with nothing legitimate to do and one dangerous thing it
+// could do - point an installed app at another server.
+#if DEBUG
+
 /// Which server the app talks to - the affordance that lets a device on
 /// the same network reach a backend running on the development Mac. Not a
 /// user-facing feature; a development necessity kept deliberately small.
@@ -79,3 +86,4 @@ struct ServerSettingsView: View {
         }
     }
 }
+#endif

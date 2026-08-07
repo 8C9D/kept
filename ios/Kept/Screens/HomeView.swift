@@ -8,7 +8,9 @@ struct HomeView: View {
     @EnvironmentObject private var session: SessionController
     @EnvironmentObject private var outbox: OutboxController
     @StateObject private var model: ReceiptListModel
+    #if DEBUG
     @State private var showServerSettings = false
+    #endif
     @State private var showCaptureFlow = false
     @State private var showConfirmQueue = false
     /// The needs-attention item a discard confirmation is showing for.
@@ -44,9 +46,12 @@ struct HomeView: View {
             .navigationTitle("Kept")
             .toolbar {
                 Menu {
+                    // Development only - see SignInView for the reasoning.
+                    #if DEBUG
                     Button("Server settings") {
                         showServerSettings = true
                     }
+                    #endif
                     Button("Sign out", role: .destructive) {
                         session.signOut()
                     }
@@ -63,9 +68,11 @@ struct HomeView: View {
             .refreshable {
                 await model.loadFirstPage()
             }
+            #if DEBUG
             .sheet(isPresented: $showServerSettings) {
                 ServerSettingsView()
             }
+            #endif
             .fullScreenCover(isPresented: $showCaptureFlow) {
                 CaptureFlowView(outbox: outbox) { didChangeAnything in
                     showCaptureFlow = false

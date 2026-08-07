@@ -6,7 +6,9 @@ import SwiftUI
 struct SignInView: View {
     @EnvironmentObject private var session: SessionController
     @Environment(\.colorScheme) private var colorScheme
+    #if DEBUG
     @State private var showServerSettings = false
+    #endif
 
     var body: some View {
         VStack(spacing: 16) {
@@ -48,14 +50,22 @@ struct SignInView: View {
                 }
             }
 
+            // Development only. A shipped build reaches exactly one
+            // address (see ServerEnvironment); a control that redirects an
+            // installed app - and the bearer token it sends - has no place
+            // behind an unlisted link anyone can install from.
+            #if DEBUG
             Button("Server settings") {
                 showServerSettings = true
             }
             .font(.footnote)
+            #endif
         }
         .padding(24)
+        #if DEBUG
         .sheet(isPresented: $showServerSettings) {
             ServerSettingsView()
         }
+        #endif
     }
 }
