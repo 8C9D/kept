@@ -3,6 +3,16 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - Wave-5 offline pass (the owner): a 10-second request timeout, and the USB confound on the record
+
+**The API session's `timeoutIntervalForRequest` is 10 seconds (asserted by the transport-configuration test).**
+Rejected: the 60-second default (on the genuinely-offline device run it read as a hang - a person pulling to refresh in a store must get a fast honest failure, not a minute of spinner), an even shorter value (a slow cellular handshake can legitimately take several seconds; 10 answers while someone is still looking without failing marginal-signal requests that would have succeeded), and a separate longer-timeout session for the outbox's image PUT (unnecessary: this is an idle timer that resets whenever bytes move, so a slow-but-progressing upload is never cut by it - only a genuine stall is, and a stalled background upload *should* fail fast into backoff).
+The outbox question answered in the same stroke: its upload-url, PUT, and create all ride the same `URLSessionTransport`, so its first attempt had the identical 60-second hang and the same one-line fix covers it.
+
+**The USB confound, recorded as a correction.** Every earlier "offline" run was invalid: a phone tethered by the dev cable can reach the Mac's server with both radios off, so no offline failure could ever surface - unplugging was the missing variable, found by the owner. This partially re-attributes the offline diagnostic one entry down: the cached responses were real, the missing `Cache-Control` contract was real, and the cache-free transport is what made today's honest timeout possible - but the decisive mechanism behind that day's "no error" was most likely USB reachability, not a cache hit, and the two produced identical observations. Fifth instance of framework §9.3 candidate rule 5, and the most expensive kind: the environment divergence didn't just hide a defect, it invalidated the *test itself* while every observable looked like a pass.
+
+**Verified on the genuinely-offline device run:** honest refresh failure with retry and a stated-unavailable pending count; capture-confirm-save returning to Home with live outbox status; automatic retry with backoff, unprompted; queue survival across force-quit while offline; automatic drain and list arrival on reconnect. **Stated gap: one receipt only - multi-item queue drain and cross-item ordering remain device-unverified** (covered by unit tests, not by the §6 gate's three-receipt run, which still stands ahead).
+
 ## 2026-08-06 - Wave-5 offline diagnostic (the owner): the API transport carries no HTTP cache, and the server says so
 
 **Client: `URLSessionTransport` uses a session with `urlCache = nil` and `requestCachePolicy = .reloadIgnoringLocalCacheData` (either alone suffices; both are set so neither is load-bearing). Server: every API response carries `Cache-Control: no-store`, applied as app-wide middleware. Tests on both sides: the iOS suite asserts the transport's configuration (the configuration IS the behaviour - no request-level simulator test can see CFNetwork's cache), and the server suite asserts the header on a 200 and a 401.**

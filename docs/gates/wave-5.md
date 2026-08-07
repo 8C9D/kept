@@ -149,6 +149,16 @@ The owner's pre-test check - both radios off, pull to refresh - produced no erro
 
 **Re-test precondition now establishable:** with both radios off, pull-to-refresh must show the failure view - the honest offline signal the earlier runs could never produce.
 
-## 14 · Stopping here
+## 14 · Offline pass (the owner, 2026-08-06): verified genuinely offline - and the cable was the last confound
 
-Wave 6 not started. The next session, per kickoff §7, is **the consolidated security review** (§7 above), then wave 6. The wave-5 gate closes when the device script (§9's version) passes on the phone: offline refresh failing honestly, then the three-receipt offline test with Wi-Fi explicitly off, force-quit, stuck-item, and pocket cases.
+**The missing variable was the USB cable.** A phone tethered for development can reach the dev Mac's server with both radios off, so every earlier "offline" run had a route the whole time - no failure could ever surface, and the observables were indistinguishable from a pass. This also partially re-attributes §13: the cached responses and the missing `Cache-Control` contract were real and that fix stands (it is what made today's honest failure possible), but the decisive mechanism behind §13's "no error" was most likely the cable, not the cache - the two produce identical observations. Recorded in `DECISIONS.md` and as §9.3 candidate rule 5's fifth instance, the most expensive kind: the environment divergence invalidated the test itself. Sub-lesson: a test of disconnection must sever the connection the tooling rides on.
+
+**Verified on device, radios off and unplugged:** pull-to-refresh fails honestly ("Could not reach the server: the request timed out", Retry, pending count stated unavailable); capture → confirm → Save returns straight to Home with a live "On this phone" row ("Uploading" → "Will retry", reason stated); the backoff retried **without input**; force-quit and reopen while offline kept the item; Wi-Fi back on drained it automatically into the Receipts list. Durability across process death, honest status, and automatic drain on reconnect: all §7.4 pillars, on real hardware.
+
+**One finding, fixed:** the offline refresh took the 60-second default timeout to fail - long enough to read as a hang. The API session now sets `timeoutIntervalForRequest` to 10 seconds, asserted alongside the cache settings in the transport-configuration test. It is an idle timer - it resets whenever bytes move - so the outbox's image PUT, which rides this same transport (and therefore had the same 60-second first-attempt hang, answering §14's open check), is never cut while progressing; only a genuine stall fails, fast, into the existing backoff. Suites: iOS 170 green, server 152 green, zero warnings.
+
+**Stated gap, honestly:** one receipt only. Multi-item queue drain and cross-item ordering on device remain unverified - unit tests cover them, but the §6 gate's three-receipt run is what closes them, and it is still ahead.
+
+## 15 · Stopping here
+
+Wave 6 not started. The next session, per kickoff §7, is **the consolidated security review** (§7 above), then wave 6. Remaining for the wave-5 gate, all on the phone with the cable out: the three-receipt offline run (§9 step 3-4 - the multi-item drain and ordering check), the force-quit-with-two-queued case (§9 step 5), stuck-item manual retry, and the pocket case.

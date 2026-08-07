@@ -45,6 +45,11 @@ final class APIClientTests: XCTestCase {
         let configuration = URLSessionTransport().session.configuration
         XCTAssertNil(configuration.urlCache)
         XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+        // And a fast honest failure instead of a minute of spinner: the
+        // 60-second default read as a hang on the device's offline pass.
+        // The outbox drains through this same transport, so the fix
+        // covers its first upload attempt too.
+        XCTAssertEqual(configuration.timeoutIntervalForRequest, 10)
     }
 
     // MARK: - Token attachment
