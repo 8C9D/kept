@@ -1,4 +1,4 @@
-import { SignJWT } from "jose";
+import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { describe, expect, it } from "vitest";
 import { createSessionTokens } from "../../src/auth/session.js";
 
@@ -67,6 +67,72 @@ describe("session tokens", () => {
       .setExpirationTime("30d")
       .sign(KEY);
     expect(await sessions.verify(versionless)).toBeNull();
+  });
+
+  it("rejects a token whose tv claim is not an integer", async () => {
+    const sessions = createSessionTokens(SECRET);
+    // Each of these is a well-signed token that only differs in tv. A
+    // string "0" or a fractional version cannot be compared against the
+    // integer column, so it is not a session either.
+    for (const tv of ["0", 1.5, null, true, { value: 0 }]) {
+      const malformed = await new SignJWT({ tv })
+        .setProtectedHeader({ alg: "HS256" })
+        .setSubject(USER_ID)
+        .setIssuedAt()
+        .setExpirationTime("30d")
+        .sign(KEY);
+      expect(await sessions.verify(malformed)).toBeNull();
+    }
+  });
+
+  it("rejects an unsigned token claiming alg none", async () => {
+    const sessions = createSessionTokens(SECRET);
+    // Hand-assembled, because no signer will produce this: header and
+    // payload base64url-encoded with an empty signature - the classic
+    // "trust me, I need no key" forgery.
+    const encode = (value: object) =>
+      Buffer.from(JSON.stringify(value)).toString("base64url");
+    const unsigned = [
+      encode({ alg: "none", typ: "JWT" }),
+      encode({
+        sub: USER_ID,
+        tv: 0,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      }),
+      "",
+    ].join(".");
+    expect(await sessions.verify(unsigned)).toBeNull();
+  });
+
+  it("rejects an HMAC token signed with a public key (algorithm confusion)", async () => {
+    const sessions = createSessionTokens(SECRET);
+    // The classic confusion attack: a verifier that picks its algorithm
+    // from the token's own header would treat an RSA public key as an
+    // HMAC secret. Ours pins HS256, so a token that declares RS256 is
+    // refused whatever it was signed with.
+    const { publicKey } = await generateKeyPair("RS256", {
+      extractable: true,
+    });
+    const publicJwk = await exportJWK(publicKey);
+    const confused = await new SignJWT({ tv: 0 })
+      .setProtectedHeader({ alg: "HS256" })
+      .setSubject(USER_ID)
+      .setIssuedAt()
+      .setExpirationTime("30d")
+      .sign(new TextEncoder().encode(publicJwk.n as string));
+    expect(await sessions.verify(confused)).toBeNull();
+
+    // And a genuinely RS256-signed token is refused by the pin itself.
+    const { privateKey } = await generateKeyPair("RS256", {
+      extractable: true,
+    });
+    const rsaSigned = await new SignJWT({ tv: 0 })
+      .setProtectedHeader({ alg: "RS256" })
+      .setSubject(USER_ID)
+      .setIssuedAt()
+      .setExpirationTime("30d")
+      .sign(privateKey);
+    expect(await sessions.verify(rsaSigned)).toBeNull();
   });
 
   it("refuses to be constructed with a weak secret", () => {

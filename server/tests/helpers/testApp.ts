@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Hono } from "hono";
 import { createApp } from "../../src/app.js";
 import { createSessionTokens } from "../../src/auth/session.js";
@@ -130,10 +131,14 @@ export function receiptBody(overrides: Record<string, unknown> = {}) {
   };
 }
 
-/** An image sub-object whose objectKey is owned by the given user. */
+/**
+ * An image sub-object whose objectKey is owned by the given user, in
+ * exactly the shape POST /api/receipts/upload-url issues - which is the
+ * only shape the create route accepts.
+ */
 export function imageFor(userId: string, sha256: string) {
   return {
-    objectKey: `${userId}/2026/03/${sha256.slice(0, 8)}.jpg`,
+    objectKey: `${userId}/2026/03/${randomUUID()}.jpg`,
     sha256,
   };
 }

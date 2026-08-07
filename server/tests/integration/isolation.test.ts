@@ -1,4 +1,6 @@
+import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { receiptImages } from "../../src/db/schema.js";
 import {
   createTestHarness,
   imageFor,
@@ -121,5 +123,53 @@ describe("per-user isolation", () => {
       receiptBody({ image: imageFor(userIdB, "d".repeat(64)) }),
     );
     expect(response.status).toBe(400);
+  });
+
+  it("refuses an object key that walks out of the session user's prefix", async () => {
+    // The key starts with A's prefix, so a prefix test would pass it, but
+    // it names B's namespace once path segments resolve. Whether it would
+    // actually reach B's object is then the storage layer's normalization
+    // to decide - which is not where an isolation question belongs.
+    const stolen = imageFor(userIdB, "e".repeat(64));
+    const response = await harness.request(tokenA, "POST", "/api/receipts",
+      receiptBody({
+        image: {
+          objectKey: `${userIdA}/../${stolen.objectKey}`,
+          sha256: "e".repeat(64),
+        },
+      }),
+    );
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: { message: string } };
+    expect(body.error.message).toContain("objectKey");
+  });
+
+  it("never hands A a download URL for an object B owns", async () => {
+    // The whole point of the key rules above: the only presigned download
+    // the API issues comes from a receipt row it already scoped to the
+    // session user. Prove A cannot reach B's image bytes by any route -
+    // by B's receipt id, or by naming B's key on a receipt of A's own.
+    const bImage = await harness.db
+      .select()
+      .from(receiptImages)
+      .where(eq(receiptImages.userId, userIdB));
+    const bObjectKey = bImage[0]?.objectKey;
+    expect(bObjectKey).toBeDefined();
+
+    const byReceiptId = await harness.request(tokenA, "GET",
+      `/api/receipts/${receiptOfB}`,
+    );
+    expect(byReceiptId.status).toBe(404);
+
+    const byKey = await harness.request(tokenA, "POST", "/api/receipts",
+      receiptBody({
+        image: { objectKey: bObjectKey as string, sha256: "f".repeat(64) },
+      }),
+    );
+    expect(byKey.status).toBe(400);
+
+    // And nothing A can see anywhere in its own API surface mentions B's key.
+    const ownList = await harness.request(tokenA, "GET", "/api/receipts");
+    expect(await ownList.text()).not.toContain(bObjectKey as string);
   });
 });

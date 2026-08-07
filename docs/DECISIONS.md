@@ -3,6 +3,25 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-06 - Consolidated security review: object keys are matched whole, not by prefix
+
+**`POST /api/receipts` accepts an `image.objectKey` only if it matches the entire shape the upload-url route issues - `{userId}/yyyy/mm/{uuid}.{ext}` - and the issuing route asserts its own output against the same predicate.**
+Rejected: the prefix test it replaces (`startsWith(userId + "/")`, from wave 1 - it admits dot segments, so `{userIdA}/../{userIdB}/2026/03/theirs.jpg` passes while naming B's namespace, and the detail route would then presign a download for it); rejecting only keys containing `..` (a denylist against a normalization behaviour nobody here controls, and it would still admit every other unissued shape); and normalizing the key server-side before storing it (silently rewriting what a client sent is the quiet-wrong-answer pattern - refusing states the fact).
+Why: verified in both directions. Reverting the fix makes the new regression test fail with a 201, so the API genuinely accepted such keys. But five traversal spellings probed against the real MinIO all failed - three on `SignatureDoesNotMatch`, two on `NoSuchKey` - because the AWS SDK collapses dot segments when building the URL while signing the uncollapsed key, so **nothing leaked and this was latent, not live**. It is fixed anyway because the only thing between a prefix check and a cross-user read was normalization behaviour in the layer beneath, which is the exact trust that produced the wave-5 CFNetwork cache diagnostic and the `URL.path()` encoding defect - and R2's behaviour here is untested, since no R2 credentials exist.
+The extension list in the validator is read from the same map the issuing route uses, so the pair cannot drift; the whole-string match is what makes "we issued every key in the system" an enforceable statement rather than a description.
+
+**Algorithm pinning on the session JWT is load-bearing, and now proven so.**
+Recorded because the falsification was more informative than the assertion: removing `algorithms: ["HS256"]` does not admit a forged token - jose's key-type check still refuses an RS256 token against a symmetric key - but it refuses it by raising a `TypeError` rather than a `JOSEError`, which `verify` deliberately rethrows, turning an algorithm-substitution attempt into a 500 instead of a clean 401. The pin is what keeps the rejection quiet and correct.
+Also added: `alg: none`, and five malformed `tv` claims (`"0"`, `1.5`, `null`, `true`, an object) that differ from a valid token in that claim alone.
+
+**Issuer and audience are deliberately absent from the session token.**
+Rejected: adding `iss`/`aud` to satisfy the checklist. Why: they exist to stop a token minted for one party being replayed at another, and this secret signs exactly one token type for exactly one verifier - the claims would assert something already true by construction. The trigger to revisit is a second token type sharing the secret (a download token, a web session with a different lifetime), not distribution. The Apple identity token, which does cross a trust boundary, checks both.
+
+**Wave 6 is no-go, on distribution work rather than on a breach.**
+The isolation core holds and is now proven by test, including cross-user object access. What blocks the wave: there is no deployed server (the app defaults to `http://localhost:3000`), the single `Info.plist` serves both Debug and Release so `NSAllowsLocalNetworking` and `NSLocalNetworkUsageDescription` would ship, and there is no privacy manifest and no honest privacy label - which cannot be written until the deployment exists, because where the data goes is what the label declares.
+Seven findings are recorded and left for a ruling rather than decided unilaterally: the outbox files' data-protection class (the only finding whose subject is the receipt data itself, and one that changes the `beginBackgroundTask` drain path the wave-5 gate closed without running), the rate limiter's shape (undecidable before a deployment names what identifies a client), whether database `detail` is stripped from error logs, the export key layout (§10B's `{userId}/exports/...` lifecycle rule is not expressible - S3 and R2 match literal prefixes, and that one varies per user), the orphaned-object policy, and per-request token pinning.
+Full record: `docs/security/review-2026-08.md`.
+
 ## 2026-08-06 - Wave-5 offline pass (the owner): a 10-second request timeout, and the USB confound on the record
 
 **The API session's `timeoutIntervalForRequest` is 10 seconds (asserted by the transport-configuration test).**

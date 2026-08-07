@@ -6,6 +6,7 @@ import { exportJobs } from "../../src/db/schema.js";
 import { generateExport } from "../../src/export/generateExport.js";
 import {
   createTestHarness,
+  imageFor,
   receiptBody,
 } from "../helpers/testApp.js";
 
@@ -49,7 +50,7 @@ async function createReceiptWithImage(
   sha: string,
   fields: Record<string, unknown>,
 ): Promise<{ id: string }> {
-  const objectKey = `${userId}/2026/03/${sha.slice(0, 8)}.jpg`;
+  const objectKey = imageFor(userId, sha).objectKey;
   await harness.storage.upload(
     objectKey,
     new TextEncoder().encode(`synthetic image bytes ${sha}`),
@@ -221,10 +222,7 @@ describe("the export pipeline", () => {
     // fail and say why, not ship a zip with a broken click-through.
     const response = await harness.request(token, "POST", "/api/receipts", {
       ...receiptBody({ status: "confirmed" }),
-      image: {
-        objectKey: `${userId}/2026/03/missing.jpg`,
-        sha256: "b1".repeat(32),
-      },
+      image: imageFor(userId, "b1".repeat(32)),
     });
     expect(response.status).toBe(201);
 
