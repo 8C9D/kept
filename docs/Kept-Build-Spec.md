@@ -129,29 +129,43 @@ Recorded so they are not silently revisited, and so the reasoning stays auditabl
 
 ### 4.4 Repo layout
 
+*(Corrected Aug 8, 2026 against the actual tree - the sketch had drifted since wave 1.)*
+
 ```
 kept/
   CLAUDE.md                     ← agent instructions, see §10
+  .githooks/                    ← gitleaks pre-commit hook (Runbook §0)
   docs/
     Kept-Build-Spec.md          ← this file
     Agentic-SDLC-Framework.md   ← reference
-  web/                          ← Vite + React SPA (review, search, export)
-    src/
-    tests/
+    DECISIONS.md                ← append-only decision log
+    Runbook.md                  ← deploy, migrate, roll back, restore
+    gates/                      ← per-wave gate reports
+    security/                   ← §10B review and audit records
+  web/                          ← Vite + React SPA (review, search, export); empty until wave 7
   server/
-    docker-compose.yml          ← Postgres 16 for local dev
+    Dockerfile                  ← production image (§4.2 deployment row)
+    fly.toml                    ← Fly.io machine config (shared-cpu-1x, 2 GB)
+    docker-compose.yml          ← Postgres 16 + MinIO for local dev
     drizzle/                    ← migrations
-    src/domain/                 ← pure TS: validation, arithmetic checks, filename rules
-    src/db/                     ← schema, seed
-    src/routes/                 ← Hono route handlers
+    src/auth/                   ← Sign in with Apple verification, session JWTs
+    src/db/                     ← schema, seed, operational scripts (backfill, accuracy, restore-verify)
+    src/domain/                 ← pure TS: validation, arithmetic checks, filename rules, LLM prompt + schema
     src/export/                 ← XLSX + zip generation
+    src/http/                   ← request schemas, validation, session middleware, error envelope
+    src/observability/          ← error redaction, stale-listener diagnosis
+    src/parse/                  ← the server-side LLM parse (§7.3)
+    src/routes/                 ← Hono route handlers
+    src/storage/                ← object storage client + the key shapes (§10B)
     tests/unit/
     tests/integration/          ← against real Postgres
     tests/e2e/
+    tests/helpers/              ← fakes + test app/database setup
   ios/
     Kept.xcodeproj
     Kept/                       ← SwiftUI app
     KeptTests/                  ← XCTest
+    Tools/                      ← vision-dump.swift, the committed OCR diagnostic
 ```
 
 ---
@@ -445,6 +459,7 @@ Each wave ends at a gate. **A gate is passed by inspecting an artifact, not by r
 - Category is free text; never introduce an enum, taxonomy, or CRA mapping.
 - No secrets in the repo. R2 keys, Apple credentials, and database URLs live in `.env.local`, which is gitignored, and the owner handles them.
 - Never weaken or delete a failing test to make a suite pass. A failing test is a finding — report it.
+- The doc-ownership rule *(added Aug 8, 2026)*: a decision appended to `docs/DECISIONS.md` amends this spec **in the same commit**. The log is how we got here; the spec is the current state; neither substitutes for the other.
 
 ### 10.2 The verification asymmetry — the thing to plan around
 

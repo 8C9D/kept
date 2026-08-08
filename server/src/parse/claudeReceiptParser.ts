@@ -10,8 +10,9 @@ import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
  * The LLM parse over a receipt's stored OCR text (ruled Aug 7, 2026).
  *
  * Haiku 4.5 deliberately: this is structured extraction over ~30 lines of
- * text, priced at roughly a quarter of a cent per receipt. The accuracy
- * table arbitrates whether a larger model is ever warranted - not taste.
+ * text, measured at roughly 0.12¢ per receipt on the first real run. The
+ * accuracy table arbitrates whether a larger model is ever warranted - not
+ * taste.
  */
 export const RECEIPT_PARSE_MODEL = "claude-haiku-4-5";
 

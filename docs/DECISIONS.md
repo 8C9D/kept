@@ -644,3 +644,40 @@ All LLM-sourced values stay amber until touched; no trust shortcut.
 The revised prompt - with the vendor rule scoped out of the system prompt entirely - still produced 2011-07-26 on one of three runs, so the v1 backfill's correct date was partly luck, not a property of the old prompt.
 
 ⚠ All of this rests on 5 receipts from 2 vendors. Provisional; re-run parse-accuracy after weeks of real use before treating any of it as settled.
+
+## 2026-08-07 - The LLM parse path (the owner) - founding entry, reconstructed 2026-08-08
+
+Recorded a day late and out of order: this decision produced the code in commits 62699f2 and 3034356 and predates the two entries above, but was never logged - the gap the doc-ownership entry below exists to prevent.
+Sourced from that code and from the two entries that do exist; anything not recoverable from them is marked unrecorded rather than inferred.
+
+**Decided: a second parser, server-side - Claude Haiku 4.5 over the stored `ocr_raw_text`, text only, writing an immutable `llm_suggestions` record beside `ocr_suggestions`.**
+The on-device heuristics stay; the LLM augments rather than replaces, and `npm run parse-accuracy` scores the two paths separately against what the human confirmed.
+**The model only ever sees `ocr_raw_text` - never a field a person typed** (the owner's ruling, stated as such in the code): the request is built by a pure function whose one input is the raw text, so a builder taking the whole receipt row would put the ruling one refactor away from silently false, and a test asserts what leaves the building.
+Every schema field is required and nullable - null is the stated "not printed on this receipt", and an absent key would be indistinguishable from a forgotten one.
+The reply is validated before anything stores it: structured outputs guarantee the shape, but the values still cross a trust boundary - a non-calendar date or an unstorable amount is refused loudly, never quietly corrected.
+The system prompt states Canadian-receipt domain facts (HST/GST are one CRA program; cross-check multiply-printed dates; tax numbers carry letter prefixes), not step-by-step heuristics - the model's judgment over the text is the point, and the on-device heuristics already do rule-following.
+
+Rejected: **a vision model over the receipt image.**
+The recoverable reason is the standing constraint rather than a model comparison: the image never leaves the phone, so the server has only the text to parse (§4.3's resolution note states this as why the image-parsing products stayed rejected at upgrade time).
+Whether a vision parse was also weighed on accuracy or cost is unrecorded.
+Rejected: **an on-device LLM.**
+Why is unrecorded - nothing in the code or the existing entries states the reasoning.
+Rejected: **the cloud expense parsers §7.3 had named as the upgrade path (AWS Textract AnalyzeExpense, Google Document AI, Azure Document Intelligence).**
+They parse the image server-side, which the same image-never-leaves-the-phone constraint rules out; §7.3's original objection also stands, because on-device Vision remains the only OCR and capture stays instant and offline.
+
+**Why Haiku 4.5:** the task is structured extraction over roughly 30 lines of text, and the accuracy table arbitrates whether a larger model is ever warranted - not taste.
+The cost estimate the code carried at decision time ("roughly a quarter of a cent per receipt") measured at about 0.12¢ on the first real run ($0.0069 across 6 receipts, entry above); the comment now carries the measured figure.
+Whether other providers or model tiers were compared before settling on Haiku is unrecorded.
+
+**Why the backfill ran before the server-side parse:** sequenced deliberately so `parse-accuracy` could score the model against already-confirmed receipts before anything ships to a client.
+The backfill is local-database-only under the same guard as `db:seed` and `db:claim` - not because it deletes anything, but because it sends receipt text to an external API and writes to tax records, and pointing it at production should be a decision someone makes deliberately, not a `DATABASE_URL` that happened to be exported.
+Constraint 2 is untouched by any of this: the LLM adds suggestions, never confirmations.
+
+## 2026-08-08 - Doc ownership: a DECISIONS entry and its spec amendment land in the same commit
+
+**Standing rule, now in `CLAUDE.md`: when a decision is appended to this file, `docs/Kept-Build-Spec.md` is amended in the same commit.**
+`DECISIONS.md` is the append-only log of how we got here; the spec is the current state.
+Neither is optional and neither substitutes for the other.
+**The failure mode it exists to prevent just happened:** the Aug 7-8 LLM-parse decisions reached this log while the spec went on describing the Textract / Document AI upgrade path - a path not taken - for three days, because the prompts said "append a DECISIONS entry" without saying "amend the spec".
+A prompt that names only the log must still produce both.
+The catch-up is commit 3093bd6 (§4.2, §4.3, §5, §7.2, §7.3, §10A.1 amended, update-log entry added); this entry's own spec reflection is the §10.1 bullet added alongside it.
