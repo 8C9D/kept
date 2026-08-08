@@ -45,6 +45,7 @@ Every design decision is subordinate to this sentence.
   `DECISIONS.md` is the append-only log of how we got here; the spec is the current state.
   Neither is optional and neither substitutes for the other.
   The failure mode this exists to prevent: a prompt that says "append a DECISIONS entry" without saying "amend the spec" must still produce both - the Aug 7-8 LLM-parse decisions reached the log while the spec went on describing a path not taken for three days.
+- `docs/DECISIONS.md` is ordered newest-first by decision date: a new entry is inserted at the top of the file, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
 ## Review discipline
 

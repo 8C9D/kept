@@ -2,6 +2,81 @@
 
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
+Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
+
+## 2026-08-08 - Doc ownership: a DECISIONS entry and its spec amendment land in the same commit
+
+**Standing rule, now in `CLAUDE.md`: when a decision is appended to this file, `docs/Kept-Build-Spec.md` is amended in the same commit.**
+`DECISIONS.md` is the append-only log of how we got here; the spec is the current state.
+Neither is optional and neither substitutes for the other.
+**The failure mode it exists to prevent just happened:** the Aug 7-8 LLM-parse decisions reached this log while the spec went on describing the Textract / Document AI upgrade path - a path not taken - for three days, because the prompts said "append a DECISIONS entry" without saying "amend the spec".
+A prompt that names only the log must still produce both.
+The catch-up is commit 3093bd6 (§4.2, §4.3, §5, §7.2, §7.3, §10A.1 amended, update-log entry added); this entry's own spec reflection is the §10.1 bullet added alongside it.
+
+## 2026-08-08 - LLM merge rule (the owner)
+
+**Prompt v2: the verbatim-vendor rule lives in the vendor field's schema description, with branch and store numbers, addresses, and phone numbers excluded.**
+Rejected: the first draft's placement in the shared system prompt, and its "including store numbers" wording, which folded "Store #1234" into the Food Basics vendor.
+Why: scoped to the one field that transcribes, the rule went 15/15 against confirmed vendors in the n=3 reparse; the stored v1 records stay untouched and distinguishable by their absent promptVersion field.
+
+**The merge rule, decided on the n=3 evidence.**
+Amounts come from the heuristic: both paths scored 100% on the money fields, and the heuristic is free, offline, and deterministic.
+Vendor and tax number come from the LLM: 15/15 vendor matches under prompt v2, and 100% against the heuristics' 80% on tax number.
+Date trusts neither source alone: the heuristic is deterministically wrong on an ambiguous DateTime line, and the LLM is wrong on roughly 1 of 3 runs over the same line.
+When the two disagree on date, the confirm screen keeps the field amber and marks it as needing attention - disagreement between two independent parsers over the same text is free signal, and this is the field that decides the fiscal year.
+All LLM-sourced values stay amber until touched; no trust shortcut.
+
+**Re-attribution, recorded honestly: yesterday's date regression was first read as a prompt effect, and the n=3 run shows it is nondeterminism.**
+The revised prompt - with the vendor rule scoped out of the system prompt entirely - still produced 2011-07-26 on one of three runs, so the v1 backfill's correct date was partly luck, not a property of the old prompt.
+
+⚠ All of this rests on 5 receipts from 2 vendors. Provisional; re-run parse-accuracy after weeks of real use before treating any of it as settled.
+
+## 2026-08-07 - First real LLM parse run (the owner)
+
+**The LLM backfill's first real Anthropic API run: 6/6 receipts parsed by claude-haiku-4-5 against the dev database, 5,281 input and 332 output tokens, $0.0069 total.**
+No request errored and no parse came back all-null.
+One came close: the Synthetic Vendor Two receipt returned only a total, which is consistent with its sparse synthetic text rather than a pipeline fault.
+
+**The accuracy listing's headline is a regression, not a win: on the vendor field the LLM scored 40% against the heuristics' 80%.**
+On three of the four Noodle House receipts the heuristic kept the confirmed "Noodle House (BCE)" while the LLM dropped the "(BCE)" suffix - cases where the heuristics were right and the LLM is wrong.
+The LLM won every Food Basics disagreement (vendor "Basics" vs "Food Basics", the garbled date 2011-07-26 vs 2026-07-11, the missing R prefix on the tax number), and both paths were perfect on the money fields.
+The provisional warning is showing: 5 receipts from 2 vendors cannot distinguish a good model from a lucky one, so the spec's §7.3 upgrade question stays open until a re-run after real use.
+
+**`npm run parse-llm-probe` (a one-off script, deliberately not a test) showed the pipeline's output tracks the raw text and nothing else.**
+A digit-rotated copy of the Food Basics receipt's ocr_raw_text moved 5 of 6 fields (date, total, subtotal, HST, tax number); vendor stayed put because the corruption touches only digits.
+Rejected: making it a CI test - it costs money and is nondeterministic, so it runs once and its outcome is recorded here instead.
+Limitation: this is a one-shot manual check on one receipt, not a standing guarantee; nothing re-verifies the property as the pipeline changes.
+⚠ On deliberately corrupted input the model returned a plausible invented date (2022-03-18) from an invalid string rather than null, and misread a scrambled amount by one digit.
+That is the honest limit of this path: on degraded input the LLM fails plausibly where the heuristic fails visibly.
+Design consequence for the server-parse step: LLM-sourced values stay amber until touched, with no trust shortcut.
+
+## 2026-08-07 - The LLM parse path (the owner) - founding entry, reconstructed 2026-08-08
+
+Recorded a day late: this decision produced the code in commits 62699f2 and 3034356 and predates the "First real LLM parse run" and "LLM merge rule" entries, but was never logged - the gap the 2026-08-08 doc-ownership entry exists to prevent.
+Sourced from that code and from the two entries that do exist; anything not recoverable from them is marked unrecorded rather than inferred.
+
+**Decided: a second parser, server-side - Claude Haiku 4.5 over the stored `ocr_raw_text`, text only, writing an immutable `llm_suggestions` record beside `ocr_suggestions`.**
+The on-device heuristics stay; the LLM augments rather than replaces, and `npm run parse-accuracy` scores the two paths separately against what the human confirmed.
+**The model only ever sees `ocr_raw_text` - never a field a person typed** (the owner's ruling, stated as such in the code): the request is built by a pure function whose one input is the raw text, so a builder taking the whole receipt row would put the ruling one refactor away from silently false, and a test asserts what leaves the building.
+Every schema field is required and nullable - null is the stated "not printed on this receipt", and an absent key would be indistinguishable from a forgotten one.
+The reply is validated before anything stores it: structured outputs guarantee the shape, but the values still cross a trust boundary - a non-calendar date or an unstorable amount is refused loudly, never quietly corrected.
+The system prompt states Canadian-receipt domain facts (HST/GST are one CRA program; cross-check multiply-printed dates; tax numbers carry letter prefixes), not step-by-step heuristics - the model's judgment over the text is the point, and the on-device heuristics already do rule-following.
+
+Rejected: **a vision model over the receipt image.**
+The recoverable reason is the standing constraint rather than a model comparison: the image never leaves the phone, so the server has only the text to parse (§4.3's resolution note states this as why the image-parsing products stayed rejected at upgrade time).
+Whether a vision parse was also weighed on accuracy or cost is unrecorded.
+Rejected: **an on-device LLM.**
+Why is unrecorded - nothing in the code or the existing entries states the reasoning.
+Rejected: **the cloud expense parsers §7.3 had named as the upgrade path (AWS Textract AnalyzeExpense, Google Document AI, Azure Document Intelligence).**
+They parse the image server-side, which the same image-never-leaves-the-phone constraint rules out; §7.3's original objection also stands, because on-device Vision remains the only OCR and capture stays instant and offline.
+
+**Why Haiku 4.5:** the task is structured extraction over roughly 30 lines of text, and the accuracy table arbitrates whether a larger model is ever warranted - not taste.
+The cost estimate the code carried at decision time ("roughly a quarter of a cent per receipt") measured at about 0.12¢ on the first real run ($0.0069 across 6 receipts, entry above); the comment now carries the measured figure.
+Whether other providers or model tiers were compared before settling on Haiku is unrecorded.
+
+**Why the backfill ran before the server-side parse:** sequenced deliberately so `parse-accuracy` could score the model against already-confirmed receipts before anything ships to a client.
+The backfill is local-database-only under the same guard as `db:seed` and `db:claim` - not because it deletes anything, but because it sends receipt text to an external API and writes to tax records, and pointing it at production should be a decision someone makes deliberately, not a `DATABASE_URL` that happened to be exported.
+Constraint 2 is untouched by any of this: the LLM adds suggestions, never confirmations.
 
 ## 2026-08-07 - Secret-exposure audit: nothing leaked, and the ignore rule is the load-bearing control
 
@@ -404,145 +479,35 @@ Why: §10A.1's design - the screen starts loud and goes quiet as the person work
 Rejected: a server-side snooze state.
 Why: the receipt simply stays pending - the §5.2a badge keeps nagging, which is the design - and the queue just stops re-offering it until reopened.
 
-## 2026-08-05 - Wave-0 gate decisions (applied at start of wave 1)
+## 2026-08-05 - Wave-3 gate review (the owner)
 
-**`receipts.deleted_at timestamptz NULL` added for soft delete.**
-Rejected: hard delete, and a `deleted` enum status.
-Why: §6 specifies a soft-delete endpoint and §10B makes retention (CRA six years) non-deferrable, but the wave-0 schema had no column to express it; a nullable timestamp records when, keeps `status` about the confirm workflow, and non-null rows are excluded from every list, count, and export.
+**`GET /api/receipts` returns `pendingCount`; the iOS 200-row probe is deleted.**
+Rejected: a dedicated count endpoint (more API surface for one integer), and keeping the probe (honest but heavy, and it saturates at "200+" exactly when the backlog is largest).
+Why: the badge's number rides the response both clients already fetch; it is user-wide and filter-independent because the badge means "receipts awaiting confirmation", not "pending rows on this page".
 
-**`receipt_images.user_id uuid NOT NULL` (FK to users) denormalized; unique `(user_id, sha256)` replaces `(receipt_id, sha256)`.**
-Rejected: the original per-receipt unique, and enforcing user-scoped uniqueness through a join or application code.
-Why: the per-receipt constraint only prevented the same image twice on one receipt, which is nobody's failure mode; a constraint that needs a join is not a constraint.
-Scope honesty (recorded in the spec): the hash catches re-uploaded identical files, never a re-scanned paper receipt; near-duplicate detection on date+vendor+total is v2.
+**Local object storage is MinIO in docker-compose, behind the real S3-compatible adapter.**
+Rejected: a filesystem stub (does not exercise the presigned path, which is the part that will actually break), and deferring storage to deployment (wave 4's capture flow cannot run against a server that cannot store).
+Why: one adapter serves MinIO locally and R2 in deployment; the dev default auto-creates its bucket so a clean checkout serves images with no ceremony, and `STORAGE_*` env repoints it (`npm run storage:init` creates the bucket for custom endpoints, e.g. the Mac's .local name so a phone can reach presigned URLs).
 
-**`receipts.status` gains `DEFAULT 'pending'`.**
-Rejected: no default (the wave-0 as-written reading).
-Why: unlike `is_business`, status is a system state rather than a concealed human choice, and defaulting to `pending` is fail-closed because pending rows never export.
+**Presigned PUT URLs sign the content-type header.**
+Rejected: the SDK default (only `host` is signed), under which the upload-url schema's jpeg/png/pdf restriction was decorative - any bytes under any declared type would store.
+Why: found by the integration test asserting a mismatched PUT fails; the signature now binds the PUT to the type the client declared and the server validated.
 
-**`updated_at` is maintained by a Postgres trigger.**
-Rejected: handler code and ORM hooks (`$onUpdate`).
-Why: a field whose freshness depends on every future handler remembering it silently rots.
+**The device-test reassignment SQL became `npm run db:claim`.**
+Rejected: leaving it as a documented psql snippet in the gate report.
+Why: it is dev tooling that will run every time a fresh device user needs data; the script refuses loudly when the real user is missing or ambiguous, and moves receipts and their denormalized image rows in one transaction.
 
-**`receipts.vendor` becomes nullable.**
-Rejected: NOT NULL with a placeholder string.
-Why: an illegible vendor is a real outcome; a forced placeholder corrupts the field for everyone reading it later.
+**iOS: ReceiptListModel reaches the API only through GuardedReceiptLoader.**
+Rejected: the wave-3 shape - a generation counter captured and re-checked by convention at every await (my own gate report named it the weakest code: nothing enforced the discipline on future awaits).
+Why: the model holds no raw API reference, so a bare unguarded await is unrepresentable; every response arrives as an Outcome whose `.superseded` case the compiler forces callers to handle, and waves 4-5 add more async to exactly this class.
 
-## 2026-08-05 - Wave 1
+**`npm run dev` loads `.env.local` via node --env-file, creating the file if absent.**
+Rejected: relying on shell-sourced environment (the wave-0 status quo; nothing loaded the file the docs told the owner to fill).
+Why: found during device verification when the server died mid-run - 110 tests were green while the real entry point was unrunnable from a clean checkout, because tests inject config and never execute src/index.ts.
 
-**`users.display_name` becomes nullable.**
-Rejected: NOT NULL with an empty-string default at sign-in.
-Why: Apple provides the person's name only on first authorization, only client-side, and possibly not at all; an empty-string default is exactly the silently-defaulted-value anti-pattern the quality rules ban.
-
-**`receipt_images` gains `deleted_at`; the `(user_id, sha256)` unique becomes partial (`WHERE deleted_at IS NULL`); DELETE stamps image rows with the receipt in one transaction.**
-Rejected: hard-deleting image rows on receipt delete (breaks retention), and keeping the full unique (delete-then-recapture of the same file would 409 forever against an invisible row).
-Why: surfaced by the wave-1 reviewer pass; the partial index keeps rows for CRA retention while freeing the duplicate slot.
-
-**Validation with zod, JWTs with jose; no other new runtime dependencies.**
-Rejected: hand-rolled validators (verbose, and a second validation style would inevitably appear) and hand-rolled JWT handling (signature verification is not code to write oneself).
-Why: both are the boring standard choices; jose's remote JWK set also handles Apple's key rotation, which the kickoff explicitly required.
-
-**The Apple test bypass is injection-only.**
-Rejected: an env var or config flag selecting a fake verifier.
-Why: the kickoff demands the bypass be structurally impossible in production; `createApp` takes a verifier as a value, the production entrypoint always constructs the real one, and no configuration value can swap them - tests build their own app with a fake.
-
-**Export routes answer 501 until wave 2.**
-Rejected: an in-memory job store now.
-Why: §6 specifies job id + polling but §5 defines no job store; that design decision belongs to wave 2 (an `export_jobs` table is the likely answer, since losing job state on restart mid-year-end-export is the wrong failure mode), and an honest 501 keeps the auth surface final without pretending.
-
-**`GET /api/receipts` gained a `status` filter beyond §6's list.**
-Rejected: leaving the confirm queue to client-side filtering of full lists.
-Why: §6A's "next unconfirmed receipt" queue on both clients needs the server to answer "pending only" directly.
-
-**Object keys are prefixed `{userId}/` and creates reject keys outside the session user's prefix.**
-Rejected: accepting any object key (would let a receipt point at, and later presign a download for, another user's stored object).
-Why: closes the one path where client-supplied input could cross the isolation boundary.
-
-## 2026-08-05 - Wave-1 gate review (the owner)
-
-**Create and update handlers use explicit field maps, not spreads of the parsed body.**
-Rejected: spreading the strict-schema output into the insert/update (my wave-1 shape).
-Why: the spread silently drops a schema key with no matching column - an invisible failure - whereas a forgotten line in an explicit map is at least visible in review; §10's rule is explicit beats concise.
-
-**`noUncheckedIndexedAccess` enabled.**
-Rejected: leaving it off with per-site care.
-Why: every `rows[0]` was typed as always-present; enabling it now, while the codebase is small, converts a class of latent 500s into compile errors.
-
-**`GET /api/receipts` is paged: keyset cursor on `(purchased_at, created_at, id)` descending, limit default 50 / max 200.**
-Rejected: unbounded lists ("fine at three users") and offset pagination.
-Why: the §6A backlog import makes lists large on day one, and keyset cursors stay stable under concurrent inserts, which is exactly the backlog-import condition.
-
-**`users.token_version`, carried as the JWT `tv` claim, checked on every verify.**
-Rejected: unrevocable 30-day JWTs.
-Why: bumping the integer revokes all of a user's sessions at the cost of one indexed read per request; tokens without the claim are invalid by construction.
-
-## 2026-08-05 - Wave 2
-
-**Export jobs persist in an `export_jobs` table, not process memory.**
-Rejected: an in-memory job map.
-Why: a restart must not lose a running year-end export; rows also give the polling endpoint failure reasons for free.
-
-**The export request is `{fiscalYearEndingIn}` XOR `{periodStart, periodEnd}`.**
-Rejected: fiscal-only (blocks the §12 quarterly affordance) and range-only (pushes the fiscal derivation to clients, against §5.1's derive-at-request-time rule).
-Why: both spec statements are satisfied, and the range shape is the seam a quarterly picker plugs into.
-
-**Zip label: the calendar year when the period is exactly Jan 1 to Dec 31, otherwise the explicit range.**
-Rejected: always labelling with the period's end year.
-Why: calling a Mar-31 fiscal year "Receipts-2026" would mislabel nine months of 2025; a range names itself honestly.
-
-**XLSX money cells are numeric with a `0.00` format; CSV money is a decimal string; both derive from integer cents via string assembly.**
-Rejected: string money in the XLSX (does not sum in Excel) and cents÷100 floating-point division.
-Why: the accountant gets cells that behave like money while no value in the pipeline ever passes through a float.
-
-**A missing image fails the export loudly; the reason is recorded on the job.**
-Rejected: skipping the row or shipping the zip without the file.
-Why: a silent gap in an accountant's zip is the error-masking failure mode §10 exists to prevent.
-
-**Zip assembly is in-memory.**
-Rejected: streaming to storage.
-Why: legibility wins at this scale; the seam to change it is one function (`buildZip`), noted in place.
-
-**Dependencies: archiver 8 (class API) and exceljs at runtime; adm-zip as a test-only dependency for zip inspection.**
-Rejected: hand-rolling zip reading in tests.
-Why: the suite must open the artifact it produced; adm-zip stays out of the runtime dependency tree.
-
-## 2026-08-05 - Wave-2 gate review (the owner)
-
-**`whose` is documented as existing for accountant-side merging.**
-Rejected: leaving the column's purpose unstated (it read as redundant and would eventually be "cleaned up").
-Why: constancy within a file is the design - it is what makes a combined workbook of two people's exports unambiguous.
-
-**Export zips are artifacts, not records; the exports storage prefix gets a 30-day lifecycle expiry.**
-Rejected: keeping zips forever as records.
-Why: receipts and images are the retained records and a zip is regenerable from them; the job row keeps its period, and past the window a job reports `expired` - re-runnable, not downloadable.
-
-**`GET /api/export` (own jobs, newest first) added now.**
-Rejected: deferring the job list to wave 7.
-Why: cheapest while the export code is loaded; the web export screen needs a history list regardless.
-
-**In-memory zip assembly is guarded by row-count and byte budgets (10 000 receipts / 256 MiB defaults) that fail the job with an actionable reason.**
-Rejected: building streaming assembly.
-Why: with the backlog and six-year retention a year's zip can reach gigabytes; an explicit "export a shorter period" refusal is a far better outcome than an OOM crash, and streaming is real complexity for a case a shorter period solves.
-
-**A job stranded in `queued` past five minutes reports a computed `stale` status.**
-Rejected: a background sweeper process and any new state.
-Why: the only problem was a client polling forever; a computed status solves exactly that, and nothing is written back - the row stays the truthful history.
-
-## 2026-08-05 - Cross-wave observation
-
-**Runtime predictions have been consistently pessimistic; the real friction has landed at dependency seams every wave.**
-Evidence: wave 1 predicted drizzle error-wrapping and zod message failures - all passed; the one failure was a jose API misuse in my own test.
-Wave 2 predicted CSV assertion and archiver behavioral failures - all 105 tests passed first run; the two stumbles were compile-time dependency changes (archiver 8 dropping its factory API, exceljs typings predating Node's generic Buffer).
-How to apply: spend prediction effort on dependency upgrade notes and API surfaces at the seams (read the changelog of a newly added or majored dependency before writing against it), and trust the tested-runtime paths more.
-
-## 2026-08-05 - Wave-2 gate review, second pass (the owner)
-
-**`stale` also covers `running` jobs older than 30 minutes.**
-Rejected: the first pass's queued-only rule (the owner's own, revised on my flag).
-Why: a crash mid-run strands a poller identically to a crash before the claim; both clocks run from `created_at` since the claim follows creation within milliseconds, and 30 minutes is far above anything the byte budget permits.
-
-**The export byte budget stands alone; `maxReceipts` removed.**
-Rejected: keeping a row-count limit alongside the byte cap.
-Why: row count is a worse-measured proxy for the same memory bound - ten thousand small receipts and two thousand large ones are the same problem, and only bytes see that - and it could refuse an export that would have fit, the wrong failure for the one artifact the accountant needs.
+**Standing rule (framework guardrail 7, mirrored in CLAUDE.md): every gate starts the real server the real way and lands one real request.**
+Rejected: treating a green dependency-injected suite as evidence the system starts.
+Why: injection discipline makes the entry point structurally untested - the better the tests, the bigger the blind spot - so gate closure now requires the production start command, from a clean checkout, and one real response, recorded in the gate report.
 
 ## 2026-08-05 - Wave 3
 
@@ -578,106 +543,142 @@ Why: the API's calendar date survives round trips untouched, and display formatt
 Rejected: a build-setting-only base URL (repointing a device build means rebuilding), and .env-style config (no such mechanism on iOS).
 Why: the simulator reaches a local server with zero setup, and a device on the same network is a settings-sheet edit away; ATS is relaxed for local networking only, revisited at distribution.
 
-## 2026-08-05 - Wave-3 gate review (the owner)
+## 2026-08-05 - Wave-2 gate review, second pass (the owner)
 
-**`GET /api/receipts` returns `pendingCount`; the iOS 200-row probe is deleted.**
-Rejected: a dedicated count endpoint (more API surface for one integer), and keeping the probe (honest but heavy, and it saturates at "200+" exactly when the backlog is largest).
-Why: the badge's number rides the response both clients already fetch; it is user-wide and filter-independent because the badge means "receipts awaiting confirmation", not "pending rows on this page".
+**`stale` also covers `running` jobs older than 30 minutes.**
+Rejected: the first pass's queued-only rule (the owner's own, revised on my flag).
+Why: a crash mid-run strands a poller identically to a crash before the claim; both clocks run from `created_at` since the claim follows creation within milliseconds, and 30 minutes is far above anything the byte budget permits.
 
-**Local object storage is MinIO in docker-compose, behind the real S3-compatible adapter.**
-Rejected: a filesystem stub (does not exercise the presigned path, which is the part that will actually break), and deferring storage to deployment (wave 4's capture flow cannot run against a server that cannot store).
-Why: one adapter serves MinIO locally and R2 in deployment; the dev default auto-creates its bucket so a clean checkout serves images with no ceremony, and `STORAGE_*` env repoints it (`npm run storage:init` creates the bucket for custom endpoints, e.g. the Mac's .local name so a phone can reach presigned URLs).
+**The export byte budget stands alone; `maxReceipts` removed.**
+Rejected: keeping a row-count limit alongside the byte cap.
+Why: row count is a worse-measured proxy for the same memory bound - ten thousand small receipts and two thousand large ones are the same problem, and only bytes see that - and it could refuse an export that would have fit, the wrong failure for the one artifact the accountant needs.
 
-**Presigned PUT URLs sign the content-type header.**
-Rejected: the SDK default (only `host` is signed), under which the upload-url schema's jpeg/png/pdf restriction was decorative - any bytes under any declared type would store.
-Why: found by the integration test asserting a mismatched PUT fails; the signature now binds the PUT to the type the client declared and the server validated.
+## 2026-08-05 - Cross-wave observation
 
-**The device-test reassignment SQL became `npm run db:claim`.**
-Rejected: leaving it as a documented psql snippet in the gate report.
-Why: it is dev tooling that will run every time a fresh device user needs data; the script refuses loudly when the real user is missing or ambiguous, and moves receipts and their denormalized image rows in one transaction.
+**Runtime predictions have been consistently pessimistic; the real friction has landed at dependency seams every wave.**
+Evidence: wave 1 predicted drizzle error-wrapping and zod message failures - all passed; the one failure was a jose API misuse in my own test.
+Wave 2 predicted CSV assertion and archiver behavioral failures - all 105 tests passed first run; the two stumbles were compile-time dependency changes (archiver 8 dropping its factory API, exceljs typings predating Node's generic Buffer).
+How to apply: spend prediction effort on dependency upgrade notes and API surfaces at the seams (read the changelog of a newly added or majored dependency before writing against it), and trust the tested-runtime paths more.
 
-**iOS: ReceiptListModel reaches the API only through GuardedReceiptLoader.**
-Rejected: the wave-3 shape - a generation counter captured and re-checked by convention at every await (my own gate report named it the weakest code: nothing enforced the discipline on future awaits).
-Why: the model holds no raw API reference, so a bare unguarded await is unrepresentable; every response arrives as an Outcome whose `.superseded` case the compiler forces callers to handle, and waves 4-5 add more async to exactly this class.
+## 2026-08-05 - Wave-2 gate review (the owner)
 
-**`npm run dev` loads `.env.local` via node --env-file, creating the file if absent.**
-Rejected: relying on shell-sourced environment (the wave-0 status quo; nothing loaded the file the docs told the owner to fill).
-Why: found during device verification when the server died mid-run - 110 tests were green while the real entry point was unrunnable from a clean checkout, because tests inject config and never execute src/index.ts.
+**`whose` is documented as existing for accountant-side merging.**
+Rejected: leaving the column's purpose unstated (it read as redundant and would eventually be "cleaned up").
+Why: constancy within a file is the design - it is what makes a combined workbook of two people's exports unambiguous.
 
-**Standing rule (framework guardrail 7, mirrored in CLAUDE.md): every gate starts the real server the real way and lands one real request.**
-Rejected: treating a green dependency-injected suite as evidence the system starts.
-Why: injection discipline makes the entry point structurally untested - the better the tests, the bigger the blind spot - so gate closure now requires the production start command, from a clean checkout, and one real response, recorded in the gate report.
+**Export zips are artifacts, not records; the exports storage prefix gets a 30-day lifecycle expiry.**
+Rejected: keeping zips forever as records.
+Why: receipts and images are the retained records and a zip is regenerable from them; the job row keeps its period, and past the window a job reports `expired` - re-runnable, not downloadable.
 
-## 2026-08-07 - First real LLM parse run (the owner)
+**`GET /api/export` (own jobs, newest first) added now.**
+Rejected: deferring the job list to wave 7.
+Why: cheapest while the export code is loaded; the web export screen needs a history list regardless.
 
-**The LLM backfill's first real Anthropic API run: 6/6 receipts parsed by claude-haiku-4-5 against the dev database, 5,281 input and 332 output tokens, $0.0069 total.**
-No request errored and no parse came back all-null.
-One came close: the Synthetic Vendor Two receipt returned only a total, which is consistent with its sparse synthetic text rather than a pipeline fault.
+**In-memory zip assembly is guarded by row-count and byte budgets (10 000 receipts / 256 MiB defaults) that fail the job with an actionable reason.**
+Rejected: building streaming assembly.
+Why: with the backlog and six-year retention a year's zip can reach gigabytes; an explicit "export a shorter period" refusal is a far better outcome than an OOM crash, and streaming is real complexity for a case a shorter period solves.
 
-**The accuracy listing's headline is a regression, not a win: on the vendor field the LLM scored 40% against the heuristics' 80%.**
-On three of the four Noodle House receipts the heuristic kept the confirmed "Noodle House (BCE)" while the LLM dropped the "(BCE)" suffix - cases where the heuristics were right and the LLM is wrong.
-The LLM won every Food Basics disagreement (vendor "Basics" vs "Food Basics", the garbled date 2011-07-26 vs 2026-07-11, the missing R prefix on the tax number), and both paths were perfect on the money fields.
-The provisional warning is showing: 5 receipts from 2 vendors cannot distinguish a good model from a lucky one, so the spec's §7.3 upgrade question stays open until a re-run after real use.
+**A job stranded in `queued` past five minutes reports a computed `stale` status.**
+Rejected: a background sweeper process and any new state.
+Why: the only problem was a client polling forever; a computed status solves exactly that, and nothing is written back - the row stays the truthful history.
 
-**`npm run parse-llm-probe` (a one-off script, deliberately not a test) showed the pipeline's output tracks the raw text and nothing else.**
-A digit-rotated copy of the Food Basics receipt's ocr_raw_text moved 5 of 6 fields (date, total, subtotal, HST, tax number); vendor stayed put because the corruption touches only digits.
-Rejected: making it a CI test - it costs money and is nondeterministic, so it runs once and its outcome is recorded here instead.
-Limitation: this is a one-shot manual check on one receipt, not a standing guarantee; nothing re-verifies the property as the pipeline changes.
-⚠ On deliberately corrupted input the model returned a plausible invented date (2022-03-18) from an invalid string rather than null, and misread a scrambled amount by one digit.
-That is the honest limit of this path: on degraded input the LLM fails plausibly where the heuristic fails visibly.
-Design consequence for the server-parse step: LLM-sourced values stay amber until touched, with no trust shortcut.
+## 2026-08-05 - Wave 2
 
-## 2026-08-08 - LLM merge rule (the owner)
+**Export jobs persist in an `export_jobs` table, not process memory.**
+Rejected: an in-memory job map.
+Why: a restart must not lose a running year-end export; rows also give the polling endpoint failure reasons for free.
 
-**Prompt v2: the verbatim-vendor rule lives in the vendor field's schema description, with branch and store numbers, addresses, and phone numbers excluded.**
-Rejected: the first draft's placement in the shared system prompt, and its "including store numbers" wording, which folded "Store #1234" into the Food Basics vendor.
-Why: scoped to the one field that transcribes, the rule went 15/15 against confirmed vendors in the n=3 reparse; the stored v1 records stay untouched and distinguishable by their absent promptVersion field.
+**The export request is `{fiscalYearEndingIn}` XOR `{periodStart, periodEnd}`.**
+Rejected: fiscal-only (blocks the §12 quarterly affordance) and range-only (pushes the fiscal derivation to clients, against §5.1's derive-at-request-time rule).
+Why: both spec statements are satisfied, and the range shape is the seam a quarterly picker plugs into.
 
-**The merge rule, decided on the n=3 evidence.**
-Amounts come from the heuristic: both paths scored 100% on the money fields, and the heuristic is free, offline, and deterministic.
-Vendor and tax number come from the LLM: 15/15 vendor matches under prompt v2, and 100% against the heuristics' 80% on tax number.
-Date trusts neither source alone: the heuristic is deterministically wrong on an ambiguous DateTime line, and the LLM is wrong on roughly 1 of 3 runs over the same line.
-When the two disagree on date, the confirm screen keeps the field amber and marks it as needing attention - disagreement between two independent parsers over the same text is free signal, and this is the field that decides the fiscal year.
-All LLM-sourced values stay amber until touched; no trust shortcut.
+**Zip label: the calendar year when the period is exactly Jan 1 to Dec 31, otherwise the explicit range.**
+Rejected: always labelling with the period's end year.
+Why: calling a Mar-31 fiscal year "Receipts-2026" would mislabel nine months of 2025; a range names itself honestly.
 
-**Re-attribution, recorded honestly: yesterday's date regression was first read as a prompt effect, and the n=3 run shows it is nondeterminism.**
-The revised prompt - with the vendor rule scoped out of the system prompt entirely - still produced 2011-07-26 on one of three runs, so the v1 backfill's correct date was partly luck, not a property of the old prompt.
+**XLSX money cells are numeric with a `0.00` format; CSV money is a decimal string; both derive from integer cents via string assembly.**
+Rejected: string money in the XLSX (does not sum in Excel) and cents÷100 floating-point division.
+Why: the accountant gets cells that behave like money while no value in the pipeline ever passes through a float.
 
-⚠ All of this rests on 5 receipts from 2 vendors. Provisional; re-run parse-accuracy after weeks of real use before treating any of it as settled.
+**A missing image fails the export loudly; the reason is recorded on the job.**
+Rejected: skipping the row or shipping the zip without the file.
+Why: a silent gap in an accountant's zip is the error-masking failure mode §10 exists to prevent.
 
-## 2026-08-07 - The LLM parse path (the owner) - founding entry, reconstructed 2026-08-08
+**Zip assembly is in-memory.**
+Rejected: streaming to storage.
+Why: legibility wins at this scale; the seam to change it is one function (`buildZip`), noted in place.
 
-Recorded a day late and out of order: this decision produced the code in commits 62699f2 and 3034356 and predates the two entries above, but was never logged - the gap the doc-ownership entry below exists to prevent.
-Sourced from that code and from the two entries that do exist; anything not recoverable from them is marked unrecorded rather than inferred.
+**Dependencies: archiver 8 (class API) and exceljs at runtime; adm-zip as a test-only dependency for zip inspection.**
+Rejected: hand-rolling zip reading in tests.
+Why: the suite must open the artifact it produced; adm-zip stays out of the runtime dependency tree.
 
-**Decided: a second parser, server-side - Claude Haiku 4.5 over the stored `ocr_raw_text`, text only, writing an immutable `llm_suggestions` record beside `ocr_suggestions`.**
-The on-device heuristics stay; the LLM augments rather than replaces, and `npm run parse-accuracy` scores the two paths separately against what the human confirmed.
-**The model only ever sees `ocr_raw_text` - never a field a person typed** (the owner's ruling, stated as such in the code): the request is built by a pure function whose one input is the raw text, so a builder taking the whole receipt row would put the ruling one refactor away from silently false, and a test asserts what leaves the building.
-Every schema field is required and nullable - null is the stated "not printed on this receipt", and an absent key would be indistinguishable from a forgotten one.
-The reply is validated before anything stores it: structured outputs guarantee the shape, but the values still cross a trust boundary - a non-calendar date or an unstorable amount is refused loudly, never quietly corrected.
-The system prompt states Canadian-receipt domain facts (HST/GST are one CRA program; cross-check multiply-printed dates; tax numbers carry letter prefixes), not step-by-step heuristics - the model's judgment over the text is the point, and the on-device heuristics already do rule-following.
+## 2026-08-05 - Wave-1 gate review (the owner)
 
-Rejected: **a vision model over the receipt image.**
-The recoverable reason is the standing constraint rather than a model comparison: the image never leaves the phone, so the server has only the text to parse (§4.3's resolution note states this as why the image-parsing products stayed rejected at upgrade time).
-Whether a vision parse was also weighed on accuracy or cost is unrecorded.
-Rejected: **an on-device LLM.**
-Why is unrecorded - nothing in the code or the existing entries states the reasoning.
-Rejected: **the cloud expense parsers §7.3 had named as the upgrade path (AWS Textract AnalyzeExpense, Google Document AI, Azure Document Intelligence).**
-They parse the image server-side, which the same image-never-leaves-the-phone constraint rules out; §7.3's original objection also stands, because on-device Vision remains the only OCR and capture stays instant and offline.
+**Create and update handlers use explicit field maps, not spreads of the parsed body.**
+Rejected: spreading the strict-schema output into the insert/update (my wave-1 shape).
+Why: the spread silently drops a schema key with no matching column - an invisible failure - whereas a forgotten line in an explicit map is at least visible in review; §10's rule is explicit beats concise.
 
-**Why Haiku 4.5:** the task is structured extraction over roughly 30 lines of text, and the accuracy table arbitrates whether a larger model is ever warranted - not taste.
-The cost estimate the code carried at decision time ("roughly a quarter of a cent per receipt") measured at about 0.12¢ on the first real run ($0.0069 across 6 receipts, entry above); the comment now carries the measured figure.
-Whether other providers or model tiers were compared before settling on Haiku is unrecorded.
+**`noUncheckedIndexedAccess` enabled.**
+Rejected: leaving it off with per-site care.
+Why: every `rows[0]` was typed as always-present; enabling it now, while the codebase is small, converts a class of latent 500s into compile errors.
 
-**Why the backfill ran before the server-side parse:** sequenced deliberately so `parse-accuracy` could score the model against already-confirmed receipts before anything ships to a client.
-The backfill is local-database-only under the same guard as `db:seed` and `db:claim` - not because it deletes anything, but because it sends receipt text to an external API and writes to tax records, and pointing it at production should be a decision someone makes deliberately, not a `DATABASE_URL` that happened to be exported.
-Constraint 2 is untouched by any of this: the LLM adds suggestions, never confirmations.
+**`GET /api/receipts` is paged: keyset cursor on `(purchased_at, created_at, id)` descending, limit default 50 / max 200.**
+Rejected: unbounded lists ("fine at three users") and offset pagination.
+Why: the §6A backlog import makes lists large on day one, and keyset cursors stay stable under concurrent inserts, which is exactly the backlog-import condition.
 
-## 2026-08-08 - Doc ownership: a DECISIONS entry and its spec amendment land in the same commit
+**`users.token_version`, carried as the JWT `tv` claim, checked on every verify.**
+Rejected: unrevocable 30-day JWTs.
+Why: bumping the integer revokes all of a user's sessions at the cost of one indexed read per request; tokens without the claim are invalid by construction.
 
-**Standing rule, now in `CLAUDE.md`: when a decision is appended to this file, `docs/Kept-Build-Spec.md` is amended in the same commit.**
-`DECISIONS.md` is the append-only log of how we got here; the spec is the current state.
-Neither is optional and neither substitutes for the other.
-**The failure mode it exists to prevent just happened:** the Aug 7-8 LLM-parse decisions reached this log while the spec went on describing the Textract / Document AI upgrade path - a path not taken - for three days, because the prompts said "append a DECISIONS entry" without saying "amend the spec".
-A prompt that names only the log must still produce both.
-The catch-up is commit 3093bd6 (§4.2, §4.3, §5, §7.2, §7.3, §10A.1 amended, update-log entry added); this entry's own spec reflection is the §10.1 bullet added alongside it.
+## 2026-08-05 - Wave 1
+
+**`users.display_name` becomes nullable.**
+Rejected: NOT NULL with an empty-string default at sign-in.
+Why: Apple provides the person's name only on first authorization, only client-side, and possibly not at all; an empty-string default is exactly the silently-defaulted-value anti-pattern the quality rules ban.
+
+**`receipt_images` gains `deleted_at`; the `(user_id, sha256)` unique becomes partial (`WHERE deleted_at IS NULL`); DELETE stamps image rows with the receipt in one transaction.**
+Rejected: hard-deleting image rows on receipt delete (breaks retention), and keeping the full unique (delete-then-recapture of the same file would 409 forever against an invisible row).
+Why: surfaced by the wave-1 reviewer pass; the partial index keeps rows for CRA retention while freeing the duplicate slot.
+
+**Validation with zod, JWTs with jose; no other new runtime dependencies.**
+Rejected: hand-rolled validators (verbose, and a second validation style would inevitably appear) and hand-rolled JWT handling (signature verification is not code to write oneself).
+Why: both are the boring standard choices; jose's remote JWK set also handles Apple's key rotation, which the kickoff explicitly required.
+
+**The Apple test bypass is injection-only.**
+Rejected: an env var or config flag selecting a fake verifier.
+Why: the kickoff demands the bypass be structurally impossible in production; `createApp` takes a verifier as a value, the production entrypoint always constructs the real one, and no configuration value can swap them - tests build their own app with a fake.
+
+**Export routes answer 501 until wave 2.**
+Rejected: an in-memory job store now.
+Why: §6 specifies job id + polling but §5 defines no job store; that design decision belongs to wave 2 (an `export_jobs` table is the likely answer, since losing job state on restart mid-year-end-export is the wrong failure mode), and an honest 501 keeps the auth surface final without pretending.
+
+**`GET /api/receipts` gained a `status` filter beyond §6's list.**
+Rejected: leaving the confirm queue to client-side filtering of full lists.
+Why: §6A's "next unconfirmed receipt" queue on both clients needs the server to answer "pending only" directly.
+
+**Object keys are prefixed `{userId}/` and creates reject keys outside the session user's prefix.**
+Rejected: accepting any object key (would let a receipt point at, and later presign a download for, another user's stored object).
+Why: closes the one path where client-supplied input could cross the isolation boundary.
+
+## 2026-08-05 - Wave-0 gate decisions (applied at start of wave 1)
+
+**`receipts.deleted_at timestamptz NULL` added for soft delete.**
+Rejected: hard delete, and a `deleted` enum status.
+Why: §6 specifies a soft-delete endpoint and §10B makes retention (CRA six years) non-deferrable, but the wave-0 schema had no column to express it; a nullable timestamp records when, keeps `status` about the confirm workflow, and non-null rows are excluded from every list, count, and export.
+
+**`receipt_images.user_id uuid NOT NULL` (FK to users) denormalized; unique `(user_id, sha256)` replaces `(receipt_id, sha256)`.**
+Rejected: the original per-receipt unique, and enforcing user-scoped uniqueness through a join or application code.
+Why: the per-receipt constraint only prevented the same image twice on one receipt, which is nobody's failure mode; a constraint that needs a join is not a constraint.
+Scope honesty (recorded in the spec): the hash catches re-uploaded identical files, never a re-scanned paper receipt; near-duplicate detection on date+vendor+total is v2.
+
+**`receipts.status` gains `DEFAULT 'pending'`.**
+Rejected: no default (the wave-0 as-written reading).
+Why: unlike `is_business`, status is a system state rather than a concealed human choice, and defaulting to `pending` is fail-closed because pending rows never export.
+
+**`updated_at` is maintained by a Postgres trigger.**
+Rejected: handler code and ORM hooks (`$onUpdate`).
+Why: a field whose freshness depends on every future handler remembering it silently rots.
+
+**`receipts.vendor` becomes nullable.**
+Rejected: NOT NULL with a placeholder string.
+Why: an illegible vendor is a real outcome; a forced placeholder corrupts the field for everyone reading it later.
