@@ -86,6 +86,14 @@ async function reparse() {
       throw new Error(`Receipt ${row.id} has llm_suggestions but no OCR text`);
     }
     const oldRecord = row.llm_suggestions;
+    if (oldRecord.suggestions === null) {
+      // A parse-failure record (§7.3's retry cap): there is no stored
+      // suggestion set to compare a new prompt against.
+      console.log(
+        `${row.id.slice(0, 8)} skipped: parse-failure record, no suggestions to compare\n`,
+      );
+      continue;
+    }
     const samples: OcrFieldSuggestions[] = [];
     for (let i = 0; i < runs; i += 1) {
       samples.push(await parseReceiptText(client, row.ocr_raw_text));

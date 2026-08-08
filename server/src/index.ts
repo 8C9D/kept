@@ -1,3 +1,4 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { createAppleIdentityVerifier } from "./auth/appleVerifier.js";
@@ -7,6 +8,8 @@ import {
   findPortListeners,
   formatPortInUseMessage,
 } from "./observability/portInUse.js";
+import { parseReceiptText } from "./parse/claudeReceiptParser.js";
+import { createLlmParseSweep } from "./parse/llmParseSweep.js";
 import { assertProductionEnv } from "./productionEnv.js";
 import {
   LOCAL_DEV_STORAGE_CONFIG,
@@ -73,6 +76,35 @@ if (configuredStorage === null) {
 }
 
 const { db } = createDb(databaseUrl);
+
+// The server-side LLM parse (spec §7.3). Kicked at startup for anything a
+// restart interrupted, after each capture by the receipt routes, and on an
+// interval as the retry net for rows whose parse failed. The interval is
+// deliberately long: the kicks cover the normal path, and an idle-hours
+// query cadence would keep Neon's autosuspending compute awake for nothing.
+const SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+const llmParseSweep =
+  anthropicApiKey !== undefined && anthropicApiKey !== ""
+    ? createLlmParseSweep({
+        db,
+        parse: (() => {
+          const client = new Anthropic({ apiKey: anthropicApiKey });
+          return (ocrRawText: string) => parseReceiptText(client, ocrRawText);
+        })(),
+      })
+    : undefined;
+if (llmParseSweep === undefined) {
+  // Impossible in production - assertProductionEnv has already refused a
+  // missing key there. In local dev it is a stated degradation, not silence.
+  console.log(
+    "ANTHROPIC_API_KEY is not set - LLM receipt parsing disabled, suggestions are heuristic-only",
+  );
+} else {
+  llmParseSweep.kick();
+  setInterval(() => llmParseSweep.kick(), SWEEP_INTERVAL_MS).unref();
+}
+
 const app = createApp({
   db,
   // Always the real verifier. Local development and tests inject fakes by
@@ -83,6 +115,7 @@ const app = createApp({
   // Set once Cloudflare fronts the origin (see docs/Runbook.md); unset,
   // the origin answers anyone - correct for dev and for the first deploy.
   edgeSharedSecret: process.env.EDGE_SHARED_SECRET,
+  ...(llmParseSweep !== undefined && { llmParseSweep }),
 });
 
 const server = serve({ fetch: app.fetch, port }, (info) => {

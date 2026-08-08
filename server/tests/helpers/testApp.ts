@@ -14,6 +14,7 @@ import {
   receipts,
   users,
 } from "../../src/db/schema.js";
+import type { LlmParseSweepHandle } from "../../src/parse/llmParseSweep.js";
 import { fakeAppleVerifier } from "./fakeAppleVerifier.js";
 import {
   fakeObjectStorage,
@@ -48,7 +49,10 @@ export interface TestHarness {
 }
 
 export function createTestHarness(
-  options: { edgeSharedSecret?: string } = {},
+  options: {
+    edgeSharedSecret?: string;
+    llmParseSweep?: LlmParseSweepHandle;
+  } = {},
 ): TestHarness {
   const { db, pool } = createDb(TEST_DATABASE_URL);
   const storage = fakeObjectStorage();
@@ -59,6 +63,9 @@ export function createTestHarness(
     storage,
     ...(options.edgeSharedSecret !== undefined && {
       edgeSharedSecret: options.edgeSharedSecret,
+    }),
+    ...(options.llmParseSweep !== undefined && {
+      llmParseSweep: options.llmParseSweep,
     }),
   });
 

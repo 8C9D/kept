@@ -4,6 +4,39 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-08 - LLM parse wired in: sweep + domain-layer merge
+
+**The server-side parse runs as a sweep over rows, kicked at startup, after captures, and on a long interval - not inline in the create route.**
+Rejected: parsing inside the create request - a restart would lose an in-flight parse, and a model outage or slow response would block or fail a capture, breaking the success test.
+The row itself is the job state (`ocr_raw_text` present, `llm_suggestions` null), the same reasoning as export jobs being rows rather than process memory; the null-only guarded UPDATE makes concurrent sweeps idempotent, with the losing writer counting the row superseded.
+
+**Confirmed receipts are swept too.**
+A confirmed receipt cannot benefit from suggestions, but its parse grows the accuracy set - which is what the merge rule's n=5 caveat needs before it can be treated as settled.
+
+**The merge is a pure function in the domain layer, served on every receipt response with per-field provenance and the date-disagreement flag; clients render, never decide.**
+Rejected: merging in the client - §4.1's rule exists because a rule implemented in Swift is a rule written twice once the web client lands.
+Two semantics settled beyond the ruled merge: when the ruled source found nothing for a field, the other side's value is served with its provenance stated (a rejectable suggestion beats an empty field, and constraint 2 makes that safe); on a date disagreement the heuristic's value is the prefill because it is the deterministic side - the flag, not the prefill choice, carries the signal.
+
+**`ANTHROPIC_API_KEY` is required at production boot; a runtime model failure degrades to heuristic-only.**
+A missing key in production is silent feature loss, so `productionEnv.ts` refuses to start; a missing key in dev disables the sweep with a stated line; a failing API call at runtime leaves the row null for a later sweep and never touches the capture path.
+
+**The retry is capped: after 3 failed attempts the sweep writes an explicit failure record into `llm_suggestions` - model, promptVersion, requestedAt of the final attempt, the error, the attempt count, and `suggestions: null`.**
+Rejected: unbounded retry - every attempt bills the API, and with kicks on every capture plus the interval, a receipt whose text persistently fails validation re-bills forever; fine at six receipts, a real leak once the backlog lands.
+Rejected: capping in memory alone - the failure would live only in a log, invisible in the data, and the row would re-bill up to the cap again on every restart with nothing ever recording that the model cannot parse it.
+The record is what stops the null-guard re-selecting the row, and it makes the failure a queryable fact; `parse-accuracy` scores it as "the LLM produced nothing" (missed / absent-right per field), deliberately distinct from a receipt the LLM was never run on, which carries no record and never enters the LLM table.
+Attempts are counted per process; the backfill's single manual pass carries no counter and never abandons - it exits loudly instead.
+Re-parsing an abandoned row means clearing the column by hand, a deliberate act.
+
+**Evidence from the live verification run, recorded rather than footnoted: the model misread a printed subtotal of 43.49 as 3449 cents.**
+The wiring run against the real dev server and the real API (create 201 in 63 ms, sweep record landed seconds later) included a receipt whose text printed "SUBTOTAL 43.49"; the parse returned 3449 - a plausible off-by-transposition, served with `llm` provenance because the heuristic had no subtotal to outrank it.
+That is the probe's "fails plausibly where the heuristic fails visibly" caveat occurring in the wild, unprompted, on clean input - not under a deliberately degraded probe.
+It is why every LLM-sourced value stays amber until touched with no trust shortcut, and it goes in this log as evidence for the next reading of the accuracy table.
+
+**`parse-llm-backfill` stays, as a thin wrapper over the sweep core, guard intact.**
+Rejected: deleting it - running one loud, exit-coded parse pass from a laptop without starting a server is still useful (a claimed or seeded local database).
+Rejected: dropping its `assertLocalDatabase` guard - production's parsing is now the server's own job, so the script has even less reason to aim at production, not more.
+Its old "refuse loudly when the column is already set" behaviour is retired: with two legitimate writers, a superseded row is a counted outcome, not a design breach.
+
 ## 2026-08-08 - DECISIONS ordering (the owner): newest-first by decision date
 
 **This file is ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.**

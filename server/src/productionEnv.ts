@@ -24,6 +24,9 @@ import { resolveStorageConfig } from "./storage/s3ObjectStorage.js";
  * - A short SESSION_JWT_SECRET undermines HS256; 32 bytes is the minimum
  *   the algorithm's security argument assumes. Checked only in production
  *   so a throwaway dev secret stays a dev convenience.
+ * - A missing ANTHROPIC_API_KEY is silent feature loss: the LLM parse
+ *   sweep disables itself and every receipt quietly degrades to
+ *   heuristic-only suggestions, with nothing failing to say so.
  *
  * Gated on NODE_ENV=production, which the Dockerfile sets - a laptop
  * `npm run dev` keeps its MinIO fallback and its ceremony-free start.
@@ -66,6 +69,15 @@ export function assertProductionEnv(
       "SESSION_JWT_SECRET is shorter than 32 characters. In production the " +
         "session-signing secret must carry at least 256 bits; generate one " +
         "with: openssl rand -base64 48",
+    );
+  }
+
+  if ((env.ANTHROPIC_API_KEY ?? "") === "") {
+    throw new Error(
+      "ANTHROPIC_API_KEY is not set. The server-side LLM parse sweep " +
+        "(spec §7.3) needs it; without the key the server would run with " +
+        "receipts silently degrading to heuristic-only suggestions. In " +
+        "local development the sweep just disables itself, stated at boot.",
     );
   }
 }

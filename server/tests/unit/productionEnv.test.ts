@@ -17,6 +17,7 @@ const PRODUCTION: Record<string, string> = {
   DATABASE_URL: "postgres://kept:pw@ep-example-123.us-east-2.aws.neon.tech/kept",
   SESSION_JWT_SECRET: "s".repeat(48),
   APPLE_CLIENT_ID: "com.arthurzhang.kept",
+  ANTHROPIC_API_KEY: "sk-ant-test-key",
   STORAGE_ENDPOINT: "https://accountid.r2.cloudflarestorage.com",
   STORAGE_BUCKET: "kept",
   STORAGE_ACCESS_KEY_ID: "r2-access-key",
@@ -66,6 +67,15 @@ describe("assertProductionEnv", () => {
   it("refuses a session secret shorter than 32 characters", () => {
     const env = { ...PRODUCTION, SESSION_JWT_SECRET: "short-dev-secret" };
     expect(() => assertProductionEnv(env)).toThrow(/at least 256 bits/);
+  });
+
+  it("refuses a missing ANTHROPIC_API_KEY, which would be silent LLM-parse loss", () => {
+    expect(() => assertProductionEnv(withoutKeys("ANTHROPIC_API_KEY"))).toThrow(
+      /ANTHROPIC_API_KEY/,
+    );
+    expect(() =>
+      assertProductionEnv({ ...PRODUCTION, ANTHROPIC_API_KEY: "" }),
+    ).toThrow(/ANTHROPIC_API_KEY/);
   });
 
   /**

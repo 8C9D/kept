@@ -1,36 +1,31 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { and, isNotNull, isNull } from "drizzle-orm";
-import { eq } from "drizzle-orm";
-import { Pool } from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
-import { LOCAL_DEV_DATABASE_URL } from "./client.js";
+import { LOCAL_DEV_DATABASE_URL, createDb } from "./client.js";
 import { assertLocalDatabase } from "./databaseUrl.js";
-import { receipts } from "./schema.js";
-import {
-  RECEIPT_PARSE_PROMPT_VERSION,
-  type LlmSuggestionRecord,
-} from "../domain/llmSuggestions.js";
 import {
   RECEIPT_PARSE_MODEL,
   parseReceiptText,
 } from "../parse/claudeReceiptParser.js";
+import { runLlmParseSweep } from "../parse/llmParseSweep.js";
 
 /**
- * `npm run parse-llm-backfill` - run the LLM parse over every receipt that
- * has stored OCR text and no LLM suggestion record yet, and write the
- * result to `llm_suggestions` (ruled Aug 7, 2026; sequenced ahead of the
- * server parse so parse-accuracy can score the model against already-
- * confirmed receipts before anything ships to a client).
+ * `npm run parse-llm-backfill` - run the LLM parse sweep once, from a
+ * laptop, with per-receipt output and an exit code. Since Aug 8, 2026 the
+ * server runs the same sweep itself (src/parse/llmParseSweep.ts, kicked at
+ * startup, after captures, and on an interval); this script is the manual
+ * way to run that one pass without starting a server - filling a freshly
+ * claimed or seeded local database, or checking a parse fix loudly.
  *
- * The column is immutable: this script only ever fills nulls, and the
- * UPDATE re-checks that under a WHERE clause rather than trusting the
- * earlier read. Re-running is safe and does nothing.
+ * The sweep core is shared, not duplicated: the null-only guarded write,
+ * the confirmed-receipts-included selection, and the parse path are all
+ * runLlmParseSweep's. A row another writer fills first reports as
+ * superseded, which is a normal outcome now that the sweep and this script
+ * can legitimately run beside each other.
  *
  * Local-database-only, same guard as db:seed and db:claim. Not because it
  * deletes anything - it does not - but because it sends receipt text to an
  * external API and writes to tax records, and pointing it at production
  * should be a decision someone makes deliberately, not a DATABASE_URL that
- * happened to be exported.
+ * happened to be exported. Production's parsing is the server sweep's job.
  */
 const databaseUrl = process.env.DATABASE_URL ?? LOCAL_DEV_DATABASE_URL;
 assertLocalDatabase(
@@ -48,80 +43,44 @@ if (apiKey === undefined || apiKey === "") {
   process.exit(1);
 }
 
-const pool = new Pool({ connectionString: databaseUrl });
-const db = drizzle(pool);
+const { db, pool } = createDb(databaseUrl);
 const client = new Anthropic({ apiKey });
 
 async function backfill() {
-  const rows = await db
-    .select({
-      id: receipts.id,
-      vendor: receipts.vendor,
-      status: receipts.status,
-      ocrRawText: receipts.ocrRawText,
-    })
-    .from(receipts)
-    .where(
-      and(
-        isNotNull(receipts.ocrRawText),
-        isNull(receipts.llmSuggestions),
-        isNull(receipts.deletedAt),
-      ),
-    )
-    .orderBy(receipts.createdAt);
+  console.log(`Backfilling llm_suggestions with ${RECEIPT_PARSE_MODEL}\n`);
 
-  if (rows.length === 0) {
-    console.log(
-      "Nothing to backfill: every live receipt with OCR text already has an LLM suggestion record.",
-    );
-    await pool.end();
-    return;
-  }
-
-  console.log(
-    `Backfilling ${rows.length} receipt${rows.length === 1 ? "" : "s"} with ${RECEIPT_PARSE_MODEL}\n`,
-  );
-
-  const failures: { id: string; error: unknown }[] = [];
-  for (const row of rows) {
-    const label = `${row.vendor ?? "no vendor"} · ${row.status} · ${row.id.slice(0, 8)}`;
-    if (row.ocrRawText === null) {
-      // Filtered to non-null above; reaching this means the query broke.
-      throw new Error(`Receipt ${row.id} lost its OCR text between query and read`);
-    }
-    try {
-      const suggestions = await parseReceiptText(client, row.ocrRawText);
-      const record: LlmSuggestionRecord = {
-        model: RECEIPT_PARSE_MODEL,
-        promptVersion: RECEIPT_PARSE_PROMPT_VERSION,
-        requestedAt: new Date().toISOString(),
-        suggestions,
-      };
-      const updated = await db
-        .update(receipts)
-        .set({ llmSuggestions: record })
-        .where(and(eq(receipts.id, row.id), isNull(receipts.llmSuggestions)))
-        .returning({ id: receipts.id });
-      if (updated.length === 0) {
-        // The immutability clause refused: something wrote the column since
-        // the select. Loud, because two writers here means a design breach.
-        throw new Error("llm_suggestions was already set; refusing to overwrite");
+  const result = await runLlmParseSweep({
+    db,
+    parse: (ocrRawText) => parseReceiptText(client, ocrRawText),
+    onRow(row, outcome, error) {
+      const label = `${row.vendor ?? "no vendor"} · ${row.status} · ${row.id.slice(0, 8)}`;
+      if (outcome === "failed") {
+        console.error(`  FAILED      ${label}`);
+        console.error(error);
+      } else if (outcome === "superseded") {
+        console.log(`  superseded  ${label} (another writer filled it first)`);
+      } else {
+        console.log(`  ok          ${label}`);
       }
-      console.log(`  ok      ${label}`);
-    } catch (error) {
-      failures.push({ id: row.id, error });
-      console.error(`  FAILED  ${label}`);
-      console.error(error);
-    }
-  }
+    },
+  });
 
   await pool.end();
 
+  if (result.attempted === 0) {
+    console.log(
+      "Nothing to backfill: every live receipt with OCR text already has an LLM suggestion record.",
+    );
+    return;
+  }
   console.log(
-    `\n${rows.length - failures.length}/${rows.length} backfilled` +
-      (failures.length > 0 ? `, ${failures.length} failed (listed above)` : ""),
+    `\n${result.written}/${result.attempted} backfilled` +
+      (result.superseded > 0 ? `, ${result.superseded} superseded` : "") +
+      (result.failed.length > 0
+        ? `, ${result.failed.length} failed (listed above)`
+        : ""),
   );
-  if (failures.length > 0) {
+  if (result.failed.length > 0) {
     process.exit(1);
   }
 }

@@ -36,6 +36,7 @@ A missing one stops the process at startup with the name in the message, rather 
 | `DATABASE_URL` | yes | Neon connection string, pooled endpoint |
 | `SESSION_JWT_SECRET` | yes | Signs session tokens. At least 32 characters in production |
 | `APPLE_CLIENT_ID` | yes | `com.arthurzhang.kept` |
+| `ANTHROPIC_API_KEY` | yes in production | The server-side LLM parse sweep (spec §7.3). Unset in development the sweep disables itself, stated at boot; unset in production the server refuses to start, because the alternative is silent feature loss |
 | `STORAGE_ENDPOINT` | yes in production | R2 S3 API endpoint, `https://<account-id>.r2.cloudflarestorage.com` |
 | `STORAGE_BUCKET` | yes in production | `kept` |
 | `STORAGE_ACCESS_KEY_ID` | yes in production | R2 API token access key |
@@ -45,7 +46,7 @@ A missing one stops the process at startup with the name in the message, rather 
 | `PORT` | no | Defaults to 3000 |
 | `NODE_ENV` | set by the Dockerfile | `production` turns on the deployed-shape checks in `src/productionEnv.ts` |
 
-**Under `NODE_ENV=production` the server additionally refuses to start** if storage is unconfigured (there is no MinIO to fall back to), if `STORAGE_ENDPOINT` is not https (presigned URLs inherit it, so plain http would send receipt images in the clear), if `DATABASE_URL` is a loopback address, or if the session secret is under 32 characters.
+**Under `NODE_ENV=production` the server additionally refuses to start** if storage is unconfigured (there is no MinIO to fall back to), if `STORAGE_ENDPOINT` is not https (presigned URLs inherit it, so plain http would send receipt images in the clear), if `DATABASE_URL` is a loopback address, if the session secret is under 32 characters, or if `ANTHROPIC_API_KEY` is unset.
 
 ---
 

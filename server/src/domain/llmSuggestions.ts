@@ -14,7 +14,7 @@ import type { OcrFieldSuggestions } from "./ocrSuggestions.js";
  * That is a ruling, not an implementation detail; the request builder in
  * src/parse enforces it and a test asserts it.
  */
-export interface LlmSuggestionRecord {
+export interface LlmParseSuccessRecord {
   /** Exact model id the suggestions came from, for accuracy attribution. */
   model: string;
   /**
@@ -26,6 +26,35 @@ export interface LlmSuggestionRecord {
   /** ISO timestamp of the parse request. */
   requestedAt: string;
   suggestions: OcrFieldSuggestions;
+}
+
+/**
+ * Written by the sweep when a receipt's parse has failed MAX_PARSE_ATTEMPTS
+ * times (Aug 8, 2026): the null column would otherwise re-select - and
+ * re-bill - the row on every sweep, forever, and the failure would live
+ * only in a log. `suggestions: null` states "the LLM produced nothing",
+ * which parse-accuracy scores as exactly that - distinct from a row the
+ * LLM was never run on, which carries no record at all. Re-parsing an
+ * abandoned row means clearing the column by hand: a deliberate act, like
+ * everything else that writes here twice.
+ */
+export interface LlmParseFailureRecord {
+  model: string;
+  promptVersion: number;
+  /** ISO timestamp of the final attempt. */
+  requestedAt: string;
+  /** Why the final attempt failed. */
+  error: string;
+  attempts: number;
+  suggestions: null;
+}
+
+export type LlmSuggestionRecord = LlmParseSuccessRecord | LlmParseFailureRecord;
+
+export function isLlmParseFailure(
+  record: LlmSuggestionRecord,
+): record is LlmParseFailureRecord {
+  return record.suggestions === null;
 }
 
 /**

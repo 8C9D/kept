@@ -3,8 +3,9 @@
 #
 # Secrets are NOT set here - fly.toml is committed. They are set once with
 # `fly secrets set` (see docs/Runbook.md): DATABASE_URL, SESSION_JWT_SECRET,
-# APPLE_CLIENT_ID, STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID,
-# STORAGE_SECRET_ACCESS_KEY, and later EDGE_SHARED_SECRET.
+# APPLE_CLIENT_ID, ANTHROPIC_API_KEY, STORAGE_ENDPOINT, STORAGE_BUCKET,
+# STORAGE_ACCESS_KEY_ID, STORAGE_SECRET_ACCESS_KEY, and later
+# EDGE_SHARED_SECRET.
 
 app = "kept-api"
 primary_region = "yyz"

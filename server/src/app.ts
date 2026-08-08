@@ -10,6 +10,7 @@ import { exportRoutes } from "./routes/exports.js";
 import { meRoutes } from "./routes/me.js";
 import { receiptRoutes } from "./routes/receipts.js";
 import type { ObjectStorage } from "./storage/objectStorage.js";
+import type { LlmParseSweepHandle } from "./parse/llmParseSweep.js";
 
 /**
  * Everything the app needs arrives here as a value; nothing inside reads
@@ -33,6 +34,13 @@ export interface AppDependencies {
    * and absent in local development.
    */
   edgeSharedSecret?: string;
+  /**
+   * The server-side LLM parse sweep; the receipt routes kick it after a
+   * capture lands OCR text. Optional because local development without an
+   * ANTHROPIC_API_KEY runs heuristic-only; production always has it
+   * (productionEnv.ts refuses to start without the key).
+   */
+  llmParseSweep?: LlmParseSweepHandle;
 }
 
 /**

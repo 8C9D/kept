@@ -14,6 +14,7 @@ import {
   type TwoPathReceipt,
 } from "../domain/parseAccuracy.js";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
+import { isLlmParseFailure } from "../domain/llmSuggestions.js";
 
 /**
  * `npm run parse-accuracy` - the wave-4 gate's number (spec §7.3, §9):
@@ -123,13 +124,36 @@ async function report() {
     return;
   }
 
+  // A parse-failure record (§7.3's retry cap) scores as "the LLM produced
+  // nothing" - every field null, tallied as missed or absent-right. That is
+  // deliberately distinct from a receipt with no record at all, which never
+  // enters this table.
+  const nothingSuggested: OcrFieldSuggestions = {
+    vendor: null,
+    purchasedAt: null,
+    totalCents: null,
+    hstCents: null,
+    subtotalCents: null,
+    vendorTaxNumber: null,
+  };
+  const failureCount = llmRows.filter(
+    (row) => row.llmSuggestions !== null && isLlmParseFailure(row.llmSuggestions),
+  ).length;
+  if (failureCount > 0) {
+    console.log(
+      `\n${failureCount} of these carr${failureCount === 1 ? "ies" : "y"} a ` +
+        `parse-failure record (the sweep gave up after repeated errors); ` +
+        `scored as the LLM producing nothing.`,
+    );
+  }
+
   const llmMeasured: MeasuredReceipt[] = llmRows.map((row) => {
     if (row.llmSuggestions === null || row.ocrSuggestions === null) {
       throw new Error(`Receipt ${row.id} lost its suggestions between query and read`);
     }
     return {
       id: row.id,
-      suggestions: row.llmSuggestions.suggestions,
+      suggestions: row.llmSuggestions.suggestions ?? nothingSuggested,
       confirmed: {
         vendor: row.vendor,
         purchasedAt: row.purchasedAt,

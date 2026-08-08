@@ -23,6 +23,8 @@ import {
   uuidParamOrNotFound,
 } from "../http/validate.js";
 import { sessionAuth, type AuthedEnv } from "../http/sessionAuth.js";
+import { mergeSuggestions } from "../domain/mergedSuggestions.js";
+import type { LlmParseSweepHandle } from "../parse/llmParseSweep.js";
 import {
   assertIssuedObjectKey,
   isIssuedObjectKey,
@@ -34,6 +36,13 @@ interface ReceiptRouteDependencies {
   db: Db;
   sessionTokens: SessionTokens;
   storage: ObjectStorage;
+  /**
+   * Absent when no ANTHROPIC_API_KEY is configured (local dev without a
+   * key): receipts then carry heuristic suggestions only. Production
+   * refuses to start without the key (productionEnv.ts), so the handle is
+   * always present there.
+   */
+  llmParseSweep?: LlmParseSweepHandle;
 }
 
 export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
@@ -140,6 +149,14 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
         );
       }
       throw error;
+    }
+
+    // Fire-and-forget: the sweep parses this receipt's OCR text server-side
+    // (spec §7.3). A kick never throws, so a model outage degrades to
+    // heuristic-only suggestions - the create has already succeeded and
+    // never waits on the model.
+    if (created.ocrRawText !== null) {
+      deps.llmParseSweep?.kick();
     }
 
     return c.json(receiptResponse(created), 201);
@@ -367,6 +384,13 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
       }
       return row;
     });
+
+    // A patch can supply OCR text a create omitted; same fire-and-forget
+    // degradation as the create route's kick.
+    if (body.ocrRawText !== undefined && updatedReceipt.ocrRawText !== null) {
+      deps.llmParseSweep?.kick();
+    }
+
     return c.json(receiptResponse(updatedReceipt));
   });
 
@@ -431,6 +455,14 @@ function receiptResponse(row: typeof receipts.$inferSelect) {
     isBusiness: row.isBusiness,
     notes: row.notes,
     status: row.status,
+    // The two parse paths merged under §7.3's field-level rule, with
+    // per-field provenance and the date-disagreement flag. Computed by the
+    // domain layer on every read path: both clients render it, neither
+    // decides it (spec §4.1).
+    suggestions: mergeSuggestions(
+      row.ocrSuggestions,
+      row.llmSuggestions?.suggestions ?? null,
+    ),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
