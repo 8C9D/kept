@@ -4,6 +4,15 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-08 - DECISIONS ordering (the owner): newest-first by decision date
+
+**This file is ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.**
+Within a day, newer decisions sit above older ones; "append-only" continues to govern content - entries are never rewritten or removed - not position.
+The rule is stated in the file header, mirrored in `CLAUDE.md` beside the doc-ownership rule, and the whole file was reordered to match (commit 9b138c0), every entry's wording preserved except the founding entry's positional cross-references, which now name the entries they point at.
+Rejected: **the status quo it replaces - three regimes and no stated rule** (newest-first from the top down through the Aug 5 Wave-0 gate entry, oldest-first through the remaining Aug 5 wave entries, and the four LLM entries appended at the very bottom, out of order among themselves).
+Rejected: **oldest-first throughout** - the most recent decision is the one a reader needs first, and the file is read far more often than it is written.
+Why the stated home matters: a convention with no stated home means whichever end of the file you look at is the convention, which is how the four LLM entries ended up at the bottom with the Aug 7 founding entry filed after the Aug 8 merge rule it precedes.
+
 ## 2026-08-08 - Doc ownership: a DECISIONS entry and its spec amendment land in the same commit
 
 **Standing rule, now in `CLAUDE.md`: when a decision is appended to this file, `docs/Kept-Build-Spec.md` is amended in the same commit.**
