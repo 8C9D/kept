@@ -626,3 +626,21 @@ Limitation: this is a one-shot manual check on one receipt, not a standing guara
 ⚠ On deliberately corrupted input the model returned a plausible invented date (2022-03-18) from an invalid string rather than null, and misread a scrambled amount by one digit.
 That is the honest limit of this path: on degraded input the LLM fails plausibly where the heuristic fails visibly.
 Design consequence for the server-parse step: LLM-sourced values stay amber until touched, with no trust shortcut.
+
+## 2026-08-08 - LLM merge rule (the owner)
+
+**Prompt v2: the verbatim-vendor rule lives in the vendor field's schema description, with branch and store numbers, addresses, and phone numbers excluded.**
+Rejected: the first draft's placement in the shared system prompt, and its "including store numbers" wording, which folded "Store #1234" into the Food Basics vendor.
+Why: scoped to the one field that transcribes, the rule went 15/15 against confirmed vendors in the n=3 reparse; the stored v1 records stay untouched and distinguishable by their absent promptVersion field.
+
+**The merge rule, decided on the n=3 evidence.**
+Amounts come from the heuristic: both paths scored 100% on the money fields, and the heuristic is free, offline, and deterministic.
+Vendor and tax number come from the LLM: 15/15 vendor matches under prompt v2, and 100% against the heuristics' 80% on tax number.
+Date trusts neither source alone: the heuristic is deterministically wrong on an ambiguous DateTime line, and the LLM is wrong on roughly 1 of 3 runs over the same line.
+When the two disagree on date, the confirm screen keeps the field amber and marks it as needing attention - disagreement between two independent parsers over the same text is free signal, and this is the field that decides the fiscal year.
+All LLM-sourced values stay amber until touched; no trust shortcut.
+
+**Re-attribution, recorded honestly: yesterday's date regression was first read as a prompt effect, and the n=3 run shows it is nondeterminism.**
+The revised prompt - with the vendor rule scoped out of the system prompt entirely - still produced 2011-07-26 on one of three runs, so the v1 backfill's correct date was partly luck, not a property of the old prompt.
+
+⚠ All of this rests on 5 receipts from 2 vendors. Provisional; re-run parse-accuracy after weeks of real use before treating any of it as settled.
