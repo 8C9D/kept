@@ -4,6 +4,26 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-08 - iOS confirm screen renders the served merge
+
+**The confirm screen now renders the `suggestions` field the API serves - the §7.3 merge - and no longer reads the detail route's raw `ocrSuggestions`, which stays in the response for the shipped client.**
+The suggestion set is the injected thing: one form serves all three routes (queue, detail, capture-time), each construction handing it the set that exists for it - the server merge for a stored receipt, the on-device parse alone for a capture-time confirm, where no server row and therefore no merge or disagreement flag can exist.
+Rejected: a branch inside the view deciding which record to read - a form that knows its routes is how one screen becomes three.
+
+**Where a served suggestion and the row's copy of a field both exist, the suggestion wins the prefill; a value only on the row prefills without amber.**
+The row's field values on a pending receipt are the capture-time heuristic snapshot, and the served merge supersedes them (the LLM's "Food Basics" over the row's "Basics"); rendering the row copy would un-take the merge decision client-side.
+A value only on the row was written by something other than a parser, so it is not a machine suggestion and carries no amber; rows with no suggestion set at all (neither parser ever saw them) keep the value-presence proxy.
+
+**On a date disagreement the field keeps its amber and carries an inline note; the note gets the arithmetic warning's exact treatment.**
+Same amber, inside the field, never red - a prompt to look, not a rule - and touching the field clears the tint and the note together, because touched means a human looked and decided.
+Rejected: a separate dismissal or any persistence for the note - the marking's whole design is "touching clears it", and a second mechanism would make the screen noisier for a signal that only ever asks for one look.
+
+**Provenance is not shown in the UI.**
+The amber already means unverified; a source badge would ask the user to adjudicate parser internals and make a screen designed to start loud and go quiet noisier.
+The client deliberately does not even decode the per-field `source` marker - provenance stays in the API for diagnostics.
+
+**A money field the merge serves absent prefills empty, so the form's "Not found" placeholder states the absence** - checked against the served `{value: null, source: null}` shape by decode test, per §10A.1's stated-absence rule and §7.3's no-fallthrough amendment.
+
 ## 2026-08-08 - Merge correction (the owner): money fields have no fallthrough
 
 **For the money fields - total, subtotal, HST - the heuristic is the only source the merge serves: if the heuristic has no value, the field is absent, never filled from `llm_suggestions`.**

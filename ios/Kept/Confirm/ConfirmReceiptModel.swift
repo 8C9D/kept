@@ -1,5 +1,44 @@
 import Foundation
 
+/// The machine suggestions the confirm form renders - one shape for every
+/// route that opens the screen. Whoever builds the model injects the set
+/// that exists for it: the server's §7.3 merge for a stored receipt (the
+/// queue and the detail screen), or the on-device parse alone for a
+/// capture-time confirm, where no server row - and so no merge and no
+/// disagreement flag - exists yet. The form renders whichever set it was
+/// handed and never knows which route built it.
+struct ConfirmSuggestionSet {
+    let vendor: String?
+    let purchasedAt: String?
+    let totalCents: Int?
+    let hstCents: Int?
+    let subtotalCents: Int?
+    let vendorTaxNumber: String?
+    /// Both parsers read a date off the same text and they differ (§7.3).
+    /// Only the server merge can raise this.
+    let dateDisagreement: Bool
+
+    init(merged: MergedSuggestions) {
+        vendor = merged.vendor.value
+        purchasedAt = merged.purchasedAt.value
+        totalCents = merged.totalCents.value
+        hstCents = merged.hstCents.value
+        subtotalCents = merged.subtotalCents.value
+        vendorTaxNumber = merged.vendorTaxNumber.value
+        dateDisagreement = merged.purchasedAt.disagreement
+    }
+
+    init(parse: ReceiptSuggestions) {
+        vendor = parse.vendor
+        purchasedAt = parse.purchasedAt
+        totalCents = parse.totalCents
+        hstCents = parse.hstCents
+        subtotalCents = parse.subtotalCents
+        vendorTaxNumber = parse.vendorTaxNumber
+        dateDisagreement = false
+    }
+}
+
 /// The confirm screen's state and decisions (spec §7.2, §10A.1), with no
 /// camera and no UIKit anywhere near it - the whole screen is testable on
 /// the simulator, which is the §10.2 requirement for the one screen that
@@ -10,6 +49,8 @@ import Foundation
 ///   UI - and touching a field clears that permanently;
 /// - the header counter is how many suggestions remain unreviewed;
 /// - the arithmetic check warns, inside the total card, and never blocks;
+/// - a date the two parsers disagreed on carries an inline note with the
+///   arithmetic warning's treatment, cleared with the amber by touch;
 /// - save is disabled until business-or-personal is chosen (the §5.2
 ///   no-default rule made visible), with the reason stated;
 /// - a valid save hands the confirmed fields to whichever save path built
@@ -68,6 +109,11 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// says so out loud instead of passing it off as parsed.
     let dateIsCaptureDayFallback: Bool
 
+    /// §7.3: the injected suggestion set says both parsers read a date and
+    /// they differ. Constant for the form's life; what the screen shows
+    /// follows the amber (showsDateDisagreementNote).
+    private let dateDisagreement: Bool
+
     /// Where the confirmed fields go on save. Injected by whoever built
     /// the model; the form's rules above are identical either way.
     private let saveAction: (ConfirmedReceiptFields) async throws -> Void
@@ -75,102 +121,142 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     // MARK: - Construction
 
     /// A server-side pending receipt (the confirm queue, or the detail
-    /// screen's "Confirm this receipt"): save PATCHes it to confirmed.
-    init(api: any KeptAPI, detail: ReceiptDetail) {
+    /// screen's "Confirm this receipt"): the suggestion set is the §7.3
+    /// merge the API serves on every receipt - both parsers, merged by
+    /// the domain layer; this client renders, never decides (spec §4.1) -
+    /// and save PATCHes the receipt to confirmed.
+    convenience init(api: any KeptAPI, detail: ReceiptDetail) {
         let receipt = detail.receipt
         let id = receipt.id
-        saveAction = { fields in
-            _ = try await api.confirmReceipt(id: id, ConfirmReceiptRequest(fields))
-        }
-        receiptId = id
-        currency = receipt.currency
-        imageSource = detail.images.first.map { .remote($0.downloadUrl) }
-        ocrFailureNote = nil
+        self.init(
+            receiptId: id,
+            currency: receipt.currency,
+            imageSource: detail.images.first.map { .remote($0.downloadUrl) },
+            ocrFailureNote: nil,
+            suggestions: receipt.suggestions.map(ConfirmSuggestionSet.init(merged:)),
+            existing: ExistingValues(
+                purchasedAt: receipt.purchasedAt,
+                vendor: receipt.vendor,
+                vendorTaxNumber: receipt.vendorTaxNumber,
+                totalCents: receipt.totalCents,
+                hstCents: receipt.hstCents,
+                subtotalCents: receipt.subtotalCents,
+                otherTaxCents: receipt.otherTaxCents,
+                category: receipt.category,
+                paymentMethod: receipt.paymentMethod,
+                notes: receipt.notes
+            ),
+            saveAction: { fields in
+                _ = try await api.confirmReceipt(id: id, ConfirmReceiptRequest(fields))
+            }
+        )
+    }
 
-        totalText = receipt.totalCents.map(MoneyInput.text(fromCents:)) ?? ""
-        purchasedDate = ReceiptFormat.pickerDate(fromIso: receipt.purchasedAt) ?? Date()
-        vendorText = receipt.vendor ?? ""
-        hstText = receipt.hstCents.map(MoneyInput.text(fromCents:)) ?? ""
-        subtotalText = receipt.subtotalCents.map(MoneyInput.text(fromCents:)) ?? ""
-        otherTaxText = receipt.otherTaxCents.map(MoneyInput.text(fromCents:)) ?? ""
-        taxNumberText = receipt.vendorTaxNumber ?? ""
-        categoryText = receipt.category ?? ""
-        paymentMethodText = receipt.paymentMethod ?? ""
-        notesText = receipt.notes ?? ""
+    /// A capture being confirmed on the spot, before anything has
+    /// uploaded (wave-5 gate ratification): the suggestion set is the
+    /// on-device parse alone - no server row yet, so no merge and no
+    /// disagreement flag is possible - the image is the scanned bytes
+    /// still in memory, and save hands the confirmed fields to the
+    /// injected action - a durable outbox write, in production.
+    convenience init(
+        draft: CapturedReceiptDraft,
+        saveAction: @escaping (ConfirmedReceiptFields) async throws -> Void
+    ) {
+        self.init(
+            receiptId: nil,
+            // Not editable on this form (spec, wave-4 report §6.3); the
+            // create omits it and the server's column default applies.
+            currency: "CAD",
+            imageSource: .local(draft.imageData),
+            ocrFailureNote: draft.ocrFailureNote,
+            suggestions: ConfirmSuggestionSet(parse: draft.suggestions),
+            existing: ExistingValues(
+                purchasedAt: ReceiptFormat.calendarDate(of: draft.capturedAt)
+            ),
+            saveAction: saveAction
+        )
+    }
+
+    /// The values already on the record before any suggestion applies:
+    /// the server row's fields for a stored receipt, or - capture-time -
+    /// nothing but the capture day. A value only here was written by
+    /// something other than a parser, so it prefills without amber.
+    private struct ExistingValues {
+        var purchasedAt: String
+        var vendor: String?
+        var vendorTaxNumber: String?
+        var totalCents: Int?
+        var hstCents: Int?
+        var subtotalCents: Int?
+        var otherTaxCents: Int?
+        var category: String?
+        var paymentMethod: String?
+        var notes: String?
+    }
+
+    /// The one form, whatever built it. A suggested value wins the
+    /// prefill over the row's copy - the row's field values on a pending
+    /// receipt are the capture-time heuristic snapshot, and the served
+    /// merge supersedes them (§7.3) - with the row filling only fields no
+    /// suggestion covers. Exactly the suggested fields start amber; the
+    /// date is always amber (always prefilled - parsed, or the capture-day
+    /// fallback, which is additionally called out).
+    private init(
+        receiptId: UUID?,
+        currency: String,
+        imageSource: ReceiptImageSource?,
+        ocrFailureNote: String?,
+        suggestions: ConfirmSuggestionSet?,
+        existing: ExistingValues,
+        saveAction: @escaping (ConfirmedReceiptFields) async throws -> Void
+    ) {
+        self.receiptId = receiptId
+        self.currency = currency
+        self.imageSource = imageSource
+        self.ocrFailureNote = ocrFailureNote
+        self.saveAction = saveAction
+
+        totalText = (suggestions?.totalCents ?? existing.totalCents)
+            .map(MoneyInput.text(fromCents:)) ?? ""
+        // Parsed date, or the existing one (the row's, or the capture
+        // day) - both through the same UTC-pinned round trip the picker
+        // renders in.
+        purchasedDate = ReceiptFormat.pickerDate(
+            fromIso: suggestions?.purchasedAt ?? existing.purchasedAt
+        ) ?? Date()
+        vendorText = suggestions?.vendor ?? existing.vendor ?? ""
+        hstText = (suggestions?.hstCents ?? existing.hstCents)
+            .map(MoneyInput.text(fromCents:)) ?? ""
+        subtotalText = (suggestions?.subtotalCents ?? existing.subtotalCents)
+            .map(MoneyInput.text(fromCents:)) ?? ""
+        otherTaxText = existing.otherTaxCents.map(MoneyInput.text(fromCents:)) ?? ""
+        taxNumberText = suggestions?.vendorTaxNumber ?? existing.vendorTaxNumber ?? ""
+        categoryText = existing.category ?? ""
+        paymentMethodText = existing.paymentMethod ?? ""
+        notesText = existing.notes ?? ""
         businessChoice = nil
 
-        // What starts amber. With the parser's own record (wave-4 reviewer
-        // pass), exactly the fields it suggested - a value some other
-        // writer put on a pending receipt is not a machine suggestion. The
-        // date is always amber: it is always prefilled, either parsed or
-        // the capture-day fallback, and the fallback is additionally
-        // called out by dateIsCaptureDayFallback. Without a record (older
-        // rows, other clients), value-presence is the only proxy left.
         var unreviewed: Set<SuggestedField> = [.date]
-        if let suggestions = detail.ocrSuggestions {
+        if let suggestions {
             if suggestions.totalCents != nil { unreviewed.insert(.total) }
             if suggestions.vendor != nil { unreviewed.insert(.vendor) }
             if suggestions.hstCents != nil { unreviewed.insert(.hst) }
             if suggestions.subtotalCents != nil { unreviewed.insert(.subtotal) }
             if suggestions.vendorTaxNumber != nil { unreviewed.insert(.taxNumber) }
             dateIsCaptureDayFallback = suggestions.purchasedAt == nil
+            dateDisagreement = suggestions.dateDisagreement
         } else {
-            if receipt.totalCents != nil { unreviewed.insert(.total) }
-            if receipt.vendor != nil { unreviewed.insert(.vendor) }
-            if receipt.hstCents != nil { unreviewed.insert(.hst) }
-            if receipt.subtotalCents != nil { unreviewed.insert(.subtotal) }
-            if receipt.vendorTaxNumber != nil { unreviewed.insert(.taxNumber) }
-            // No record means no way to tell a parsed date from a
-            // fallback; claiming fabrication would be its own lie.
+            // No suggestion set at all - a receipt neither parser ever
+            // saw (pre-wave-4 rows): value-presence is the only proxy
+            // left, and no fabrication claim is made about the date.
+            if existing.totalCents != nil { unreviewed.insert(.total) }
+            if existing.vendor != nil { unreviewed.insert(.vendor) }
+            if existing.hstCents != nil { unreviewed.insert(.hst) }
+            if existing.subtotalCents != nil { unreviewed.insert(.subtotal) }
+            if existing.vendorTaxNumber != nil { unreviewed.insert(.taxNumber) }
             dateIsCaptureDayFallback = false
+            dateDisagreement = false
         }
-        unreviewedFields = unreviewed
-    }
-
-    /// A capture being confirmed on the spot, before anything has
-    /// uploaded (wave-5 gate ratification): the form is prefilled from
-    /// the on-device parse, the image is the scanned bytes still in
-    /// memory, and save hands the confirmed fields to the injected
-    /// action - a durable outbox write, in production.
-    init(
-        draft: CapturedReceiptDraft,
-        saveAction: @escaping (ConfirmedReceiptFields) async throws -> Void
-    ) {
-        self.saveAction = saveAction
-        receiptId = nil
-        // Not editable on this form (spec, wave-4 report §6.3); the create
-        // omits it and the server's column default applies.
-        currency = "CAD"
-        imageSource = .local(draft.imageData)
-        ocrFailureNote = draft.ocrFailureNote
-
-        let suggestions = draft.suggestions
-        totalText = suggestions.totalCents.map(MoneyInput.text(fromCents:)) ?? ""
-        // Parsed date, or the capture day - both through the same
-        // UTC-pinned round trip the picker renders in.
-        let dateString = suggestions.purchasedAt ?? ReceiptFormat.calendarDate(of: draft.capturedAt)
-        purchasedDate = ReceiptFormat.pickerDate(fromIso: dateString) ?? Date()
-        vendorText = suggestions.vendor ?? ""
-        hstText = suggestions.hstCents.map(MoneyInput.text(fromCents:)) ?? ""
-        subtotalText = suggestions.subtotalCents.map(MoneyInput.text(fromCents:)) ?? ""
-        otherTaxText = ""
-        taxNumberText = suggestions.vendorTaxNumber ?? ""
-        categoryText = ""
-        paymentMethodText = ""
-        notesText = ""
-        businessChoice = nil
-
-        // Same amber rule as the server-backed path, read straight from
-        // the parse: exactly the suggested fields start unreviewed, and
-        // the date always does (parsed or fabricated-from-capture-day,
-        // the latter additionally called out).
-        var unreviewed: Set<SuggestedField> = [.date]
-        if suggestions.totalCents != nil { unreviewed.insert(.total) }
-        if suggestions.vendor != nil { unreviewed.insert(.vendor) }
-        if suggestions.hstCents != nil { unreviewed.insert(.hst) }
-        if suggestions.subtotalCents != nil { unreviewed.insert(.subtotal) }
-        if suggestions.vendorTaxNumber != nil { unreviewed.insert(.taxNumber) }
-        dateIsCaptureDayFallback = suggestions.purchasedAt == nil
         unreviewedFields = unreviewed
     }
 
@@ -189,6 +275,14 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// The header counter: how many suggestions nobody has looked at yet.
     var unreviewedCount: Int {
         unreviewedFields.count
+    }
+
+    /// The date-disagreement note (spec §7.2, §10A.1): shown while the
+    /// date is still unreviewed, gone the moment it is touched - the
+    /// amber and the note clear together, because touched means a human
+    /// looked and decided. No separate dismissal, nothing persisted.
+    var showsDateDisagreementNote: Bool {
+        dateDisagreement && isUnreviewed(.date)
     }
 
     func chooseBusiness(_ isBusiness: Bool) {

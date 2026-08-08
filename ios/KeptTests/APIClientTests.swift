@@ -215,6 +215,12 @@ final class APIClientTests: XCTestCase {
         XCTAssertNil(second.vendor)
         XCTAssertNil(second.subtotalCents)
         XCTAssertEqual(second.status, .pending)
+
+        // suggestions: null (neither parser ever saw the receipt) and an
+        // absent key both decode as nil - the server always sends the
+        // key, but this client must not depend on that.
+        XCTAssertNil(first.suggestions)
+        XCTAssertNil(second.suggestions)
     }
 
     func testDecodesReceiptDetail() async throws {
@@ -228,6 +234,19 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(detail.receipt.vendor, "Synthetic Vendor Three")
         XCTAssertEqual(detail.receipt.totalCents, 2925)
         XCTAssertEqual(detail.ocrRawText, "SYNTHETIC OCR TEXT\nTOTAL 29.25")
+
+        // The served §7.3 merge, decoded from the exact wire shape - the
+        // `source` markers are present on the wire and deliberately not
+        // decoded (provenance stays in the API for diagnostics).
+        let suggestions = try XCTUnwrap(detail.receipt.suggestions)
+        XCTAssertEqual(suggestions.vendor.value, "Synthetic Vendor Three")
+        XCTAssertEqual(suggestions.purchasedAt.value, "2026-03-20")
+        XCTAssertTrue(suggestions.purchasedAt.disagreement)
+        XCTAssertEqual(suggestions.totalCents.value, 2925)
+        // The no-fallthrough absence, exactly as served: {value: null,
+        // source: null} must land as nil, the stated-absence prefill.
+        XCTAssertNil(suggestions.subtotalCents.value)
+        XCTAssertNil(suggestions.vendorTaxNumber.value)
         XCTAssertEqual(detail.images.count, 1)
         XCTAssertEqual(detail.images.first?.page, 1)
         XCTAssertEqual(
@@ -310,6 +329,7 @@ final class APIClientTests: XCTestCase {
           "isBusiness": true,
           "notes": "synthetic note",
           "status": "confirmed",
+          "suggestions": null,
           "createdAt": "2026-08-05T10:00:00.000Z",
           "updatedAt": "2026-08-05T10:00:00.000Z"
         },
@@ -357,6 +377,14 @@ final class APIClientTests: XCTestCase {
       "isBusiness": true,
       "notes": null,
       "status": "confirmed",
+      "suggestions": {
+        "vendor": {"value": "Synthetic Vendor Three", "source": "llm"},
+        "purchasedAt": {"value": "2026-03-20", "source": "heuristic", "disagreement": true},
+        "totalCents": {"value": 2925, "source": "heuristic"},
+        "hstCents": {"value": 325, "source": "heuristic"},
+        "subtotalCents": {"value": null, "source": null},
+        "vendorTaxNumber": {"value": null, "source": null}
+      },
       "createdAt": "2026-08-05T10:00:00.000Z",
       "updatedAt": "2026-08-05T10:00:00.000Z",
       "ocrRawText": "SYNTHETIC OCR TEXT\\nTOTAL 29.25",

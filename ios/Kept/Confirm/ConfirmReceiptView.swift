@@ -142,6 +142,20 @@ struct ConfirmReceiptView: View {
                         .font(.caption2)
                         .foregroundStyle(.orange)
                 }
+                if model.showsDateDisagreementNote {
+                    // The two parsers read different dates off the same
+                    // text (§7.3) - free signal on the field that decides
+                    // the fiscal year. Same treatment as the arithmetic
+                    // warning: amber, inside the field, never red - a
+                    // prompt to look, not a rule. Touching the date clears
+                    // this with the tint.
+                    Label(
+                        "The date was read two different ways from this receipt. Worth a look.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                }
             }
             .listRowBackground(suggestionBackground(for: .date))
             .simultaneousGesture(TapGesture().onEnded {

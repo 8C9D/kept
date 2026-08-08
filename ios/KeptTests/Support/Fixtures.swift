@@ -14,7 +14,8 @@ enum Fixtures {
         totalCents: Int? = 2925,
         currency: String = "CAD",
         isBusiness: Bool? = true,
-        status: ReceiptStatus = .confirmed
+        status: ReceiptStatus = .confirmed,
+        suggestions: MergedSuggestions? = nil
     ) -> Receipt {
         Receipt(
             id: id,
@@ -32,6 +33,7 @@ enum Fixtures {
             isBusiness: isBusiness,
             notes: nil,
             status: status,
+            suggestions: suggestions,
             createdAt: Date(timeIntervalSince1970: 1_774_000_000),
             updatedAt: Date(timeIntervalSince1970: 1_774_000_000)
         )
@@ -40,32 +42,32 @@ enum Fixtures {
     static func detail(
         receipt: Receipt,
         ocrRawText: String? = nil,
-        ocrSuggestions: OcrSuggestionsRecord? = nil,
         images: [ReceiptImage] = []
     ) -> ReceiptDetail {
         ReceiptDetail(
             receipt: receipt,
             ocrRawText: ocrRawText,
-            ocrSuggestions: ocrSuggestions,
             images: images
         )
     }
 
-    static func suggestions(
+    /// The server's §7.3 merge as a receipt response carries it.
+    static func merged(
         vendor: String? = nil,
         purchasedAt: String? = nil,
+        dateDisagreement: Bool = false,
         totalCents: Int? = nil,
         hstCents: Int? = nil,
         subtotalCents: Int? = nil,
         vendorTaxNumber: String? = nil
-    ) -> OcrSuggestionsRecord {
-        OcrSuggestionsRecord(
-            vendor: vendor,
-            purchasedAt: purchasedAt,
-            totalCents: totalCents,
-            hstCents: hstCents,
-            subtotalCents: subtotalCents,
-            vendorTaxNumber: vendorTaxNumber
+    ) -> MergedSuggestions {
+        MergedSuggestions(
+            vendor: MergedSuggestion(value: vendor),
+            purchasedAt: MergedDateSuggestion(value: purchasedAt, disagreement: dateDisagreement),
+            totalCents: MergedSuggestion(value: totalCents),
+            hstCents: MergedSuggestion(value: hstCents),
+            subtotalCents: MergedSuggestion(value: subtotalCents),
+            vendorTaxNumber: MergedSuggestion(value: vendorTaxNumber)
         )
     }
 

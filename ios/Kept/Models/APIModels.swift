@@ -15,6 +15,40 @@ enum ReceiptStatus: String, Codable {
     case confirmed
 }
 
+/// One field of the §7.3 merge the server computes over both parse paths
+/// and serves on every receipt response. The API also states per-field
+/// provenance (`source`) and this client deliberately does not decode it:
+/// amber already means "a human has not looked", and a source badge would
+/// ask the user to adjudicate parser internals. Provenance stays in the
+/// API for diagnostics.
+struct MergedSuggestion<Value: Decodable & Hashable>: Decodable, Hashable {
+    /// Nil is "neither ruled parser produced a value" - for the money
+    /// fields, "the heuristic found nothing" (no LLM fallthrough, §7.3) -
+    /// and renders as a stated absence, never a fabricated value.
+    let value: Value?
+}
+
+/// The date's merge entry carries the one per-field flag: both parsers
+/// read a date off the same text and they differ - free signal on the
+/// field that decides the fiscal year (§7.3).
+struct MergedDateSuggestion: Decodable, Hashable {
+    let value: String?
+    let disagreement: Bool
+}
+
+/// The two parse records merged under §7.3's field-level rule, computed by
+/// the server's domain layer. This client renders it and decides nothing
+/// (spec §4.1) - which fields prefill, which start amber, and the date
+/// note all read straight off this shape.
+struct MergedSuggestions: Decodable, Hashable {
+    let vendor: MergedSuggestion<String>
+    let purchasedAt: MergedDateSuggestion
+    let totalCents: MergedSuggestion<Int>
+    let hstCents: MergedSuggestion<Int>
+    let subtotalCents: MergedSuggestion<Int>
+    let vendorTaxNumber: MergedSuggestion<String>
+}
+
 /// One receipt as the list and detail routes project it.
 struct Receipt: Decodable, Equatable, Hashable, Identifiable {
     let id: UUID
@@ -40,6 +74,10 @@ struct Receipt: Decodable, Equatable, Hashable, Identifiable {
     let isBusiness: Bool?
     let notes: String?
     let status: ReceiptStatus
+    /// The server-merged suggestion set (§7.3), on every receipt response.
+    /// Nil when neither parser ever saw the receipt - a different fact
+    /// from "both ran and found nothing" (a full set of null values).
+    let suggestions: MergedSuggestions?
     let createdAt: Date
     let updatedAt: Date
 }
@@ -62,45 +100,30 @@ struct ReceiptImage: Decodable, Equatable {
     let downloadUrl: URL
 }
 
-/// What the on-device parser suggested at capture, as the server recorded
-/// it (immutable). The confirm screen marks exactly these fields amber -
-/// value-presence would be a lying proxy once a fallback (the capture-day
-/// date) or a human-written value exists on a pending receipt.
-struct OcrSuggestionsRecord: Decodable, Equatable {
-    let vendor: String?
-    let purchasedAt: String?
-    let totalCents: Int?
-    let hstCents: Int?
-    let subtotalCents: Int?
-    let vendorTaxNumber: String?
-}
-
 /// GET /api/receipts/:id - every Receipt field plus what only the detail
 /// route returns. Decoding delegates the shared fields to Receipt so the
 /// two shapes cannot drift apart.
+///
+/// The route also serves the raw `ocrSuggestions` record for the shipped
+/// client; this client stopped reading it when the server-merged
+/// `suggestions` landed (§7.3) - the merge is the suggestion set now.
 struct ReceiptDetail: Decodable, Equatable {
     let receipt: Receipt
     let ocrRawText: String?
-    /// Nil on receipts created before wave 4 or by a client that reported
-    /// no suggestions.
-    let ocrSuggestions: OcrSuggestionsRecord?
     let images: [ReceiptImage]
 
     private enum CodingKeys: String, CodingKey {
         case ocrRawText
-        case ocrSuggestions
         case images
     }
 
     init(
         receipt: Receipt,
         ocrRawText: String?,
-        ocrSuggestions: OcrSuggestionsRecord?,
         images: [ReceiptImage]
     ) {
         self.receipt = receipt
         self.ocrRawText = ocrRawText
-        self.ocrSuggestions = ocrSuggestions
         self.images = images
     }
 
@@ -108,7 +131,6 @@ struct ReceiptDetail: Decodable, Equatable {
         receipt = try Receipt(from: decoder)
         let container = try decoder.container(keyedBy: CodingKeys.self)
         ocrRawText = try container.decodeIfPresent(String.self, forKey: .ocrRawText)
-        ocrSuggestions = try container.decodeIfPresent(OcrSuggestionsRecord.self, forKey: .ocrSuggestions)
         images = try container.decode([ReceiptImage].self, forKey: .images)
     }
 }
