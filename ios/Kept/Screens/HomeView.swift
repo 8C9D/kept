@@ -296,13 +296,15 @@ struct HomeView: View {
 
 /// One receipt in the list: vendor and date on the left, amount on the
 /// right, an amber badge when no human has confirmed the numbers yet.
+/// Fields read the display rule (ReceiptDisplay): a pending row shows the
+/// served merge, a confirmed one its record.
 struct ReceiptRow: View {
     let receipt: Receipt
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                if let vendor = receipt.vendor {
+                if let vendor = receipt.displayVendor {
                     Text(vendor)
                 } else {
                     // A stated absence, not a blank (spec §10A.1): the
@@ -311,7 +313,7 @@ struct ReceiptRow: View {
                         .italic()
                         .foregroundStyle(.secondary)
                 }
-                Text(ReceiptFormat.purchaseDate(receipt.purchasedAt))
+                Text(ReceiptFormat.purchaseDate(receipt.displayPurchasedAt))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -319,7 +321,7 @@ struct ReceiptRow: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 4) {
-                if let totalCents = receipt.totalCents {
+                if let totalCents = receipt.displayTotalCents {
                     Text(ReceiptFormat.money(cents: totalCents, currency: receipt.currency))
                         .monospacedDigit()
                 } else {

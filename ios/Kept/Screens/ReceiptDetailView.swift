@@ -32,7 +32,7 @@ struct ReceiptDetailView: View {
                 loadedBody(detail)
             }
         }
-        .navigationTitle(receipt.vendor ?? ReceiptFormat.purchaseDate(receipt.purchasedAt))
+        .navigationTitle(receipt.displayVendor ?? ReceiptFormat.purchaseDate(receipt.displayPurchasedAt))
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await model.load(id: receipt.id)
@@ -64,7 +64,7 @@ struct ReceiptDetailView: View {
             // lands.
             Section {
                 VStack(alignment: .leading, spacing: 4) {
-                    if let totalCents = detail.receipt.totalCents {
+                    if let totalCents = detail.receipt.displayTotalCents {
                         Text(ReceiptFormat.money(
                             cents: totalCents,
                             currency: detail.receipt.currency
@@ -106,12 +106,15 @@ struct ReceiptDetailView: View {
             }
 
             Section("Details") {
-                FieldRow(label: "Date", value: ReceiptFormat.purchaseDate(detail.receipt.purchasedAt))
-                FieldRow(label: "Vendor", value: detail.receipt.vendor)
-                FieldRow(label: "HST", value: money(detail.receipt.hstCents, detail.receipt.currency))
-                FieldRow(label: "Subtotal", value: money(detail.receipt.subtotalCents, detail.receipt.currency))
+                // Merge-covered fields read the display rule (ReceiptDisplay):
+                // pending shows the served merge, confirmed the record. Other
+                // tax and below carry no suggestion and always show the row.
+                FieldRow(label: "Date", value: ReceiptFormat.purchaseDate(detail.receipt.displayPurchasedAt))
+                FieldRow(label: "Vendor", value: detail.receipt.displayVendor)
+                FieldRow(label: "HST", value: money(detail.receipt.displayHstCents, detail.receipt.currency))
+                FieldRow(label: "Subtotal", value: money(detail.receipt.displaySubtotalCents, detail.receipt.currency))
                 FieldRow(label: "Other tax", value: money(detail.receipt.otherTaxCents, detail.receipt.currency))
-                FieldRow(label: "Tax number", value: detail.receipt.vendorTaxNumber)
+                FieldRow(label: "Tax number", value: detail.receipt.displayVendorTaxNumber)
                 FieldRow(
                     label: "Type",
                     value: detail.receipt.isBusiness.map { $0 ? "Business" : "Personal" }

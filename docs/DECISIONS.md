@@ -4,6 +4,20 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-08 - Pending receipts render the served merge on every screen
+
+**On a pending receipt, the Home list row and the receipt detail screen render the §7.3 merge by the confirm screen's prefill rule: a served suggestion outranks the row's copy of the field, and the row fills only fields no suggestion covers.**
+The defect (same-day device pass): one receipt read two different ways depending on the screen - the confirm form rendered the merge's "Food Basics" and corrected date while the list row and detail screen rendered the row's "Basics", the bare tax number, and a misparsed 2011 date - so the merge's corrections were invisible outside the confirm screen.
+This applies the ruling the confirm screen already established (the entry below) rather than adding a new branch: a pending row's stored values are the capture-time heuristic snapshot, and the served merge supersedes them.
+**A confirmed receipt renders its row everywhere; the merge never overrides a confirmed value.**
+Confirmed receipts are still swept and still served suggestions - only `parse-accuracy` consumes those.
+Rejected: rendering the merge on confirmed receipts too - the row holds what a human confirmed, and constraint 2 makes that the record.
+The selection lives once, in a `Receipt` extension (`ReceiptDisplay.swift`) shared by both screens and pinned by unit test; fields the merge does not cover (other tax, business/personal, category, payment, notes) always render the row.
+**Checked, both stay: the detail screen's "Not recorded" and the confirm form's "Not found".**
+They are two components in two contexts - the detail screen states what Kept has for a field, while the form's placeholder sits exactly where typing the missing value is the remedy - but the stored-vs-parsed distinction is carried by the components' contexts, not stated by any rule in the code; recorded here so it is a decision rather than an accident.
+⚠ Test honesty (§10.2): the extension's selection is pinned by unit test, but the views reading `display*` instead of the raw fields is SwiftUI body content no unit test executes - reverting a row to `receipt.vendor` would stay green.
+The device pass is the real evidence, exactly as it was for the confirm screen's own rendering.
+
 ## 2026-08-08 - iOS confirm screen renders the served merge
 
 **The confirm screen now renders the `suggestions` field the API serves - the §7.3 merge - and no longer reads the detail route's raw `ocrSuggestions`, which stays in the response for the shipped client.**
