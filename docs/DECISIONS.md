@@ -607,3 +607,22 @@ Why: found during device verification when the server died mid-run - 110 tests w
 **Standing rule (framework guardrail 7, mirrored in CLAUDE.md): every gate starts the real server the real way and lands one real request.**
 Rejected: treating a green dependency-injected suite as evidence the system starts.
 Why: injection discipline makes the entry point structurally untested - the better the tests, the bigger the blind spot - so gate closure now requires the production start command, from a clean checkout, and one real response, recorded in the gate report.
+
+## 2026-08-07 - First real LLM parse run (the owner)
+
+**The LLM backfill's first real Anthropic API run: 6/6 receipts parsed by claude-haiku-4-5 against the dev database, 5,281 input and 332 output tokens, $0.0069 total.**
+No request errored and no parse came back all-null.
+One came close: the Synthetic Vendor Two receipt returned only a total, which is consistent with its sparse synthetic text rather than a pipeline fault.
+
+**The accuracy listing's headline is a regression, not a win: on the vendor field the LLM scored 40% against the heuristics' 80%.**
+On three of the four Noodle House receipts the heuristic kept the confirmed "Noodle House (BCE)" while the LLM dropped the "(BCE)" suffix - cases where the heuristics were right and the LLM is wrong.
+The LLM won every Food Basics disagreement (vendor "Basics" vs "Food Basics", the garbled date 2011-07-26 vs 2026-07-11, the missing R prefix on the tax number), and both paths were perfect on the money fields.
+The provisional warning is showing: 5 receipts from 2 vendors cannot distinguish a good model from a lucky one, so the spec's §7.3 upgrade question stays open until a re-run after real use.
+
+**`npm run parse-llm-probe` (a one-off script, deliberately not a test) showed the pipeline's output tracks the raw text and nothing else.**
+A digit-rotated copy of the Food Basics receipt's ocr_raw_text moved 5 of 6 fields (date, total, subtotal, HST, tax number); vendor stayed put because the corruption touches only digits.
+Rejected: making it a CI test - it costs money and is nondeterministic, so it runs once and its outcome is recorded here instead.
+Limitation: this is a one-shot manual check on one receipt, not a standing guarantee; nothing re-verifies the property as the pipeline changes.
+⚠ On deliberately corrupted input the model returned a plausible invented date (2022-03-18) from an invalid string rather than null, and misread a scrambled amount by one digit.
+That is the honest limit of this path: on degraded input the LLM fails plausibly where the heuristic fails visibly.
+Design consequence for the server-parse step: LLM-sourced values stay amber until touched, with no trust shortcut.
