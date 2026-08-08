@@ -6,7 +6,10 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { LOCAL_DEV_DATABASE_URL } from "./client.js";
 import { assertLocalDatabase } from "./databaseUrl.js";
 import { receipts } from "./schema.js";
-import type { LlmSuggestionRecord } from "../domain/llmSuggestions.js";
+import {
+  RECEIPT_PARSE_PROMPT_VERSION,
+  type LlmSuggestionRecord,
+} from "../domain/llmSuggestions.js";
 import {
   RECEIPT_PARSE_MODEL,
   parseReceiptText,
@@ -90,6 +93,7 @@ async function backfill() {
       const suggestions = await parseReceiptText(client, row.ocrRawText);
       const record: LlmSuggestionRecord = {
         model: RECEIPT_PARSE_MODEL,
+        promptVersion: RECEIPT_PARSE_PROMPT_VERSION,
         requestedAt: new Date().toISOString(),
         suggestions,
       };

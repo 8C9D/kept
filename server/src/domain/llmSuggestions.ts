@@ -17,6 +17,12 @@ import type { OcrFieldSuggestions } from "./ocrSuggestions.js";
 export interface LlmSuggestionRecord {
   /** Exact model id the suggestions came from, for accuracy attribution. */
   model: string;
+  /**
+   * Which RECEIPT_PARSE_PROMPT_VERSION produced the suggestions. Absent on
+   * records written before the stamp existed - those are version 1, the
+   * pre-verbatim-vendor prompt from the first backfill (Aug 7, 2026).
+   */
+  promptVersion?: number;
   /** ISO timestamp of the parse request. */
   requestedAt: string;
   suggestions: OcrFieldSuggestions;
@@ -31,7 +37,15 @@ export interface LlmSuggestionRecord {
 export const RECEIPT_PARSE_JSON_SCHEMA = {
   type: "object",
   properties: {
-    vendor: { type: ["string", "null"] },
+    vendor: {
+      type: ["string", "null"],
+      description:
+        "The business name as printed. Include suffixes, parentheses, and " +
+        "abbreviations that are part of the name; exclude branch or store " +
+        "numbers, addresses, and phone numbers. Do not normalize, expand, " +
+        "translate, or tidy it. A logo or wordmark is often split across " +
+        "adjacent lines; join them.",
+    },
     purchasedAt: {
       type: ["string", "null"],
       description: "yyyy-mm-dd",
@@ -53,13 +67,30 @@ export const RECEIPT_PARSE_JSON_SCHEMA = {
 } as const;
 
 /**
+ * Bumped whenever the request's meaning changes - the system prompt or the
+ * schema field descriptions - so stored llm_suggestions records stay
+ * attributable to the prompt generation that produced them and
+ * parse-accuracy can keep the generations apart.
+ * Version 1 (implicit - records without a promptVersion field) lacked the
+ * verbatim-vendor rule; version 2 added it after the first accuracy run
+ * showed the model tidying "Noodle House (BCE)" down to "Noodle House". The
+ * rule lives in the vendor field's schema description, not the shared
+ * system prompt: a first draft that put it in the system prompt coincided
+ * with a date regression, consistent with a verbatim instruction reaching a
+ * field that must interpret rather than transcribe.
+ */
+export const RECEIPT_PARSE_PROMPT_VERSION = 2;
+
+/**
  * Domain rules for the extraction, stated as facts about Canadian receipts
  * rather than step-by-step heuristics - the model's judgment over the text
  * is the whole point (the on-device heuristics already do rule-following).
  *
  * The rules encode the wave-5 and Food Basics lessons: HST/GST are one CRA
  * program; multiple date representations must be cross-checked; tax numbers
- * may carry a letter prefix; wordmarks split across lines.
+ * may carry a letter prefix. Vendor guidance lives in the schema's vendor
+ * field description, scoped to that field alone - see the prompt-version
+ * comment above for why.
  */
 export const RECEIPT_PARSE_SYSTEM_PROMPT = `You extract fields from the OCR text of a Canadian retail receipt.
 
@@ -69,7 +100,6 @@ Rules:
 - totalCents is the final amount paid, hstCents is the HST or GST amount, subtotalCents is the pre-tax subtotal.
 - HST and GST are the same federal program. If both are printed, the non-zero amount charged is the tax; an explicit $0.00 beside a charged sibling line is not.
 - purchasedAt is the purchase date as yyyy-mm-dd. Receipts often print a date more than once in different formats; cross-check them against each other (a printed time can disambiguate), and prefer an unambiguous representation over an ambiguous one. A purchase date is in the recent past, never in the future.
-- vendor is the store's name as a customer would say it. A logo or wordmark is often split across adjacent lines; join them.
 - vendorTaxNumber is the supplier's GST/HST registration number, exactly as printed including any letter prefix or suffix (for example R105216170 or 123456789RT0001). Card numbers, phone numbers, and transaction references are not tax numbers.
 - The text comes from OCR of a photograph: words may be split mid-word, columns may be misaligned, and characters may be misread. Read through such noise, but do not invent what is not there.`;
 

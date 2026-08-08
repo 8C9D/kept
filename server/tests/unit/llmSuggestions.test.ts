@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   RECEIPT_PARSE_JSON_SCHEMA,
+  RECEIPT_PARSE_PROMPT_VERSION,
+  RECEIPT_PARSE_SYSTEM_PROMPT,
   validateLlmParseResponse,
 } from "../../src/domain/llmSuggestions.js";
 import { OCR_SUGGESTION_FIELDS } from "../../src/domain/ocrSuggestions.js";
@@ -106,5 +108,23 @@ describe("buildParseRequest", () => {
     expect(request.output_config).toEqual({
       format: { type: "json_schema", schema: RECEIPT_PARSE_JSON_SCHEMA },
     });
+  });
+});
+
+describe("verbatim-vendor ruling (Aug 8 2026)", () => {
+  it("lives in the vendor field's schema description, scoped to that field alone", () => {
+    const description = RECEIPT_PARSE_JSON_SCHEMA.properties.vendor.description;
+    expect(description).toContain("business name as printed");
+    expect(description).toContain("Do not normalize, expand, translate, or tidy");
+    expect(description).toContain("exclude branch or store numbers");
+  });
+
+  it("stays out of the shared system prompt, where it reached the date field", () => {
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).not.toMatch(/vendor is/);
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).not.toContain("as printed on the receipt, including suffixes");
+  });
+
+  it("carries prompt version 2: a meaning change without a bump would corrupt generation attribution", () => {
+    expect(RECEIPT_PARSE_PROMPT_VERSION).toBe(2);
   });
 });
