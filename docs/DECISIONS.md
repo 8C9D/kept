@@ -3,6 +3,15 @@
 Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 
+## 2026-08-07 - Secret-exposure audit: nothing leaked, and the ignore rule is the load-bearing control
+
+Audited the full history for committed secrets: the repo has no git remote, no env file was ever committed on any ref including unreachable objects, and every credential-shaped value in history resolves to a test fixture, a documentation placeholder, or the by-design local dev password.
+The ignore rule predates the file it protects: `.env.local` was in the Wave 0 skeleton's `.gitignore`, two hours before `server/.env.local` first existed.
+Verdict: no credential in this repo is to be treated as leaked, and nothing was rotated.
+**A gitleaks pre-commit hook now guards commits, tracked in `.githooks/` and wired via `git config core.hooksPath .githooks` (Runbook §0), falsified in both directions.**
+⚠ Stated rather than smoothed over: gitleaks' protection is shape-based, so it covers `ANTHROPIC_API_KEY` well and opaque secrets like `SESSION_SECRET` only weakly - a fake key missing the real format's exact tail sailed through until the shape matched.
+The ignore rule, not the hook, is the load-bearing control.
+
 ## 2026-08-07 - Wave 6: the deployment exists as configuration, and the backup is tested
 
 Recorded as one entry because the pieces depend on each other: the privacy label could not be written until the deployment named where data goes, and the rate limiter could not be shaped until something sat in front of the origin.

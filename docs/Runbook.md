@@ -24,6 +24,8 @@ Spec §4.2 has the reasoning; this file has the commands.
 
 No secret value appears in this repository, in this file, or in any log.
 
+On a fresh clone, run `git config core.hooksPath .githooks` once to enable the gitleaks pre-commit hook that keeps it that way (`brew install gitleaks` if missing; the hook refuses to commit without it).
+
 ### Environment variables the server reads
 
 All are read in `server/src/index.ts` and nowhere else.
