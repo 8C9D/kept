@@ -17,6 +17,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
+import type { LlmSuggestionRecord } from "../domain/llmSuggestions.js";
 
 export const receiptStatus = pgEnum("receipt_status", ["pending", "confirmed"]);
 
@@ -84,6 +85,12 @@ export const receipts = pgTable(
     // went on to confirm is how per-field parse accuracy is measured
     // (spec §7.3's wave-4 number), with no bookkeeping by anyone.
     ocrSuggestions: jsonb("ocr_suggestions").$type<OcrFieldSuggestions>(),
+    // What the server-side LLM parse suggested from ocr_raw_text, verbatim
+    // and immutable like ocr_suggestions: written once (backfill script now,
+    // the create path's async parse later), updated by no route. The pair
+    // of records is what lets parse-accuracy score the two paths separately
+    // (ruled Aug 7, 2026).
+    llmSuggestions: jsonb("llm_suggestions").$type<LlmSuggestionRecord>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     // Maintained by a Postgres trigger (drizzle/0001), not handler code.
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

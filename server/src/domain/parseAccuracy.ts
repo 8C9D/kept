@@ -137,6 +137,88 @@ export function measureAccuracy(receipts: MeasuredReceipt[]): AccuracyReport {
 }
 
 /**
+ * One receipt carrying both suggestion records, for scoring the two parse
+ * paths against each other (heuristics on-device, LLM server-side over the
+ * same stored text - ruled Aug 7, 2026).
+ */
+export interface TwoPathReceipt {
+  id: string;
+  heuristic: OcrFieldSuggestions;
+  llm: OcrFieldSuggestions;
+  confirmed: ConfirmedFields;
+}
+
+export interface PathDisagreement {
+  receiptId: string;
+  field: keyof OcrFieldSuggestions;
+  heuristicSuggested: string | number | null;
+  llmSuggested: string | number | null;
+  confirmed: string | number | null;
+  /**
+   * Which path the human's confirmed value sided with. "both" cannot occur:
+   * agreement is transitive, so two suggestions that both match the
+   * confirmed value would not be a disagreement in the first place.
+   */
+  matchedConfirmed: "heuristic" | "llm" | "neither";
+}
+
+/**
+ * Null-tolerant agreement: both-null is agreement (both paths say "not
+ * printed"), null against a value is not, and two values compare under the
+ * same normalization the accuracy tallies use.
+ */
+export function suggestionValuesAgree(
+  field: keyof OcrFieldSuggestions,
+  a: string | number | null,
+  b: string | number | null,
+): boolean {
+  if (a === null || b === null) {
+    return a === b;
+  }
+  return valuesAgree(field, a, b);
+}
+
+/**
+ * Every field where the two paths suggested different things, and which of
+ * them the human sided with. At a small n this listing is the evidence
+ * that matters - a headline percentage over a handful of receipts cannot
+ * distinguish a good model from a lucky one.
+ */
+export function compareSuggestionPaths(
+  receipts: TwoPathReceipt[],
+): PathDisagreement[] {
+  const disagreements: PathDisagreement[] = [];
+  for (const receipt of receipts) {
+    for (const field of OCR_SUGGESTION_FIELDS) {
+      const heuristicSuggested = receipt.heuristic[field];
+      const llmSuggested = receipt.llm[field];
+      if (suggestionValuesAgree(field, heuristicSuggested, llmSuggested)) {
+        continue;
+      }
+      const confirmed = receipt.confirmed[field];
+      const matchedConfirmed = suggestionValuesAgree(
+        field,
+        heuristicSuggested,
+        confirmed,
+      )
+        ? "heuristic"
+        : suggestionValuesAgree(field, llmSuggested, confirmed)
+          ? "llm"
+          : "neither";
+      disagreements.push({
+        receiptId: receipt.id,
+        field,
+        heuristicSuggested,
+        llmSuggested,
+        confirmed,
+        matchedConfirmed,
+      });
+    }
+  }
+  return disagreements;
+}
+
+/**
  * Money and dates compare exactly. Text fields compare after normalizing
  * case and whitespace (and, for the tax number, its internal spaces):
  * "staples #123" versus "STAPLES #123" is the human adjusting styling,

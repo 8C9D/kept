@@ -6,9 +6,12 @@ import { receipts, users } from "./schema.js";
 import { cents, centsToDecimalString } from "../domain/money.js";
 import {
   accuracyPercent,
+  compareSuggestionPaths,
   measureAccuracy,
+  type AccuracyReport,
   type MeasuredReceipt,
   type Mismatch,
+  type TwoPathReceipt,
 } from "../domain/parseAccuracy.js";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
 
@@ -84,6 +87,9 @@ async function report() {
 
   const result = measureAccuracy(measured);
   const who = realUser.displayName ?? realUser.id;
+  const vendorById = new Map(
+    rows.map((row) => [row.id, row.vendor ?? "no vendor"]),
+  );
 
   if (result.receiptCount === 0) {
     console.log(
@@ -94,9 +100,111 @@ async function report() {
     return;
   }
 
-  console.log(
-    `Parse accuracy over ${result.receiptCount} confirmed receipt${result.receiptCount === 1 ? "" : "s"} (${who})\n`,
+  printAccuracyTable(
+    `On-device heuristics, over ${result.receiptCount} confirmed receipt${result.receiptCount === 1 ? "" : "s"} (${who})`,
+    result,
   );
+  console.log(
+    "\nkept = suggestion confirmed unchanged · fixed = human corrected it · " +
+      "missed = parser found nothing, human filled it in · " +
+      "absent-right = parser found nothing and there was nothing",
+  );
+  printMismatches(result.mismatches, vendorById, "heuristics");
+
+  // The LLM path, over the subset of the same receipts that carry an LLM
+  // suggestion record (backfilled or, later, parsed at create).
+  const llmRows = rows.filter((row) => row.llmSuggestions !== null);
+  if (llmRows.length === 0) {
+    console.log(
+      "\nNo LLM suggestion records on any confirmed receipt yet - " +
+        "run `npm run parse-llm-backfill`, then re-run this report.",
+    );
+    await pool.end();
+    return;
+  }
+
+  const llmMeasured: MeasuredReceipt[] = llmRows.map((row) => {
+    if (row.llmSuggestions === null || row.ocrSuggestions === null) {
+      throw new Error(`Receipt ${row.id} lost its suggestions between query and read`);
+    }
+    return {
+      id: row.id,
+      suggestions: row.llmSuggestions.suggestions,
+      confirmed: {
+        vendor: row.vendor,
+        purchasedAt: row.purchasedAt,
+        totalCents: row.totalCents,
+        hstCents: row.hstCents,
+        subtotalCents: row.subtotalCents,
+        vendorTaxNumber: row.vendorTaxNumber,
+      },
+    };
+  });
+  const llmResult = measureAccuracy(llmMeasured);
+  const models = [...new Set(llmRows.map((row) => row.llmSuggestions?.model))];
+  console.log("");
+  printAccuracyTable(
+    `LLM parse (${models.join(", ")}), over ${llmResult.receiptCount} of those receipt${llmResult.receiptCount === 1 ? "" : "s"}`,
+    llmResult,
+  );
+  printMismatches(llmResult.mismatches, vendorById, "LLM parse");
+
+  const twoPath: TwoPathReceipt[] = llmMeasured.map((entry) => {
+    const row = llmRows.find((candidate) => candidate.id === entry.id);
+    if (row?.ocrSuggestions == null) {
+      throw new Error(`Receipt ${entry.id} has an LLM record but no heuristic one`);
+    }
+    return {
+      id: entry.id,
+      heuristic: row.ocrSuggestions,
+      llm: entry.suggestions,
+      confirmed: entry.confirmed,
+    };
+  });
+  const disagreements = compareSuggestionPaths(twoPath);
+  if (disagreements.length === 0) {
+    console.log(
+      "\nThe two paths agreed on every field of every receipt they both parsed.",
+    );
+  } else {
+    console.log("\nWhere the two paths disagreed, and whom the human sided with:");
+    for (const d of disagreements) {
+      const context = `${vendorById.get(d.receiptId)}, ${d.receiptId.slice(0, 8)}`;
+      const winner =
+        d.matchedConfirmed === "neither"
+          ? "neither matched the confirmed value"
+          : `${d.matchedConfirmed === "llm" ? "LLM" : "heuristic"} matched the confirmed value`;
+      console.log(
+        `  ${FIELD_LABELS[d.field]}: heuristic ${formatValue(d.field, d.heuristicSuggested)}, ` +
+          `LLM ${formatValue(d.field, d.llmSuggested)}, ` +
+          `confirmed ${formatValue(d.field, d.confirmed)} - ${winner} (${context})`,
+      );
+    }
+  }
+
+  // §7.3's own measurement plan was ten receipts; under that, a headline
+  // percentage cannot distinguish a good model from a lucky one (the owner's
+  // caution, Aug 7 2026), so the report says so instead of presenting one
+  // as settled.
+  if (llmResult.receiptCount < 10) {
+    const distinctVendors = new Set(
+      llmRows.map((row) => (row.vendor ?? "no vendor").toLowerCase()),
+    ).size;
+    console.log(
+      `\n⚠ Provisional: the two-path comparison covers ${llmResult.receiptCount} receipt${llmResult.receiptCount === 1 ? "" : "s"} ` +
+        `from ${distinctVendors} distinct vendor${distinctVendors === 1 ? "" : "s"}. ` +
+        `That cannot distinguish a good model from a lucky one - read the ` +
+        `disagreement listing above rather than the percentages, and re-run ` +
+        `after a few weeks of real use before treating §7.3's upgrade ` +
+        `question as answered.`,
+    );
+  }
+
+  await pool.end();
+}
+
+function printAccuracyTable(title: string, result: AccuracyReport) {
+  console.log(`${title}\n`);
   console.log(
     padded("field", 12) +
       padded("accuracy", 10) +
@@ -116,27 +224,24 @@ async function report() {
         String(tally.correctlyAbsent),
     );
   }
-  console.log(
-    "\nkept = suggestion confirmed unchanged · fixed = human corrected it · " +
-      "missed = parser found nothing, human filled it in · " +
-      "absent-right = parser found nothing and there was nothing",
-  );
+}
 
-  if (result.mismatches.length > 0) {
-    const vendorById = new Map(
-      rows.map((row) => [row.id, row.vendor ?? "no vendor"]),
-    );
-    console.log("\nEvery correction, for diagnosing the heuristics:");
-    for (const mismatch of result.mismatches) {
-      const context = `${vendorById.get(mismatch.receiptId)}, ${mismatch.receiptId.slice(0, 8)}`;
-      console.log(
-        `  ${FIELD_LABELS[mismatch.field]}: suggested ${formatValue(mismatch.field, mismatch.suggested)}, ` +
-          `confirmed ${formatValue(mismatch.field, mismatch.confirmed)} (${context})`,
-      );
-    }
+function printMismatches(
+  mismatches: Mismatch[],
+  vendorById: Map<string, string>,
+  pathLabel: string,
+) {
+  if (mismatches.length === 0) {
+    return;
   }
-
-  await pool.end();
+  console.log(`\nEvery correction, for diagnosing the ${pathLabel}:`);
+  for (const mismatch of mismatches) {
+    const context = `${vendorById.get(mismatch.receiptId)}, ${mismatch.receiptId.slice(0, 8)}`;
+    console.log(
+      `  ${FIELD_LABELS[mismatch.field]}: suggested ${formatValue(mismatch.field, mismatch.suggested)}, ` +
+        `confirmed ${formatValue(mismatch.field, mismatch.confirmed)} (${context})`,
+    );
+  }
 }
 
 function formatValue(

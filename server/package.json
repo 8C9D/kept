@@ -9,6 +9,8 @@
     "db:claim": "tsx src/db/claim.ts",
     "db:verify-restore": "tsx src/db/verifyRestore.ts",
     "parse-accuracy": "tsx src/db/parseAccuracyReport.ts",
+    "preparse-llm-backfill": "touch .env.local",
+    "parse-llm-backfill": "node --env-file=.env.local --import tsx src/db/llmBackfill.ts",
     "storage:init": "tsx src/storage/init.ts",
     "storage:probe-keys": "tsx src/storage/keyNormalizationProbe.ts",
     "predev": "touch .env.local",
@@ -17,6 +19,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
     "@aws-sdk/client-s3": "^3.1104.0",
     "@aws-sdk/s3-request-presigner": "^3.1104.0",
     "@hono/node-server": "^2.1.0",
