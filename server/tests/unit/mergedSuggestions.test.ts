@@ -65,26 +65,28 @@ describe("mergeSuggestions", () => {
     });
   });
 
-  it("serves LLM-only suggestions when the client sent no heuristic record", () => {
+  it("serves LLM-only vendor, date and tax number - but no money - when the client sent no heuristic record", () => {
     const merged = mergeSuggestions(null, llm());
-    expect(merged?.totalCents).toEqual({ value: 4553, source: "llm" });
     expect(merged?.vendor).toEqual({ value: "Llm Vendor (BCE)", source: "llm" });
     expect(merged?.purchasedAt).toEqual({
       value: "2026-07-11",
       source: "llm",
       disagreement: false,
     });
+    // No heuristic record means no money suggestions at all, even though
+    // the LLM offered every amount.
+    expect(merged?.totalCents).toEqual({ value: null, source: null });
+    expect(merged?.hstCents).toEqual({ value: null, source: null });
+    expect(merged?.subtotalCents).toEqual({ value: null, source: null });
   });
 
-  it("falls back to the other parser field-by-field when the ruled source found nothing", () => {
+  it("falls back to the other parser for vendor and tax number when the ruled source found nothing", () => {
     const merged = mergeSuggestions(
-      ocr({ totalCents: null, vendorTaxNumber: "105216170RT0001" }),
+      ocr({ vendorTaxNumber: "105216170RT0001" }),
       llm({ vendor: null, vendorTaxNumber: null }),
     );
-    // Ruled source (heuristic) empty, LLM has a value: the value is served
+    // Ruled source (LLM) empty, heuristic has a value: the value is served
     // and its provenance says so.
-    expect(merged?.totalCents).toEqual({ value: 4553, source: "llm" });
-    // Ruled source (LLM) empty, heuristic has a value.
     expect(merged?.vendor).toEqual({
       value: "HEURISTIC VENDOR",
       source: "heuristic",
@@ -93,6 +95,36 @@ describe("mergeSuggestions", () => {
       value: "105216170RT0001",
       source: "heuristic",
     });
+  });
+
+  it("serves heuristic-absent money fields as absent, never LLM-filled", () => {
+    // The 43.49 -> 3449 case: the heuristic missed the subtotal, the LLM
+    // offered a transposed one. The merge serves the absence.
+    const merged = mergeSuggestions(
+      ocr({ totalCents: null, hstCents: null, subtotalCents: null }),
+      llm(),
+    );
+    expect(merged?.totalCents).toEqual({ value: null, source: null });
+    expect(merged?.hstCents).toEqual({ value: null, source: null });
+    expect(merged?.subtotalCents).toEqual({ value: null, source: null });
+  });
+
+  it("never serves llm provenance on a money field, whatever the heuristic produced", () => {
+    const shapes = [
+      mergeSuggestions(ocr(), llm()),
+      mergeSuggestions(ocr({ totalCents: null }), llm()),
+      mergeSuggestions(ocr({ hstCents: null, subtotalCents: null }), llm()),
+      mergeSuggestions(null, llm()),
+    ];
+    for (const merged of shapes) {
+      for (const field of [
+        merged?.totalCents,
+        merged?.hstCents,
+        merged?.subtotalCents,
+      ]) {
+        expect(field?.source).not.toBe("llm");
+      }
+    }
   });
 
   it("states a both-sides-null field as a null value with null provenance", () => {

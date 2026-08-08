@@ -6,17 +6,25 @@ import type { OcrFieldSuggestions } from "./ocrSuggestions.js";
  * answer and neither implements the rule (spec §4.1: domain logic lives in
  * the backend or it gets written twice).
  *
- * - Amounts (total, HST, subtotal) come from the heuristic.
+ * - Amounts (total, HST, subtotal) come from the heuristic, and only the
+ *   heuristic - no fallthrough (amended Aug 8, 2026, after a live parse
+ *   served "SUBTOTAL 43.49" as 3449 cents with llm provenance). A
+ *   heuristic-absent amount is served absent, never filled from the LLM: an
+ *   absent amount is visible and costs one keystroke, while a wrong amount
+ *   that passes unflagged reaches an accountant. This governs what is
+ *   served, not what is recorded - the LLM's amounts stay in
+ *   llm_suggestions for parse-accuracy to score.
  * - Vendor and tax number come from the LLM.
  * - Date trusts neither source alone: when the two disagree, the value is
  *   flagged and the confirm screen keeps the field amber and marked as
  *   needing attention.
  *
- * When the ruled source has nothing and the other does, the other side's
- * value is served with its provenance stated: a suggestion the human can
- * reject beats an empty field, and constraint 2 (nothing saves unconfirmed)
- * is what makes that safe. Provenance is per field, never implied, so a
- * client can render "where this came from" without re-deriving the rule.
+ * For vendor, tax number and date, when the ruled source has nothing and
+ * the other does, the other side's value is served with its provenance
+ * stated: a suggestion the human can reject beats an empty field, and
+ * constraint 2 (nothing saves unconfirmed) is what makes that safe.
+ * Provenance is per field, never implied, so a client can render "where
+ * this came from" without re-deriving the rule.
  */
 
 export type SuggestionSource = "heuristic" | "llm" | "both";
@@ -60,24 +68,9 @@ export function mergeSuggestions(
   return {
     vendor: prefer("llm", llm?.vendor ?? null, "heuristic", ocr?.vendor ?? null),
     purchasedAt: mergeDate(ocr?.purchasedAt ?? null, llm?.purchasedAt ?? null),
-    totalCents: prefer(
-      "heuristic",
-      ocr?.totalCents ?? null,
-      "llm",
-      llm?.totalCents ?? null,
-    ),
-    hstCents: prefer(
-      "heuristic",
-      ocr?.hstCents ?? null,
-      "llm",
-      llm?.hstCents ?? null,
-    ),
-    subtotalCents: prefer(
-      "heuristic",
-      ocr?.subtotalCents ?? null,
-      "llm",
-      llm?.subtotalCents ?? null,
-    ),
+    totalCents: heuristicOnly(ocr?.totalCents ?? null),
+    hstCents: heuristicOnly(ocr?.hstCents ?? null),
+    subtotalCents: heuristicOnly(ocr?.subtotalCents ?? null),
     vendorTaxNumber: prefer(
       "llm",
       llm?.vendorTaxNumber ?? null,
@@ -85,6 +78,18 @@ export function mergeSuggestions(
       ocr?.vendorTaxNumber ?? null,
     ),
   };
+}
+
+/**
+ * The money fields' merge: the heuristic or nothing. The one-sided prefer()
+ * shape is deliberate - routing money through prefer() with a null other
+ * side would invite a future "fill it in" edit, and this function's name is
+ * the rule.
+ */
+function heuristicOnly<T>(value: T | null): MergedSuggestion<T> {
+  return value !== null
+    ? { value, source: "heuristic" }
+    : { value: null, source: null };
 }
 
 function prefer<T>(

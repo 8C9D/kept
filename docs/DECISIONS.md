@@ -4,6 +4,18 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-08 - Merge correction (the owner): money fields have no fallthrough
+
+**For the money fields - total, subtotal, HST - the heuristic is the only source the merge serves: if the heuristic has no value, the field is absent, never filled from `llm_suggestions`.**
+Fallthrough is unchanged for vendor, tax number and date.
+Rejected: the fallthrough semantic the wiring shipped (the entry below), under which a heuristic-absent amount was served from the LLM with `llm` provenance.
+Why the original ruling did not cover this: "amounts from the heuristic" rested on both paths scoring 100% on money, which only covers cases where both produced a value and says nothing about the LLM on amounts the heuristic misses - exactly when fallthrough fires.
+The first wild instance, on clean input, was a digit transposition: "SUBTOTAL 43.49" parsed as 3449 cents and served with `llm` provenance, because the heuristic found no subtotal to outrank it (the live-run evidence in the entry below).
+§7.2's arithmetic check is only a partial net: it needs all three of subtotal, HST and total present, so a receipt missing two of them gets no check at all.
+An absent amount is visible and costs one keystroke; a wrong amount that passes unflagged reaches an accountant.
+**The LLM's money values still get stored in `llm_suggestions` - this changes what the merge serves, not what is recorded - and `parse-accuracy` keeps scoring them, since that comparison is how this ruling gets revisited on more data.**
+Checked at the time of the change, data untouched: two receipts in the dev database carried an llm-sourced amount through the merge, both synthetic-user rows, one of them the soft-deleted 3449 receipt itself; no real-user receipt was affected.
+
 ## 2026-08-08 - LLM parse wired in: sweep + domain-layer merge
 
 **The server-side parse runs as a sweep over rows, kicked at startup, after captures, and on a long interval - not inline in the create route.**

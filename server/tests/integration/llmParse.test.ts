@@ -374,6 +374,12 @@ describe("the capture routes kick the sweep", () => {
       },
       { timeout: 5000 },
     );
+    // The record keeps every LLM amount - the money rule governs what the
+    // merge serves, not what is recorded, so parse-accuracy can keep
+    // scoring the path.
+    expect((await storedRecord(created.id))?.suggestions).toEqual(
+      llmValues({ purchasedAt: "2026-07-11" }),
+    );
 
     const detail = await harness.request(
       token,
@@ -384,8 +390,9 @@ describe("the capture routes kick the sweep", () => {
       suggestions: Record<string, unknown>;
       ocrSuggestions: Record<string, unknown>;
     };
-    // The §7.3 merge, rendered by the domain layer: amounts heuristic,
-    // vendor and tax number LLM, and the disagreeing date flagged.
+    // The §7.3 merge, rendered by the domain layer: amounts from the
+    // heuristic only, vendor and tax number LLM, the disagreeing date
+    // flagged.
     expect(detailBody.suggestions.vendor).toEqual({
       value: "Fancy Vendor (BCE)",
       source: "llm",
@@ -394,9 +401,15 @@ describe("the capture routes kick the sweep", () => {
       value: 4554,
       source: "heuristic",
     });
+    // The heuristic found no HST or subtotal; the LLM's amounts are stored
+    // but never served - the fields come back absent.
     expect(detailBody.suggestions.hstCents).toEqual({
-      value: 204,
-      source: "llm",
+      value: null,
+      source: null,
+    });
+    expect(detailBody.suggestions.subtotalCents).toEqual({
+      value: null,
+      source: null,
     });
     expect(detailBody.suggestions.vendorTaxNumber).toEqual({
       value: "R105216170",
