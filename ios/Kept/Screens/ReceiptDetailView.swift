@@ -1,8 +1,10 @@
 import SwiftUI
 
-/// One receipt, read-only this wave: the image (fetched via its presigned
-/// URL) and every field, in the spec §7.2 order. Editing arrives with the
-/// confirm screen in wave 4.
+/// One receipt: the image (fetched via its presigned URL) and every field,
+/// in the spec §7.2 order. The fields here are read-only by design -
+/// editing a pending receipt goes through "Confirm this receipt" below,
+/// which presents the one confirm form (§7.2), so this screen has no
+/// editable field of its own and inherits the form's behaviour whole.
 struct ReceiptDetailView: View {
     @StateObject private var model: ReceiptDetailModel
     private let receipt: Receipt

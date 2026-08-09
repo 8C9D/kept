@@ -13,7 +13,7 @@ struct ConfirmReceiptView: View {
     let onSaved: () async -> Void
     let onSetAside: () async -> Void
 
-    @FocusState private var focusedField: ConfirmReceiptModel.SuggestedField?
+    @FocusState private var focusedField: ConfirmReceiptModel.EditableField?
     @State private var showZoomedImage = false
 
     var body: some View {
@@ -25,6 +25,14 @@ struct ConfirmReceiptView: View {
             optionalFieldsSection
             saveSection
         }
+        // Any scroll puts the keyboard away (§10A.1's dismissal rule), so
+        // the Save button is never left under it: reaching Save is a
+        // scroll, and the scroll itself is what uncovers it. `.immediately`
+        // rather than `.interactively` because the interactive variant only
+        // pays out if the drag starts over the keyboard - another gesture
+        // to know about, which is the defect being fixed.
+        .scrollDismissesKeyboard(.immediately)
+        .background(DismissesKeyboardOnOutsideTap())
         .navigationTitle(counterTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -33,12 +41,23 @@ struct ConfirmReceiptView: View {
                     Task { await onSetAside() }
                 }
             }
+            ToolbarItemGroup(placement: .keyboard) {
+                // Only over the keyboards with no exit of their own - the
+                // decimal pads and notes, whose return key inserts a
+                // newline. The single-line text fields' return key
+                // dismisses, so a bar there would only eat form height.
+                if focusedField?.needsDoneButton == true {
+                    Spacer()
+                    Button("Done") { focusedField = nil }
+                        .fontWeight(.semibold)
+                }
+            }
         }
         .onChange(of: focusedField) { _, newFocus in
             // Focusing a field is looking at it: the amber clears whether
             // or not the person then edits (spec §10A.1).
-            if let newFocus {
-                model.markTouched(newFocus)
+            if let suggestion = newFocus?.suggestion {
+                model.markTouched(suggestion)
             }
         }
         .sheet(isPresented: $showZoomedImage) {
@@ -191,7 +210,7 @@ struct ConfirmReceiptView: View {
             SuggestedFieldRow(
                 label: "Other tax",
                 text: $model.otherTaxText,
-                field: nil,
+                field: .otherTax,
                 focus: $focusedField,
                 isUnreviewed: false,
                 moneyInput: model.otherTaxInput
@@ -223,16 +242,23 @@ struct ConfirmReceiptView: View {
 
     private var optionalFieldsSection: some View {
         Section {
+            // These three carry no suggestion and so no amber, but they
+            // still take a focus value: the toolbar decides what to offer
+            // from the focused field, and a field outside that enum would
+            // read as "nothing is focused" while its keyboard was up.
             LabeledContent("Category") {
                 TextField("None", text: $model.categoryText)
                     .multilineTextAlignment(.trailing)
+                    .focused($focusedField, equals: .category)
             }
             LabeledContent("Payment") {
                 TextField("None", text: $model.paymentMethodText)
                     .multilineTextAlignment(.trailing)
+                    .focused($focusedField, equals: .paymentMethod)
             }
             TextField("Notes", text: $model.notesText, axis: .vertical)
                 .lineLimit(2...5)
+                .focused($focusedField, equals: .notes)
         }
     }
 

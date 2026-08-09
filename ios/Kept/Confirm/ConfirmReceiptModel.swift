@@ -68,6 +68,57 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         case total, date, vendor, hst, subtotal, taxNumber
     }
 
+    /// Every field on the form that raises a keyboard, which the view's
+    /// focus runs on instead of SuggestedField. Two things needed the
+    /// wider set: "other tax" carries no suggestion and so had no focus
+    /// value at all - leaving one decimal pad nothing could close - and
+    /// the keyboard toolbar has to know which keyboard is up before it can
+    /// offer a way out of it. The date is deliberately absent: a
+    /// DatePicker raises no keyboard.
+    enum EditableField: Hashable, CaseIterable {
+        case total, vendor, hst, subtotal, otherTax, taxNumber
+        case category, paymentMethod, notes
+
+        /// The money fields, which take a decimal pad.
+        var usesDecimalPad: Bool {
+            switch self {
+            case .total, .hst, .subtotal, .otherTax:
+                return true
+            case .vendor, .taxNumber, .category, .paymentMethod, .notes:
+                return false
+            }
+        }
+
+        /// The keyboards with no exit of their own, which the toolbar's
+        /// Done button is there to give one: a decimal pad has no return
+        /// key at all, and notes is a vertical-axis field whose return key
+        /// inserts a newline. A separate question from the keyboard type -
+        /// the single-line text fields' return key dismisses, so an
+        /// accessory bar there would only cost form height.
+        var needsDoneButton: Bool {
+            switch self {
+            case .total, .hst, .subtotal, .otherTax, .notes:
+                return true
+            case .vendor, .taxNumber, .category, .paymentMethod:
+                return false
+            }
+        }
+
+        /// The suggestion this field carries, if any. Focusing a field is
+        /// looking at it, which clears that amber permanently (§10A.1);
+        /// fields returning nil were never prefilled by a parser.
+        var suggestion: SuggestedField? {
+            switch self {
+            case .total: return .total
+            case .vendor: return .vendor
+            case .hst: return .hst
+            case .subtotal: return .subtotal
+            case .taxNumber: return .taxNumber
+            case .otherTax, .category, .paymentMethod, .notes: return nil
+            }
+        }
+    }
+
     /// The server-side receipt this form edits, when there is one; nil for
     /// a capture being confirmed before it has uploaded.
     let receiptId: UUID?

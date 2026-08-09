@@ -530,6 +530,13 @@ These decisions close §10A's "visual design is an open gap" for the confirm scr
 - **Save is disabled until business or personal is chosen**, with the reason stated below the button rather than left to be inferred. This is the one place a disabled control is correct, because it is what enforces `is_business` having no default (§5.2).
 - **Absent values state their absence** - a missing tax number reads "Not found", not an empty field. A blank looks like a bug; a stated absence looks like a fact.
 - **No success modal after saving.** Return straight to Home. A confirmation step on a five-second task is friction pretending to be care.
+- *(Aug 8, 2026 - device pass.)* **The keyboard has three ways out, and Save is never under it.**
+**No field may raise a keyboard the person cannot put away without knowing a gesture** - editing a money field last was leaving the Save button covered with no obvious way back, on a screen whose whole brief is a five-second task ending in one tap.
+**(1) Every keyboard with no exit of its own carries a toolbar with a Done button**: the four money fields (total, HST, subtotal, other tax), whose decimal pad has no return key, and notes, whose return key inserts a newline.
+The single-line text fields are left without one - their return key already dismisses, and an accessory bar they do not need costs form height.
+**(2) A tap anywhere that is not a text field dismisses**, and **(3) any scroll of the form dismisses**.
+Dismiss-on-scroll is also the answer to Save sitting under the keyboard: reaching Save is a scroll, and the scroll is what uncovers it - chosen over insetting the form, which would keep a keyboard-height gap on screen and still leave the person reaching past the pad.
+The focused field itself stays visible above the keyboard.
 - *(Aug 8, 2026 - added by §7.3's merge rule; rendered by the built screen the same day.)* **A date the two parsers disagree on stays amber and carries an inline note saying the two reads differ - the arithmetic warning's exact treatment: same amber, inside the field, never red, a prompt to look rather than a rule.** Touching the field clears the tint and the note together - touched means a human looked and decided; there is no separate dismissal and nothing persists. **Provenance is not rendered anywhere on this screen** - amber already means unverified, and a source badge would ask the user to adjudicate parser internals; it stays in the API for diagnostics. The amber semantics are unchanged for everything else: LLM-sourced values are suggestions like any other, amber until touched, no trust shortcut.
 
 ## 10B · Security, production readiness, and the rest of the lifecycle

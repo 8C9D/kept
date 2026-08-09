@@ -276,6 +276,62 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertEqual(model.saveBlocker, "HST isn't a valid amount.")
     }
 
+    // MARK: - Keyboard fields (§10A.1's dismissal rule)
+
+    func testTheDecimalPadFieldsAreExactlyTheFourMoneyFields() {
+        let decimalPad = ConfirmReceiptModel.EditableField.allCases
+            .filter(\.usesDecimalPad)
+        XCTAssertEqual(
+            Set(decimalPad),
+            [.total, .hst, .subtotal, .otherTax]
+        )
+    }
+
+    /// What the keyboard toolbar keys off - a different question from the
+    /// keyboard type. Done is offered to every keyboard with no exit of
+    /// its own: the four decimal pads, which have no return key, plus
+    /// notes, whose return key inserts a newline. A field falling out of
+    /// this set would ship a keyboard nothing inside it can close - the
+    /// device defect this pins - and the view's `if` around the toolbar is
+    /// not itself executed by any test (§10.2).
+    func testDoneIsOfferedToEveryKeyboardWithNoExitOfItsOwn() {
+        let needsDone = ConfirmReceiptModel.EditableField.allCases
+            .filter(\.needsDoneButton)
+        XCTAssertEqual(
+            Set(needsDone),
+            [.total, .hst, .subtotal, .otherTax, .notes]
+        )
+    }
+
+    /// Other tax gained a focus value so its decimal pad can be closed;
+    /// it must not have gained an amber tint with it - it carries no
+    /// suggestion and never has (§7.2's field list).
+    func testFocusMapsToTheSuggestionItClearsAndNoOther() {
+        XCTAssertEqual(ConfirmReceiptModel.EditableField.total.suggestion, .total)
+        XCTAssertEqual(ConfirmReceiptModel.EditableField.vendor.suggestion, .vendor)
+        XCTAssertEqual(ConfirmReceiptModel.EditableField.hst.suggestion, .hst)
+        XCTAssertEqual(ConfirmReceiptModel.EditableField.subtotal.suggestion, .subtotal)
+        XCTAssertEqual(ConfirmReceiptModel.EditableField.taxNumber.suggestion, .taxNumber)
+        XCTAssertNil(ConfirmReceiptModel.EditableField.otherTax.suggestion)
+        XCTAssertNil(ConfirmReceiptModel.EditableField.category.suggestion)
+        XCTAssertNil(ConfirmReceiptModel.EditableField.paymentMethod.suggestion)
+        XCTAssertNil(ConfirmReceiptModel.EditableField.notes.suggestion)
+    }
+
+    /// Every amber-carrying field is still reachable by focus - except the
+    /// date, which is a DatePicker and clears its tint on tap instead. A
+    /// suggestion left unreachable would sit amber forever and hold the
+    /// header counter above zero on a fully checked receipt.
+    func testEverySuggestionExceptTheDateIsReachableByFocus() {
+        let reachable = Set(
+            ConfirmReceiptModel.EditableField.allCases.compactMap(\.suggestion)
+        )
+        XCTAssertEqual(
+            reachable,
+            Set(ConfirmReceiptModel.SuggestedField.allCases).subtracting([.date])
+        )
+    }
+
     // MARK: - Saving
 
     func testSavePatchesEveryFieldAndConfirms() async {

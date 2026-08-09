@@ -11,10 +11,13 @@ import SwiftUI
 struct SuggestedFieldRow: View {
     let label: String
     @Binding var text: String
-    /// Nil for fields that can never carry a suggestion (other tax): they
-    /// take no focus reporting and no tint.
-    let field: ConfirmReceiptModel.SuggestedField?
-    var focus: FocusState<ConfirmReceiptModel.SuggestedField?>.Binding
+    /// Every row is focusable, including ones carrying no suggestion
+    /// (other tax): focus is what the keyboard toolbar and the tint both
+    /// read, and a money field with no focus value is a decimal pad the
+    /// Done button cannot close. Whether the tint moves is decided by the
+    /// field's `suggestion`, not by whether it can take focus.
+    let field: ConfirmReceiptModel.EditableField
+    var focus: FocusState<ConfirmReceiptModel.EditableField?>.Binding
     let isUnreviewed: Bool
     /// Set for money fields; drives the keyboard, the digit styling, and
     /// the inline invalid-amount nudge.
@@ -23,7 +26,12 @@ struct SuggestedFieldRow: View {
     var body: some View {
         LabeledContent(label) {
             VStack(alignment: .trailing, spacing: 2) {
-                focusableTextField
+                TextField("Not found", text: $text)
+                    .multilineTextAlignment(.trailing)
+                    .autocorrectionDisabled()
+                    .keyboardType(field.usesDecimalPad ? .decimalPad : .default)
+                    .monospacedDigit()
+                    .focused(focus, equals: field)
                 if moneyInput == .invalid {
                     Text("Not a valid amount")
                         .font(.caption2)
@@ -32,20 +40,6 @@ struct SuggestedFieldRow: View {
             }
         }
         .listRowBackground(isUnreviewed ? Color.suggestionAmber : nil)
-    }
-
-    @ViewBuilder
-    private var focusableTextField: some View {
-        let textField = TextField("Not found", text: $text)
-            .multilineTextAlignment(.trailing)
-            .autocorrectionDisabled()
-            .keyboardType(moneyInput == nil ? .default : .decimalPad)
-            .monospacedDigit()
-        if let field {
-            textField.focused(focus, equals: field)
-        } else {
-            textField
-        }
     }
 }
 

@@ -4,6 +4,40 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-08 - The confirm screen's keyboard has three ways out
+
+**No field may raise a keyboard the person cannot put away without knowing a gesture.**
+The defect (device pass): tapping HST - or any money field - raises a decimal pad, which has no return key and had no toolbar, so there was no visible exit; the pad also covers the Save button, and the everyday order of work leaves a money field focused last, so a person who had finished the receipt could not reach the one tap the screen exists for.
+On a screen whose brief is a five-second task ending in one tap (§7.2, §10A.1), an undocumented gesture is the whole task failing.
+
+**Three dismissals, deliberately overlapping.**
+**(1) A keyboard toolbar with a Done button on every keyboard that has no exit of its own** - the four money fields (total, HST, subtotal, other tax), whose decimal pad has no return key, and notes, whose return key inserts a newline because it is a vertical-axis field.
+The rule was first scoped to the numeric fields on the premise that text keyboards have a return key; that premise simply fails for notes, so the property is `needsDoneButton` - which keyboard can be closed from inside itself - and not `usesDecimalPad`, which is a question about the keyboard type and stays its own switch.
+Still not offered over the single-line text fields: their return key does dismiss, and an accessory bar they do not need costs form height on the screen that can least afford it.
+**(2) A tap anywhere that is not a text field.**
+**(3) Any scroll of the form** (`.immediately`).
+Rejected for (3): `.interactively`, which only pays out when the drag starts over the keyboard - another gesture to know about, which is the defect, not the fix.
+
+**Save is reached by dismissing on scroll, not by insetting the form.**
+Reaching Save is a scroll, and that scroll is what uncovers it; the focused field's own visibility is already handled by the scroll view's keyboard avoidance.
+Rejected: adding a bottom inset so Save clears the keyboard - it keeps a keyboard-height hole on screen while typing, and still asks the person to reach past the pad to a button sitting above it.
+
+**Tap-to-dismiss is a UIKit gesture recognizer, not a SwiftUI `TapGesture`.**
+A `TapGesture` on the Form races the tapped field's own focus: moving from one money field to the next would sometimes dismiss instead of moving, and a tap inside the focused field to reposition the cursor would close the keyboard outright.
+A recognizer can be asked per touch whether the touch landed on a text input and stand down when it did, which is the actual rule; it sets `cancelsTouchesInView = false`, so it changes nothing else on the screen, and it comes off the window with the view.
+Kept to one small file so §10.2's untestable surface stays thin.
+
+**"Other tax" gained a focus value and did not gain an amber tint.**
+It carries no suggestion (§7.2) and never has, but as the one money field with no focus value it was a decimal pad the Done button could not have closed; focus and tint are now separate questions - `EditableField.usesDecimalPad` and `EditableField.suggestion` - rather than one enum doing both jobs.
+
+**Checked, nothing to fix: the receipt detail screen.**
+Its fields are read-only (`FieldRow` renders text), and its "Confirm this receipt" button presents the same `ConfirmReceiptView`, so it inherits all three dismissals.
+The only other text input in the app is the DEBUG-only server-settings field, whose URL keyboard has a return key and which is compiled out of shipped builds.
+
+⚠ Test honesty (§10.2): the four tests added pin the *wiring* - that the decimal-pad set is exactly the four money fields, that Done is offered to exactly those four plus notes, that each focusable field maps to the suggestion it clears and no other, and that every amber-carrying field except the date is still reachable by focus.
+None of them execute the toolbar, the recognizer, or the scroll modifier: deleting `.scrollDismissesKeyboard`, the `.background`, or the toolbar group leaves the suite green.
+Only a device pass confirms the keyboard actually goes away.
+
 ## 2026-08-08 - Pending receipts render the served merge on every screen
 
 **On a pending receipt, the Home list row and the receipt detail screen render the §7.3 merge by the confirm screen's prefill rule: a served suggestion outranks the row's copy of the field, and the row fills only fields no suggestion covers.**
