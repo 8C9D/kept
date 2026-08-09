@@ -8,6 +8,19 @@ struct RootView: View {
     let api: APIClient
 
     var body: some View {
+        #if DEBUG
+        if KeyboardExitUITestHarness.isRequested {
+            KeyboardExitUITestHarness()
+        } else {
+            signedInOrOut
+        }
+        #else
+        signedInOrOut
+        #endif
+    }
+
+    @ViewBuilder
+    private var signedInOrOut: some View {
         switch session.state {
         case .signedOut, .signingIn:
             SignInView()

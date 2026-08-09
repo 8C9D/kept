@@ -4,6 +4,40 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-09 - The Done button is ours, because SwiftUI's never arrived
+
+**`ToolbarItemGroup(placement: .keyboard)` installs nothing through the confirm screen's presentation.**
+The Aug 8 entry below called the Done button built; it was not, and the device said so twice before the reason was found.
+Established on a physical iPhone running iOS 26.x, entered the way a person enters it - Home → pending row → detail → "Confirm this receipt", which presents the form in a `fullScreenCover` (`ReceiptDetailView`).
+Proven three ways over fifteen focus events across five fields: the responder had no `inputAccessoryView`, no `inputAccessoryViewController`, and there was no host view anywhere in the `UITextEffectsWindow` - whose container heights, 318 for the decimal pads and 345 for the alphabetic keyboards, were bare keyboard heights with nothing added.
+`@FocusState` was not the problem and was ruled out separately: the amber cleared on every field touched, and the amber clears off the same `focusedField` the toolbar condition read.
+
+**Whether a host is installed at all is not deterministic across sessions**, which is why this took three runs to see.
+One device run found `RootUIView (0, 0, 430, 0)` - a host present and collapsed to zero height; two later runs on the same build found no host at all.
+Recorded as a finding rather than resolved, because two contradictory observations of one binary is itself the finding.
+The mechanism turned up later, on the simulator: **SwiftUI installs an empty zero-size `RootUIView` as `inputAccessoryView` whether or not any keyboard toolbar is declared**, and overwrites the property again on every body update.
+So "the field already has an accessory view" is always true and says nothing, and whether that empty host is still attached when observed is a race.
+From the thumb's point of view the two readings are the same defect: no Done button with hittable area, ever.
+
+**The bar is now hung on the first responder in UIKit, and it is self-healing rather than install-once.**
+The first responder was the one thing reliable in every observation - found every time, in the recognizer's window every time, always the right field - so that is what the bar attaches to.
+It is re-asserted on begin-editing, on every text change, and on keyboard frame changes, because SwiftUI puts its empty host back on each body update; the bar is only re-presented when it is showing for a different field or is off screen, so a keystroke does not flicker the keyboard.
+Rejected: making the toolbar group's content unconditional. That is the same idea a third time - it corrects the *inputs* to a group whose output is never installed, which is exactly what 54286b6 did and why it did not work.
+This keeps the file's existing premise, stated there since the tap recognizer landed: this screen's keyboard reality is expressed in UIKit because SwiftUI cannot express it here.
+
+**`EditableField.needsDoneButton` is deleted; the question is read off the keyboard the field raises.**
+A numeric pad has no return key and a text view's return key inserts a newline - both are properties of the keyboard, not facts to restate per field.
+This is the part that matters: **the enum had to be hand-synced with the view, and it drifted.**
+`54286b6` exists because other tax shipped a decimal pad nothing could close - it had no focus value, so the toolbar had nothing to key off. A list maintained by hand is a list that will be wrong again the next time a field is added.
+`usesDecimalPad` stays, because the view still has to choose a keyboard.
+
+**Verification, because this class of bug is invisible to the suite.**
+A `KeptUITests` target now exists - the first in the project - asserting `isHittable` on the Done button for all five keyboards with no exit, that pressing it dismisses, that the bar survives typing, and that the single-line fields still get no bar.
+`isHittable` is the assertion that matters: it is false both for an absent bar and for a 430×0 one, and true only when a person could press it.
+A DEBUG-only acceptance check logs PASS/FAIL per focus on device, and **`-KeptZeroHeightDoneBar` is a negative control that installs the bar collapsed** - the exact shape that read as success - so the check is seen to fail rather than assumed to work. It does: 15 PASS with a 402×44 bar, 2 FAIL under the control.
+⚠ **Green CI is not proof.** The UI tests run on a 26.3.1 simulator; the defect was on 26.5.2 hardware, and the same build behaved differently between sessions there. The device matrix - cold launch, warm keyboard, background round trip, cover reopened, and both the detail and capture entry paths - stays manual.
+⚠ **One thing the check no longer asserts**, stated rather than quietly dropped: that `inputAccessoryView` still points at our bar at an arbitrary instant. It often does not, because SwiftUI overwrites it continuously. The invariant kept is that the bar on screen is ours and pressable, and that the property is restored before UIKit next queries it; a clobber is still logged as a note rather than hidden.
+
 ## 2026-08-08 - The confirm screen's keyboard has three ways out
 
 **No field may raise a keyboard the person cannot put away without knowing a gesture.**

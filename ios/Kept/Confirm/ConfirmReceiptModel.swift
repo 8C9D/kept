@@ -89,21 +89,6 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             }
         }
 
-        /// The keyboards with no exit of their own, which the toolbar's
-        /// Done button is there to give one: a decimal pad has no return
-        /// key at all, and notes is a vertical-axis field whose return key
-        /// inserts a newline. A separate question from the keyboard type -
-        /// the single-line text fields' return key dismisses, so an
-        /// accessory bar there would only cost form height.
-        var needsDoneButton: Bool {
-            switch self {
-            case .total, .hst, .subtotal, .otherTax, .notes:
-                return true
-            case .vendor, .taxNumber, .category, .paymentMethod:
-                return false
-            }
-        }
-
         /// The suggestion this field carries, if any. Focusing a field is
         /// looking at it, which clears that amber permanently (§10A.1);
         /// fields returning nil were never prefilled by a parser.

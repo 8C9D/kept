@@ -38,6 +38,16 @@
                ReferencedContainer = "container:Kept.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AA0000000000000000000060"
+               BuildableName = "KeptUITests.xctest"
+               BlueprintName = "KeptUITests"
+               ReferencedContainer = "container:Kept.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

@@ -32,6 +32,7 @@ struct SuggestedFieldRow: View {
                     .keyboardType(field.usesDecimalPad ? .decimalPad : .default)
                     .monospacedDigit()
                     .focused(focus, equals: field)
+                    .accessibilityIdentifier("field.\(label)")
                 if moneyInput == .invalid {
                     Text("Not a valid amount")
                         .font(.caption2)

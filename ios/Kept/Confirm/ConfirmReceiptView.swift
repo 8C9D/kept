@@ -32,24 +32,16 @@ struct ConfirmReceiptView: View {
         // pays out if the drag starts over the keyboard - another gesture
         // to know about, which is the defect being fixed.
         .scrollDismissesKeyboard(.immediately)
-        .background(DismissesKeyboardOnOutsideTap())
+        // Both the Done button and tap-to-dismiss. The Done button was a
+        // `ToolbarItemGroup(placement: .keyboard)` here until the device
+        // proved it installs nothing through this screen's presentation.
+        .background(ProvidesKeyboardExits())
         .navigationTitle(counterTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Later") {
                     Task { await onSetAside() }
-                }
-            }
-            ToolbarItemGroup(placement: .keyboard) {
-                // Only over the keyboards with no exit of their own - the
-                // decimal pads and notes, whose return key inserts a
-                // newline. The single-line text fields' return key
-                // dismisses, so a bar there would only eat form height.
-                if focusedField?.needsDoneButton == true {
-                    Spacer()
-                    Button("Done") { focusedField = nil }
-                        .fontWeight(.semibold)
                 }
             }
         }
@@ -121,6 +113,7 @@ struct ConfirmReceiptView: View {
                         .font(.largeTitle.bold())
                         .monospacedDigit()
                         .focused($focusedField, equals: .total)
+                        .accessibilityIdentifier("field.Total")
                 }
                 if model.showsArithmeticWarning {
                     // Amber, not red, and inside the card: a prompt to
@@ -259,6 +252,7 @@ struct ConfirmReceiptView: View {
             TextField("Notes", text: $model.notesText, axis: .vertical)
                 .lineLimit(2...5)
                 .focused($focusedField, equals: .notes)
+                .accessibilityIdentifier("field.Notes")
         }
     }
 

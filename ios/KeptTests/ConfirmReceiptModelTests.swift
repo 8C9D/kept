@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 @testable import Kept
 
@@ -287,16 +288,41 @@ final class ConfirmReceiptModelTests: XCTestCase {
         )
     }
 
-    /// What the keyboard toolbar keys off - a different question from the
-    /// keyboard type. Done is offered to every keyboard with no exit of
-    /// its own: the four decimal pads, which have no return key, plus
-    /// notes, whose return key inserts a newline. A field falling out of
-    /// this set would ship a keyboard nothing inside it can close - the
-    /// device defect this pins - and the view's `if` around the toolbar is
-    /// not itself executed by any test (§10.2).
+    /// What the Done bar keys off, now read from the keyboard the field
+    /// actually raises rather than from a hand-synced enum: a numeric pad
+    /// has no return key, and a text view's return key inserts a newline.
+    func testAKeyboardWithNoReturnKeyOfItsOwnIsRecognisedFromTheFieldItself() {
+        let decimalPad = UITextField()
+        decimalPad.keyboardType = .decimalPad
+        XCTAssertTrue(decimalPad.keyboardHasNoExitOfItsOwn)
+
+        let singleLineText = UITextField()
+        singleLineText.keyboardType = .default
+        XCTAssertFalse(singleLineText.keyboardHasNoExitOfItsOwn)
+
+        XCTAssertTrue(UITextView().keyboardHasNoExitOfItsOwn)
+    }
+
+    /// The same question asked of the confirm screen's own fields, through
+    /// the keyboard each one raises: the four decimal pads plus notes, and
+    /// nothing else. A field falling out of this set would ship a keyboard
+    /// nothing inside it can close - the device defect this pins.
+    ///
+    /// This builds the keyboard the way `SuggestedFieldRow` does rather
+    /// than reading a property off the enum, because the property is the
+    /// thing that drifted: other tax shipped with a decimal pad nothing
+    /// could close (54286b6). Still a wiring test - it does not execute
+    /// the bar, which lives in UIKit and is covered by `KeptUITests` and
+    /// the device pass (§10.2).
     func testDoneIsOfferedToEveryKeyboardWithNoExitOfItsOwn() {
+        func keyboardRaised(by field: ConfirmReceiptModel.EditableField) -> UIView {
+            guard field != .notes else { return UITextView() }
+            let textField = UITextField()
+            textField.keyboardType = field.usesDecimalPad ? .decimalPad : .default
+            return textField
+        }
         let needsDone = ConfirmReceiptModel.EditableField.allCases
-            .filter(\.needsDoneButton)
+            .filter { keyboardRaised(by: $0).keyboardHasNoExitOfItsOwn }
         XCTAssertEqual(
             Set(needsDone),
             [.total, .hst, .subtotal, .otherTax, .notes]
