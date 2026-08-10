@@ -122,7 +122,22 @@ Emitted 'error' event on BoundPool instance at:
 
 *Fix.* Attach `pool.on("error", ...)` in `createDb`, logging through `errorSummary` and **not** exiting. `pg` discards the broken client and the next checkout opens a fresh connection; that is the documented contract.
 
-*Blast radius.* One function, `src/db/client.ts`. Adds a listener; changes no query, no response, no schema. Every caller of `createDb` (server, tests, dev scripts, restore verifier) gains it.
+*Blast radius.* One function, `src/db/client.ts`. Adds a listener; changes no query, no response, no schema. Every caller of **`createDb`** gains it - the server, the test harness, and `verifyRestore`. ⚠ **Corrected after REVIEW-1 F-2:** an earlier draft of this line said "dev scripts" too, which overstates it. Five scripts construct `new Pool` directly and are untouched by this fix - see NEXT ROUND N-1.
+
+*Status: RESOLVED.* Artifact, against the real entrypoint started the real way, after the fix:
+
+```
+authenticated GET /api/me -> 200
+t <- pg_terminate_backend on the idle connection
+alive AFTER terminate: '30928'  (process survived)
+next request after the kill -> 200
+
+Idle database connection error: DatabaseError [message and detail withheld] code=57P01 routine=ProcessInterrupts
+```
+
+One further consequence, found while falsifying and worth stating: the **pre-fix** crash dump printed the pg client's `connectionParameters`, including `password`, to stdout. In development that is `kept`; in production it would be the Neon password. The fix removes that as a side effect of never reaching the uncaught-exception printer, and the redacted line above carries no credential.
+
+Three tests, `tests/integration/dbClient.test.ts`, all three falsified: with the listener deleted, all three fail. The first asserts across a **process boundary** because vitest intercepts the uncaught exception, so an in-process "the process survived" assertion passes either way - which this test's own first draft did, and which is recorded here rather than quietly corrected.
 
 ---
 
@@ -332,7 +347,7 @@ Filled in as passes complete. The frozen work list is the P0/P1 set surviving Re
 
 | id | severity | status |
 |---|---|---|
-| PR-1 | P1 | OPEN |
+| PR-1 | P1 | **RESOLVED** - artifact at the finding |
 | PR-2 | P1 | OPEN |
 | PR-3 | P1 | OPEN |
 | R-1 | P1 | OPEN (diagnosability half only; existence check DEFERRED) |
@@ -342,6 +357,7 @@ Filled in as passes complete. The frozen work list is the P0/P1 set surviving Re
 
 ## 8 · NEXT ROUND
 
-Populated by findings discovered after Review 0 - by any reviewer or by the builder - which are recorded with full evidence and **not** fixed in this run.
+Findings discovered after Review 0 - by any reviewer or by the builder - recorded with full evidence and **not** fixed in this run. The work list froze at Review 0; these are the next one's input.
 
-*(empty at Stage 0)*
+**N-1 · P2 · Five dev scripts build their own `Pool` and still carry PR-1's defect** *(REVIEW-1 F-2)*
+`src/db/seed.ts:20`, `src/db/claim.ts:25`, `src/db/llmParseProbe.ts:56`, `src/db/llmPromptReparse.ts:53`, `src/db/parseAccuracyReport.ts:26` each call `new Pool(...)` directly rather than `createDb`, so none of them gained the error listener. The consequence is far smaller than PR-1's - these are short-lived operator scripts, not the serving process, and a crash mid-run is visible to the person who typed the command - which is why it is P2 and why it is here rather than on the frozen list. The systematic close is to route them through `createDb`, which is a refactor no frozen finding cites.

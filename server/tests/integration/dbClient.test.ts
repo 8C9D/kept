@@ -20,10 +20,15 @@ const CHILD_SCRIPT = fileURLToPath(
  * The pool's error listener, which is the only thing standing between a
  * routine server-side connection close and the process exiting.
  *
- * ⚠ These tests fail by killing the worker rather than by reporting, if the
- * listener is removed - which is exactly the defect's real signature. An
- * EventEmitter 'error' with no listener is an uncaught exception, so there is
- * no gentler way to assert this that would still be about the real behaviour.
+ * ⚠ The thing that makes this hard to test honestly is that vitest catches the
+ * uncaught exception the missing listener produces, and reports it *beside*
+ * the test instead of killing the worker. So an in-process assertion of "the
+ * process survived" passes either way. That is not a supposition: this file's
+ * first draft asserted exactly that and survived its own falsification.
+ * Hence the child process in `helpers/poolSurvivalChild.ts` - an exit code
+ * read from outside is the only witness that cannot be intercepted.
+ *
+ * All three tests below were run with the listener deleted and all three fail.
  */
 describe("database pool error handling", () => {
   let pools: ReturnType<typeof createDb>[] = [];
@@ -78,16 +83,18 @@ describe("database pool error handling", () => {
       });
     });
 
+    // The child's own backend, named by the child, rather than "whatever is
+    // idle on this database" - which a stray psql or a leaked pool from an
+    // earlier crashed run would also satisfy.
+    const childBackendPid = Number(/READY (\d+)/.exec(stdout)?.[1]);
+    expect(Number.isInteger(childBackendPid)).toBe(true);
+
     const killer = open();
-    const terminated = await killer.db.execute(sql`
-      select pg_terminate_backend(pid)
-      from pg_stat_activity
-      where datname = current_database()
-        and pid <> pg_backend_pid()
-        and state = 'idle'
+    const terminated = await killer.db.execute<{ terminated: boolean }>(sql`
+      select pg_terminate_backend(${childBackendPid}) as terminated
     `);
     // A run that terminates nothing would pass while proving nothing.
-    expect(terminated.rows.length).toBeGreaterThan(0);
+    expect(terminated.rows[0]?.terminated).toBe(true);
 
     const exitCode = await new Promise<number | null>((resolve) => {
       child.on("exit", (code) => resolve(code));
@@ -98,19 +105,21 @@ describe("database pool error handling", () => {
   }, 30_000);
 
   it("logs the terminated connection without reproducing the database error's text", async () => {
-    const { db, pool } = open();
-    await db.execute(sql`select 1`);
+    const { db } = open();
+    // Named, not inferred from "whatever is idle", for the same reason as above.
+    const backend = await db.execute<{ pid: number }>(
+      sql`select pg_backend_pid() as pid`,
+    );
+    const backendPid = backend.rows[0]?.pid;
+    expect(backendPid).toBeGreaterThan(0);
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
 
     try {
       const killer = open();
-      await killer.db.execute(sql`
-        select pg_terminate_backend(pid)
-        from pg_stat_activity
-        where datname = current_database()
-          and pid <> pg_backend_pid()
-          and state = 'idle'
-      `);
+      const terminated = await killer.db.execute<{ terminated: boolean }>(
+        sql`select pg_terminate_backend(${backendPid}) as terminated`,
+      );
+      expect(terminated.rows[0]?.terminated).toBe(true);
       await new Promise((resolve) => setTimeout(resolve, 250));
 
       const lines = logged.mock.calls.map((call) => call.join(" "));
@@ -128,7 +137,11 @@ describe("database pool error handling", () => {
       logged.mockRestore();
     }
 
-    expect(pool.ended).toBe(false);
+    // "Survived in a usable state", asserted by using it. `pool.ended` was
+    // here first and was removed: it only says nobody called `end()`, which
+    // nothing in this test does, so it could not fail.
+    const after = await db.execute(sql`select 1 as alive`);
+    expect(after.rows[0]).toEqual({ alive: 1 });
   });
 
   it("does not throw when the pool emits an error with no client attached", () => {

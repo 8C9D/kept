@@ -29,8 +29,15 @@ const { db, pool } = createDb(databaseUrl);
 // The connection must exist before it can be terminated - the reason this
 // defect never showed on an unauthenticated request, which never checks one
 // out of the pool.
-await db.execute(sql`select 1`);
-console.log("READY");
+const backend = await db.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+const pid = backend.rows[0]?.pid;
+if (pid === undefined) {
+  throw new Error("could not read this connection's backend pid");
+}
+// The parent terminates this exact backend rather than "whatever is idle on
+// the database", so the test cannot be satisfied by a stray connection some
+// other process left behind.
+console.log(`READY ${pid}`);
 
 // Long enough for the parent to terminate the backend and for the socket
 // error to arrive, and short enough that a hung child fails the test rather
