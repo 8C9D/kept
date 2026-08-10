@@ -1,0 +1,140 @@
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sql } from "drizzle-orm";
+import { createDb } from "../../src/db/client.js";
+import {
+  assertSeparateTestDatabase,
+  resolveDevDatabaseUrl,
+  resolveTestDatabaseUrl,
+} from "../helpers/testDatabase.js";
+
+const TEST_DATABASE_URL = resolveTestDatabaseUrl(process.env);
+assertSeparateTestDatabase(TEST_DATABASE_URL, resolveDevDatabaseUrl(process.env));
+
+const CHILD_SCRIPT = fileURLToPath(
+  new URL("../helpers/poolSurvivalChild.ts", import.meta.url),
+);
+
+/**
+ * The pool's error listener, which is the only thing standing between a
+ * routine server-side connection close and the process exiting.
+ *
+ * ⚠ These tests fail by killing the worker rather than by reporting, if the
+ * listener is removed - which is exactly the defect's real signature. An
+ * EventEmitter 'error' with no listener is an uncaught exception, so there is
+ * no gentler way to assert this that would still be about the real behaviour.
+ */
+describe("database pool error handling", () => {
+  let pools: ReturnType<typeof createDb>[] = [];
+
+  beforeEach(() => {
+    pools = [];
+  });
+
+  afterEach(async () => {
+    for (const { pool } of pools) {
+      await pool.end();
+    }
+  });
+
+  function open() {
+    const handle = createDb(TEST_DATABASE_URL);
+    pools.push(handle);
+    return handle;
+  }
+
+  it("keeps a process alive when the server terminates its idle connection", async () => {
+    // Asserted across a process boundary, deliberately. Vitest installs its
+    // own uncaughtException handling, so in-process this test passes with the
+    // listener deleted - measured, not supposed: that was this test's first
+    // draft, and it survived its own falsification. The child's exit code is
+    // the only honest witness to "the process did not die".
+    const child = spawn(
+      process.execPath,
+      ["--import", "tsx", CHILD_SCRIPT, TEST_DATABASE_URL],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("child never reported READY")),
+        20_000,
+      );
+      child.stdout.on("data", () => {
+        if (stdout.includes("READY")) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      child.on("exit", () => {
+        clearTimeout(timer);
+        reject(new Error(`child exited before READY: ${stdout}`));
+      });
+    });
+
+    const killer = open();
+    const terminated = await killer.db.execute(sql`
+      select pg_terminate_backend(pid)
+      from pg_stat_activity
+      where datname = current_database()
+        and pid <> pg_backend_pid()
+        and state = 'idle'
+    `);
+    // A run that terminates nothing would pass while proving nothing.
+    expect(terminated.rows.length).toBeGreaterThan(0);
+
+    const exitCode = await new Promise<number | null>((resolve) => {
+      child.on("exit", (code) => resolve(code));
+    });
+
+    expect(stdout).toContain("SURVIVED");
+    expect(exitCode).toBe(0);
+  }, 30_000);
+
+  it("logs the terminated connection without reproducing the database error's text", async () => {
+    const { db, pool } = open();
+    await db.execute(sql`select 1`);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const killer = open();
+      await killer.db.execute(sql`
+        select pg_terminate_backend(pid)
+        from pg_stat_activity
+        where datname = current_database()
+          and pid <> pg_backend_pid()
+          and state = 'idle'
+      `);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      const lines = logged.mock.calls.map((call) => call.join(" "));
+      const line = lines.find((text) =>
+        text.includes("Idle database connection error"),
+      );
+      expect(line).toBeDefined();
+      // The SQLSTATE survives, because a log line saying only "something
+      // failed" is not enough to act on...
+      expect(line).toContain("57P01");
+      // ...and the error's own message does not, because a database error's
+      // text is never safe to reproduce (see observability/errorSummary).
+      expect(line).not.toContain("terminating connection");
+    } finally {
+      logged.mockRestore();
+    }
+
+    expect(pool.ended).toBe(false);
+  });
+
+  it("does not throw when the pool emits an error with no client attached", () => {
+    const { pool } = open();
+    // The listener's presence IS the behaviour: emit('error') on an
+    // EventEmitter without one throws. Deleting the listener fails this line.
+    expect(() => pool.emit("error", new Error("synthetic"))).not.toThrow();
+  });
+});
