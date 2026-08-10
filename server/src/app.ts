@@ -5,6 +5,7 @@ import type { AppleIdentityVerifier } from "./auth/appleVerifier.js";
 import type { SessionTokens } from "./auth/session.js";
 import type { Db } from "./db/client.js";
 import { renderError } from "./http/errors.js";
+import { requestLog } from "./observability/requestLog.js";
 import { authRoutes } from "./routes/auth.js";
 import { exportRoutes } from "./routes/exports.js";
 import { meRoutes } from "./routes/me.js";
@@ -67,6 +68,10 @@ export function createApp(deps: AppDependencies): Hono {
   const app = new Hono();
   app.onError(renderError);
 
+  // Outermost, so the line reports the status that actually went out -
+  // including the 403 and 413 below, which answer without reaching a route.
+  app.use("*", requestLog());
+
   // Every API response is live state and must never be served from an
   // HTTP cache. Without this header, iOS's CFNetwork heuristically cached
   // list responses and answered an OFFLINE pull-to-refresh with a stale
@@ -75,10 +80,10 @@ export function createApp(deps: AppDependencies): Hono {
   // client also disables its cache; this states the contract at the
   // source so every future client inherits it.
   //
-  // Outermost deliberately: middleware that answers without calling the
-  // next handler - bodyLimit's 413 below - would otherwise skip this and
-  // return an uncacheable-by-nobody error. "Every response" has to mean
-  // the ones no route ever saw.
+  // Ahead of everything that can answer without calling the next handler -
+  // bodyLimit's 413 below - which would otherwise skip this and return an
+  // uncacheable-by-nobody error. "Every response" has to mean the ones no
+  // route ever saw. (The request log sits outside this, and sets no headers.)
   app.use("*", async (c, next) => {
     await next();
     c.header("Cache-Control", "no-store");

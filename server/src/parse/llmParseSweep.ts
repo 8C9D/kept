@@ -6,7 +6,7 @@ import {
   type LlmParseFailureRecord,
   type LlmParseSuccessRecord,
 } from "../domain/llmSuggestions.js";
-import { redactedMessage } from "../observability/errorSummary.js";
+import { errorSummary, redactedMessage } from "../observability/errorSummary.js";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
 import { RECEIPT_PARSE_MODEL } from "./claudeReceiptParser.js";
 
@@ -218,7 +218,14 @@ export function createLlmParseSweep(
                   `no further retries`
               : `LLM parse failed for receipt ${failure.id}; a later sweep retries it`,
           );
-          console.error(failure.error);
+          // Through errorSummary, never raw. The comment above is only true
+          // if this line obeys it: the try block around the parse also spans
+          // the UPDATE that writes the record, so a failed query lands here -
+          // and drizzle builds the statement's bound parameters into the
+          // error's own message, which for this write is the whole parsed
+          // record: vendor, tax number, every amount. Measured, on a vendor
+          // string carrying a NUL that Postgres refuses inside jsonb.
+          console.error(errorSummary(failure.error));
         }
       } while (rerunRequested);
     } finally {
@@ -236,7 +243,7 @@ export function createLlmParseSweep(
         // runLlmParseSweep only throws before any parse (the select) or on
         // a broken query invariant; per-row failures are already contained.
         console.error("LLM parse sweep did not complete");
-        console.error(error);
+        console.error(errorSummary(error));
       });
     },
   };
