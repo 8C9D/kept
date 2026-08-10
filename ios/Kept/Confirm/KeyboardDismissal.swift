@@ -90,11 +90,17 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
             for name in [
                 UITextField.textDidBeginEditingNotification,
                 UITextView.textDidBeginEditingNotification,
+            ] {
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(textDidBeginEditing), name: name, object: nil
+                )
+            }
+            for name in [
                 UITextField.textDidChangeNotification,
                 UITextView.textDidChangeNotification,
             ] {
                 NotificationCenter.default.addObserver(
-                    self, selector: #selector(textInputEvent), name: name, object: nil
+                    self, selector: #selector(textDidChange), name: name, object: nil
                 )
             }
             // A keyboard frame change - rotation, a hardware keyboard
@@ -130,18 +136,38 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
         /// to be prepared in advance. The `window` check keeps this to the
         /// screen that asked for it - the observers are global, the rule
         /// is not.
-        @objc private func textInputEvent(_ notification: Notification) {
+        @objc private func textDidBeginEditing(_ notification: Notification) {
+            guard let input = notification.object as? UIView, input.window === window else { return }
+            let expectsBar = input.keyboardHasNoExitOfItsOwn
+            // Read before anything moves: on a cold focus no bar is up, on
+            // a field-to-field move the previous field's bar still is.
+            let barWasOnScreen = doneBar?.window != nil
+            if expectsBar {
+                ensureDoneBar(on: input)
+                // SwiftUI overwrites the property during the body update
+                // this notification precedes, so the same assertion is made
+                // again once that update has run.
+                DispatchQueue.main.async { [weak self] in
+                    MainActor.assumeIsolated { self?.ensureDoneBar(on: input) }
+                }
+            }
+            #if DEBUG
+            // Every focus reports, including the fields that must *not* get
+            // a bar. A field with no bar previously produced no line at
+            // all, which is indistinguishable from a field nobody tapped -
+            // so the control against "a bar on everything" was unreadable.
+            KeyboardExitVerification.check(
+                input: input, expectsBar: expectsBar, bar: doneBar, barWasOnScreen: barWasOnScreen
+            )
+            #endif
+        }
+
+        @objc private func textDidChange(_ notification: Notification) {
             guard let input = notification.object as? UIView,
                   input.window === window,
                   input.keyboardHasNoExitOfItsOwn
             else { return }
             ensureDoneBar(on: input)
-            // SwiftUI overwrites the property during the body update this
-            // notification precedes, so the same assertion is made again
-            // once that update has run.
-            DispatchQueue.main.async { [weak self] in
-                MainActor.assumeIsolated { self?.ensureDoneBar(on: input) }
-            }
         }
 
         @objc private func keyboardFrameChanged() {
@@ -178,9 +204,6 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
                 barPresentedFor = input
                 input.reloadInputViews()
             }
-            #if DEBUG
-            KeyboardExitVerification.check(bar: bar, on: input)
-            #endif
         }
 
         private func makeDoneBar() -> UIToolbar {

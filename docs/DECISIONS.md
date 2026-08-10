@@ -34,7 +34,20 @@ This is the part that matters: **the enum had to be hand-synced with the view, a
 **Verification, because this class of bug is invisible to the suite.**
 A `KeptUITests` target now exists - the first in the project - asserting `isHittable` on the Done button for all five keyboards with no exit, that pressing it dismisses, that the bar survives typing, and that the single-line fields still get no bar.
 `isHittable` is the assertion that matters: it is false both for an absent bar and for a 430×0 one, and true only when a person could press it.
-A DEBUG-only acceptance check logs PASS/FAIL per focus on device, and **`-KeptZeroHeightDoneBar` is a negative control that installs the bar collapsed** - the exact shape that read as success - so the check is seen to fail rather than assumed to work. It does: 15 PASS with a 402×44 bar, 2 FAIL under the control.
+A DEBUG-only acceptance check logs PASS/FAIL per focus on device, and **`-KeptZeroHeightDoneBar` is a negative control that installs the bar collapsed** - the exact shape that read as success - so the check is seen to fail rather than assumed to work. On the simulator it does: 15 PASS with a 402×44 bar, 2 FAIL under the control.
+It writes to three sinks - the unified log, stdout, and a file in the app's Documents directory. **The file sink exists because backgrounding kills the `devicectl` console every time, once by SIGKILL**, so the one state whose evidence was most likely to be lost was the background round trip; each line carries a pid, because if iOS kills a backgrounded app then reopening it is a cold launch wearing a resume's clothes and the round trip was never exercised at all.
+
+**The device pass, on the detail entry (`ReceiptDetailView`'s `fullScreenCover`), physical iPhone / iOS 26.x.**
+All five keyboards with no exit pass with a 430×44 bar, Done hit-testable: total, HST, subtotal, other tax, notes.
+Both entry states pass - `entry=cold` and `entry=warm` (a field-to-field move with the keyboard already up).
+The background round trip passes and is a **genuine resume**, same pid across a 37-second gap, not a disguised cold launch.
+Vendor and tax number correctly get no bar, and pressing Done dismisses.
+**Two instrument defects were found and fixed during the pass, neither in the bar**: looking the Done control up by `accessibilityIdentifier` reported "no control" for a bar that was demonstrably on screen, because `UIBarButtonItem` reaches the view layer through accessibility, which is live under XCUITest and not in a plain device run - it now walks for a `UIControl`; and fields that correctly got *no* bar produced no log line at all, making the control against "a bar on everything" indistinguishable from a field nobody tapped - every focus now reports, and a bar on a self-dismissing field is an explicit FAIL.
+
+⚠ **Two verifications are open, and the fix is not fully verified until they run.**
+**(1) The negative control has never run on device** - only on the simulator. Until it does, the device PASS lines rest on a check that has not been seen to fail on that hardware, which is the same standing as an untested assertion.
+**(2) The capture path has never been exercised from any angle.** `VNDocumentCameraViewController` → `ConfirmQueueView` presents the same form through a different presentation, and this whole defect was presentation-dependent.
+So: **verified on the detail entry, unverified on the capture entry.**
 ⚠ **Green CI is not proof.** The UI tests run on a 26.3.1 simulator; the defect was on 26.5.2 hardware, and the same build behaved differently between sessions there. The device matrix - cold launch, warm keyboard, background round trip, cover reopened, and both the detail and capture entry paths - stays manual.
 ⚠ **One thing the check no longer asserts**, stated rather than quietly dropped: that `inputAccessoryView` still points at our bar at an arbitrary instant. It often does not, because SwiftUI overwrites it continuously. The invariant kept is that the bar on screen is ours and pressable, and that the property is restored before UIKit next queries it; a clobber is still logged as a note rather than hidden.
 

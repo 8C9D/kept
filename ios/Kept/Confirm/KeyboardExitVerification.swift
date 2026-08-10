@@ -30,13 +30,45 @@ enum KeyboardExitVerification {
     /// Runs after the keyboard and its accessory have settled - reading
     /// the frame inside `textDidBeginEditing` would measure a bar that has
     /// not been laid out yet, which is its own false negative.
-    static func check(bar: UIView, on input: UIView) {
+    /// `barWasOnScreen` is read at install time, before the bar is
+    /// re-presented, and is the cold-versus-warm discriminator: on a cold
+    /// focus nothing is up, so the bar is in no window; on a field-to-field
+    /// move with the keyboard already raised, the previous field's bar is
+    /// still on screen. Printed so a warm move is evidenced by the log
+    /// rather than attested to from memory.
+    static func check(input: UIView, expectsBar: Bool, bar: UIView?, barWasOnScreen: Bool) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            MainActor.assumeIsolated { report(bar: bar, on: input) }
+            MainActor.assumeIsolated {
+                report(
+                    input: input, expectsBar: expectsBar, bar: bar, barWasOnScreen: barWasOnScreen
+                )
+            }
         }
     }
 
-    private static func report(bar: UIView, on input: UIView) {
+    private static func report(input: UIView, expectsBar: Bool, bar: UIView?, barWasOnScreen: Bool) {
+        let entry = barWasOnScreen ? "warm" : "cold"
+        let prefix = "entry=\(entry) \(type(of: input)) keyboard=\(keyboardName(of: input))"
+
+        // The negative case, and the reason every focus reports: this
+        // field's return key already dismisses, so a bar here would be the
+        // "a bar on everything" failure - and it has to be legible, not
+        // inferred from the absence of a line.
+        guard expectsBar else {
+            let carriesOurBar = bar != nil && input.inputAccessoryView === bar
+            emit(
+                carriesOurBar
+                    ? "FAIL \(prefix) a Done bar was installed on a field whose return key dismisses"
+                    : "PASS \(prefix) no bar, as intended - this keyboard has its own return key"
+            )
+            return
+        }
+
+        guard let bar else {
+            emit("FAIL \(prefix) no bar was ever built for a keyboard with no exit of its own")
+            return
+        }
+
         var failures: [String] = []
         var notes: [String] = []
 
@@ -66,7 +98,14 @@ enum KeyboardExitVerification {
 
         // The one the eye cannot check: a bar can be present, sized and
         // visible while something above it takes the touch.
-        if let done = bar.firstDescendant(identified: KeyboardExitIdentifiers.doneButton) {
+        //
+        // Found by walking for a `UIControl` rather than by accessibility
+        // identifier. `UIBarButtonItem`'s identifier reaches the view layer
+        // through accessibility, which is live under XCUITest and not in a
+        // plain device run - so the identifier lookup reported "no control"
+        // on device for a bar that was demonstrably on screen. The toolbar
+        // carries one control: the Done item; the flexible space has no view.
+        if let done = bar.firstControlDescendant {
             if let host = done.window {
                 let centre = done.convert(
                     CGPoint(x: done.bounds.midX, y: done.bounds.midY), to: host
@@ -82,13 +121,13 @@ enum KeyboardExitVerification {
                 failures.append("Done control is not in a window")
             }
         } else {
-            failures.append("no control carrying \(KeyboardExitIdentifiers.doneButton)")
+            failures.append("the bar contains no UIControl at all")
         }
 
         let verdict = failures.isEmpty ? "PASS" : "FAIL"
         let detail = failures.isEmpty ? "bar=\(bar.frame)" : failures.joined(separator: "; ")
         let trailing = notes.isEmpty ? "" : " [\(notes.joined(separator: "; "))]"
-        emit("\(verdict) \(type(of: input)) keyboard=\(keyboardName(of: input)) \(detail)\(trailing)")
+        emit("\(verdict) \(prefix) \(detail)\(trailing)")
     }
 
     private static func keyboardName(of input: UIView) -> String {
@@ -96,21 +135,57 @@ enum KeyboardExitVerification {
         return field.keyboardType == .decimalPad ? "decimalPad" : "\(field.keyboardType.rawValue)"
     }
 
-    /// Two sinks: the unified log for Console.app, stdout for a
-    /// `devicectl ... --console` launch.
+    /// Three sinks: the unified log for Console.app, stdout for a
+    /// `devicectl ... --console` launch, and a file in the app's Documents
+    /// directory.
+    ///
+    /// The file is there for the background round trip. Backgrounding has
+    /// killed the console every time it has been tried, once by SIGKILL,
+    /// so the one state whose evidence is most likely to be lost is the one
+    /// that most needs a sink that outlives the process.
     private static func emit(_ line: String) {
         log.log("\(line, privacy: .public)")
         print("[keyboardexit] \(line)")
+        appendToFile(line)
+    }
+
+    private static let logFileURL: URL? = FileManager.default
+        .urls(for: .documentDirectory, in: .userDomainMask).first?
+        .appendingPathComponent("keyboard-exit.log")
+
+    private static func appendToFile(_ line: String) {
+        guard let url = logFileURL else {
+            print("[keyboardexit] file sink unavailable: no documents directory")
+            return
+        }
+        // The pid is the point: if iOS kills the app while it is
+        // backgrounded, reopening it is a cold launch wearing a resume's
+        // clothes, and the round trip was never actually exercised. A
+        // changed pid says so.
+        let stamped = "\(Date().timeIntervalSince1970) pid=\(ProcessInfo.processInfo.processIdentifier) \(line)\n"
+        do {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try Data().write(to: url)
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(stamped.utf8))
+        } catch {
+            // Loudly, on the sinks that still work - a diagnostic that
+            // fails quietly is worse than none.
+            print("[keyboardexit] file sink write failed: \(error)")
+            log.log("file sink write failed: \(String(describing: error), privacy: .public)")
+        }
     }
 }
 
 private extension UIView {
-    /// A toolbar renders its items as private control subclasses, so the
-    /// identifier set on the `UIBarButtonItem` is what finds the button.
-    func firstDescendant(identified identifier: String) -> UIView? {
-        if accessibilityIdentifier == identifier { return self }
+    /// A toolbar renders its items as private `UIControl` subclasses.
+    var firstControlDescendant: UIControl? {
+        if let control = self as? UIControl { return control }
         for subview in subviews {
-            if let found = subview.firstDescendant(identified: identifier) { return found }
+            if let found = subview.firstControlDescendant { return found }
         }
         return nil
     }
