@@ -78,17 +78,40 @@ export function assertLocalDatabase(
 /**
  * Whether a Postgres URL asks for an encrypted connection.
  *
- * ⚠ `pg` negotiates nothing on its own. A `postgres://` URL with no `sslmode`
- * connects in cleartext and reports `pool.options.ssl === undefined`, so the
- * only thing standing between receipt data and the wire is what the URL says.
- * `assertProductionEnv` refuses a production URL that says nothing.
+ * ⚠ `pg` negotiates nothing on its own. A URL with no `sslmode` connects in
+ * cleartext, so the only thing standing between receipt data and the wire is
+ * what the URL says, and `assertProductionEnv` refuses a production URL that
+ * says nothing.
  *
- * The accepted spellings are libpq's, which is what `pg` parses:
- * `require`, `verify-ca` and `verify-full` all encrypt. `prefer` and `allow`
- * are deliberately NOT accepted - both fall back to cleartext when the server
- * declines, which is exactly the silent downgrade this exists to prevent.
- * `disable` is a refusal in so many words. `ssl=true` is accepted because
- * `pg` honours it as a synonym.
+ * Measured at the layer that actually decides, `client.connectionParameters.ssl`
+ * (installed `pg`, `pg-connection-string@2.14.0`):
+ *
+ *   (none)                -> false   cleartext
+ *   ?sslmode=disable      -> false   cleartext
+ *   ?sslmode=allow        -> {}      encrypted
+ *   ?sslmode=prefer       -> {}      encrypted
+ *   ?sslmode=require      -> {}      encrypted
+ *   ?sslmode=verify-full  -> {}      encrypted
+ *   ?ssl=true / ?ssl=1    -> true    encrypted
+ *
+ * NOT `pool.options.ssl`, which is what the first version of this comment
+ * quoted. `Pool` does not parse the connection string at all - it hands it to
+ * `Client` at connect time - so `pool.options.ssl` is `undefined` for EVERY
+ * url, including `?sslmode=require`. It reproduces identically on a
+ * configuration this check considers correct, which makes it no evidence at
+ * all (REVIEW-FINAL F-2).
+ *
+ * ⚠ `prefer` and `allow` are refused even though the table above shows they
+ * encrypt today, and the reason is forward-compatibility rather than current
+ * behaviour. `pg-connection-string` currently sets `ssl` for any `sslmode` but
+ * `disable`, so both fail closed; `pg`'s own runtime deprecation warning says
+ * v3 / `pg` v9 will adopt libpq semantics, under which both fall back to
+ * CLEARTEXT when the server declines. Refusing them now costs a deployment
+ * nothing that `require` does not give it, and means this check does not
+ * silently become decorative on a dependency bump. Stated as the forward-
+ * looking choice it is, because the first version of this comment claimed
+ * libpq semantics were "what `pg` parses", and that was false of the installed
+ * version (REVIEW-FINAL F-3).
  */
 export function requiresTls(url: string): boolean {
   let parsed: URL;
@@ -103,7 +126,10 @@ export function requiresTls(url: string): boolean {
   if (sslmode !== null) {
     return ENCRYPTING_SSLMODES.has(sslmode.toLowerCase());
   }
-  return parsed.searchParams.get("ssl") === "true";
+  // `pg-connection-string` treats `ssl=1` exactly as `ssl=true`, so refusing
+  // one and accepting the other would refuse a connection that does encrypt.
+  const ssl = parsed.searchParams.get("ssl");
+  return ssl === "true" || ssl === "1";
 }
 
 const ENCRYPTING_SSLMODES = new Set(["require", "verify-ca", "verify-full"]);

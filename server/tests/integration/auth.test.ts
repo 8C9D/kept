@@ -106,7 +106,7 @@ describe("session enforcement on protected routes", () => {
     // Falsification, predicted then run:
     //   Predicted: reverting session.ts to the non-empty-string check fails
     //   this on `expect(response.status).toBe(401)`, receiving 500.
-    //   Actual: exactly that, at :118 - "expected 500 to be 401". No gap, and
+    //   Actual: exactly that, at :119 - "expected 500 to be 401". No gap, and
     //   the 500 is the finding reproduced through the real route.
     const forged = await new SignJWT({ tv: 0 })
       .setProtectedHeader({ alg: "HS256" })

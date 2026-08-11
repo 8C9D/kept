@@ -59,7 +59,7 @@ describe("DELETE /api/receipts/:id (soft delete)", () => {
     //   Predicted: with `isNull(receiptImages.deletedAt)` removed, this fails
     //   on the final assertion, with the tombstone moved forward to the
     //   delete's own timestamp.
-    //   Actual: exactly that, at :85 - expected '2026-01-15T10:00:00.000Z',
+    //   Actual: exactly that, at :87 - expected '2026-01-15T10:00:00.000Z',
     //   received '2026-08-11T14:13:35.176Z', which is the moment the delete
     //   ran. No gap. The seven-month jump is the finding, rendered.
     const ORIGINAL_TOMBSTONE = new Date("2026-01-15T10:00:00.000Z");

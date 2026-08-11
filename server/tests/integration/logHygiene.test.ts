@@ -319,9 +319,9 @@ describe("the request log", () => {
     // Falsification, predicted then run, both directions:
     //   Predicted: deleting `sessionPresented` from requestLog.ts fails this on
     //   `expect(rejected?.sessionPresented).toBe(true)` with undefined.
-    //   Actual: exactly that, at :355. No gap.
+    //   Actual: exactly that, at :362. No gap.
     //   Predicted: hardcoding the field to `true` fails the absent leg.
-    //   Actual: exactly that, at :356, "expected true to be false". No gap.
+    //   Actual: exactly that, at :363, "expected true to be false". No gap.
     // The pairing is what makes it discriminate. Asserting `true` on one line
     // alone passes against a hardcoded field, which is why the no-header case
     // must come out false in the same run.

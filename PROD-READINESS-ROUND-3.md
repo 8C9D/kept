@@ -162,7 +162,7 @@ The existing field keeps its meaning, so nothing that reads it changes; the fact
 The frozen version named three prose sites, one of them the 2026-08-10 entry in `docs/DECISIONS.md`.
 That file is the append-only log of how we got here, and editing a past entry to match new behaviour erases what was decided then.
 So the fix touches **two** prose sites, the docstring at `src/observability/requestLog.ts:22-24` and `docs/Kept-Build-Spec.md` §10B, which is the current-state document and is supposed to move.
-The 2026-08-10 DECISIONS entry stays exactly as written, and this round's own entry records the change forward.
+The 2026-08-10 DECISIONS entry stays exactly as written, and this round's own entry, appended at the close of the run, is where the change is recorded forward.
 
 *Blast radius.* One JSON field in one middleware, plus the two prose sites that describe it.
 Every request logs one more boolean.
@@ -217,7 +217,8 @@ Copying `assertIssuedObjectKey`'s throw would therefore have relocated the blast
 
 So the fix departs from its receipt-image sibling deliberately, and the departure is stated rather than smuggled.
 `objectKeys.ts:111-114` justifies the throw as "fail the request loudly and leave a log line", and the load-bearing half of that sentence is the log line, not the 500.
-`downloadUrlFor` refuses the URL for the offending job, logs the refusal through `errorSummary`, and returns `null` for that job alone.
+`downloadUrlFor` refuses the URL for the offending job, logs the refusal, and returns `null` for that job alone.
+The log line is a plain `console.error` naming the job id and withholding the key, not `errorSummary`: there is no error object to summarise, and the key is the one thing that must not be printed, since a key naming another user's prefix *is* that user's id.
 The isolation guarantee is identical, the failure is louder in the log than a 500 would be (a 500 says nothing about which row), and one bad row costs one download link instead of a history.
 This is explicit handling and not a swallowed error: the refusal is unconditional and the log line is unconditional.
 
@@ -511,9 +512,24 @@ No P0 and no P1 was found at Stage 0, so nothing preempted the P2s and the list 
 **Gates at the end of the passes: 299 tests green across 31 files** (289 at baseline, plus this round's 10), **`tsc --noEmit` clean, `npm audit` 6 moderate, `npx drizzle-kit check` clean.**
 No gate is worse than baseline.
 
+**And the fifth gate, which CLAUDE.md requires of every gate and which `reviews/round3/BASELINE.md` committed this round to re-running before it closes.**
+The real entrypoint, started the real way with `ANTHROPIC_API_KEY` withheld, boots on port 3031, prints the storage-probe line and the no-key notice, binds the port, and answers `GET /api/me` with 401 and `Cache-Control: no-store`.
+Run again at the end of the passes, not only at baseline.
+
 **Every fix was falsified before it was committed**, by mutating or deleting the behaviour and re-running, with predicted-versus-actual recorded in the test file.
 Three predictions were wrong about *which assertion* fires first and the gaps are written down at the tests rather than smoothed over: R3-1 failed on the missing `GetObject` rather than on the stale file citation, and the two loop-driven cases (PR-12's subjects, R2-4's URLs) falsify visibly on their first element rather than on all of them.
 One prediction was wrong in a more interesting way: deleting PR-9(a)'s timeout did not fail an assertion at all, it hung until vitest killed the test at 40 s, which is the finding rather than a gap in it.
+
+**REVIEW-FINAL found eight more, all remediated, and the pattern in them is worth naming.**
+Five of the eight were **prose that did not match code**, which is the exact shape this round's hunt was built to find in other people's work:
+
+- **F-1.** `e01be63` gave the pool a connect timeout and left a docstring eight lines below reading "the pool has none: built with `connectionString` alone, so `connectionTimeoutMillis` is 0". All three clauses false, one of them corrected in this ledger and not in the source the same commit was editing. Rewritten to say why the probe still needs its own bound: it bounds an *attempt* so the retry loop can wait out a waking compute, and `pool.query` spans more than a connect. A second instance of the same stale sentence, in `startupProbe.test.ts`, was found while fixing the first and is corrected too. REVIEW-FINAL did not catch that one.
+- **F-2.** R2-4's cited measurement, `pool.options.ssl === undefined`, **does not discriminate**. `Pool` never parses the connection string; it defers to `Client`. Re-measured: `?sslmode=require` reports `undefined` too, so the evidence was reproduced identically by a configuration this round calls correct. The finding and the fix stand; the proof did not. Replaced everywhere with `client.connectionParameters.ssl`, which does discriminate: no `sslmode` gives `false`, `?sslmode=require` gives `{}`.
+- **F-3.** The refusal of `prefer` and `allow` was justified as libpq semantics, "which is what `pg` parses". False of the installed `pg`: `pg-connection-string@2.14.0` sets `ssl` for any `sslmode` but `disable`, so both encrypt today. Restated as the forward-compatibility choice it actually is, with pg's own deprecation warning as the reason. `ssl=1` is now accepted alongside `ssl=true`, which the same measurement showed `pg` treats identically and this check was wrongly refusing.
+- **F-4.** This ledger claimed in the present tense that the round's DECISIONS entry already recorded the change forward. It did not exist yet. Restated.
+- **F-7.** This ledger said the export refusal logs through `errorSummary`; it is a plain `console.error`. Corrected. More substantially, the log line is the load-bearing half of PR-4's whole argument for refusing per job instead of throwing, and **no test pinned it** - deleting the `console.error` left both new export tests green, which is precisely how an explicit refusal becomes a silent null. Now asserted, and the deletion now fails at `export.test.ts:679`.
+
+The other three were mechanical: an em dash this round added to the spec (**F-5**), eight stale line numbers in the recorded falsifications (**F-6**), and the fifth gate recorded at baseline but not at HEAD (**F-8**).
 
 **One defect of this round's own making was found and repaired inside the pass that caused it**, per the rule that a builder's own regression is not carried.
 R3-2's first test passed its rejected-token leg and then failed its no-token leg **against unmutated code**, because `captureRequest` reset its captured lines only per test while `requestLine` returns the first parseable line, so the second capture re-read the first capture's output.

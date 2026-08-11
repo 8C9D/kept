@@ -78,7 +78,7 @@ describe("assertProductionEnv", () => {
     // Falsification, predicted then run:
     //   Predicted: with the requiresTls check removed from productionEnv.ts,
     //   every case below fails, because each URL would be accepted.
-    //   Actual: it fails on the FIRST url and stops, at :97 -
+    //   Actual: it fails on the FIRST url and stops, at :107 -
     //   "postgres://kept:pw@ep-example.neon.tech/kept: expected [Function] to
     //   throw an error". Gap, recorded: vitest reports one failure per case,
     //   so the loop pins four rejections and falsifies visibly on one. The url
@@ -88,10 +88,16 @@ describe("assertProductionEnv", () => {
       "postgres://kept:pw@ep-example.neon.tech/kept",
       // Explicitly off.
       "postgres://kept:pw@ep-example.neon.tech/kept?sslmode=disable",
-      // ⚠ The two that matter most. libpq's `prefer` and `allow` both fall
-      // back to CLEARTEXT when the server declines, so accepting them would
-      // make this check decorative against exactly the silent downgrade it
-      // exists to catch.
+      // ⚠ The two that matter most, and the reason is forward-looking rather
+      // than current. Under the INSTALLED pg these two do encrypt: measured at
+      // `client.connectionParameters.ssl`, both yield `{}`, because
+      // pg-connection-string sets ssl for any sslmode but `disable`. pg's own
+      // deprecation warning says v3 / pg v9 adopts libpq semantics, under
+      // which both fall back to CLEARTEXT when the server declines. Refusing
+      // them costs a deployment nothing that `require` does not give it, and
+      // stops this check becoming decorative on a dependency bump.
+      // (The first version of this comment asserted libpq semantics as
+      // current pg behaviour, which was false - REVIEW-FINAL F-3.)
       "postgres://kept:pw@ep-example.neon.tech/kept?sslmode=prefer",
       "postgres://kept:pw@ep-example.neon.tech/kept?sslmode=allow",
     ]) {
@@ -108,6 +114,9 @@ describe("assertProductionEnv", () => {
       "postgres://kept:pw@ep-example.neon.tech/kept?sslmode=verify-full",
       "postgres://kept:pw@ep-example.neon.tech/kept?sslmode=VERIFY-CA",
       "postgres://kept:pw@ep-example.neon.tech/kept?ssl=true",
+      // pg-connection-string honours `ssl=1` identically to `ssl=true`, so
+      // refusing it would refuse a connection that does encrypt.
+      "postgres://kept:pw@ep-example.neon.tech/kept?ssl=1",
     ]) {
       expect(
         () => assertProductionEnv({ ...PRODUCTION, DATABASE_URL: url }),

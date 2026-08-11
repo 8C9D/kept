@@ -75,9 +75,11 @@ export function assertProductionEnv(
   // receipt IMAGES over http; this connection carries the same receipts in
   // structured form - vendor, purchase date, subtotal, HST, the supplier's
   // GST/HST registration number, notes, and ocr_raw_text, which is the entire
-  // receipt - and `pg` negotiates no TLS on its own. Measured: a postgres://
-  // URL with no sslmode yields `pool.options.ssl === undefined`, and the
-  // connection goes out in the clear.
+  // receipt - and `pg` negotiates no TLS on its own. Measured at
+  // `client.connectionParameters.ssl`, which is the layer that decides: a URL
+  // with no sslmode yields `false`, and the connection goes out in the clear.
+  // (`pool.options.ssl` is `undefined` for every url, correct ones included,
+  // so it is no evidence - see the table in db/databaseUrl.ts.)
   //
   // In practice Neon's connection strings carry `?sslmode=require` and Neon
   // refuses cleartext anyway, so this should never fire on the intended

@@ -67,7 +67,7 @@ describe("session tokens", () => {
     // Falsification, predicted then run:
     //   Predicted: reverting the check to `payload.sub === ""` fails every
     //   case below, since each would verify and return claims.
-    //   Actual: it fails on the FIRST of them and stops, at :89 -
+    //   Actual: it fails on the FIRST of them and stops, at :92 -
     //   "not-a-uuid: expected { userId: 'not-a-uuid', ... } to be null".
     //   Gap, recorded: vitest reports one failure per case, so the loop pins
     //   five inputs but falsifies visibly on one. The per-subject message

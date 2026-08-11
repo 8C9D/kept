@@ -2,7 +2,7 @@ import AdmZip from "adm-zip";
 import ExcelJS from "exceljs";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { exportJobs, receiptImages } from "../../src/db/schema.js";
 import { generateExport } from "../../src/export/generateExport.js";
 import {
@@ -637,7 +637,7 @@ describe("the export pipeline", () => {
     //   Predicted: with `isIssuedExportKey` removed from downloadUrlFor, this
     //   fails on `expect(job.downloadUrl).toBeNull()`, with a presigned URL
     //   naming the victim's prefix.
-    //   Actual: exactly that, at :661 - "expected
+    //   Actual: exactly that, at :688 - "expected
     //   'https://fake-r2.test/download/exports...' to be null". The URL that
     //   came back is the leak, rendered. No gap.
     const started = await harness.request(token, "POST", "/api/export", {
@@ -654,9 +654,34 @@ describe("the export pipeline", () => {
       .set({ objectKey: foreignKey })
       .where(eq(exportJobs.id, id));
 
-    const detail = await harness.request(token, "GET", `/api/export/${id}`);
+    // The refusal is supposed to be LOUD as well as safe: the whole reason
+    // downloadUrlFor returns null instead of throwing is that the log line,
+    // not the status code, is the "fail loudly" half of objectKeys.ts's rule.
+    // Deleting the console.error would leave every other assertion here
+    // passing and turn an explicit refusal into a silent null, so it is
+    // asserted (REVIEW-FINAL F-7).
+    const refusals: string[] = [];
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation((...args: unknown[]) => {
+        refusals.push(args.map((a) => String(a)).join(" "));
+      });
+    let detail: Response;
+    try {
+      detail = await harness.request(token, "GET", `/api/export/${id}`);
+    } finally {
+      errorSpy.mockRestore();
+    }
     expect(detail.status).toBe(200);
     const job = (await detail.json()) as JobResponse;
+
+    const refusal = refusals.find((line) => line.includes("did not issue"));
+    expect(refusal).toBeDefined();
+    // Names the job, so the row is findable...
+    expect(refusal).toContain(id);
+    // ...and withholds the key itself, because a key naming another user's
+    // prefix IS that user's id, and this line goes to the machine's log.
+    expect(refusal).not.toContain(victimId);
     // Still reported complete - the job DID complete. What is refused is the
     // URL, which is the only thing that would have leaked.
     expect(job.status).toBe("complete");
@@ -673,7 +698,7 @@ describe("the export pipeline", () => {
     // Falsification, predicted then run:
     //   Predicted: replacing the refusal in downloadUrlFor with a throw fails
     //   this on `expect(response.status).toBe(200)`, receiving 500.
-    //   Actual: exactly that, at :697 - "expected 500 to be 200". No gap, and
+    //   Actual: exactly that, at :726 - "expected 500 to be 200". No gap, and
     //   it is the measurement that settles RV3-E: a throw here really does
     //   take the whole history list down, rather than the one bad row.
     const ids: string[] = [];

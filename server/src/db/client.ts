@@ -85,9 +85,24 @@ export type Db = ReturnType<typeof createDb>["db"];
  * loop. A wrong credential fails all the attempts and costs only the budget
  * below.
  *
- * Each attempt carries its own timeout because the pool has none: the pool is
- * built with `connectionString` alone, so `connectionTimeoutMillis` is 0 and a
- * connect against a black-holed host would otherwise hang here forever.
+ * Each attempt carries its own timeout, and the reason is not that the pool
+ * lacks one. It has one now (`CONNECT_TIMEOUT_MS` above); this probe needs a
+ * SEPARATE bound because the two answer different questions. The pool's
+ * timeout bounds one connect, and a checkout that hits it has nothing to retry
+ * into. This probe's race bounds one ATTEMPT so the loop can wait out a Neon
+ * compute that is still waking, which is the whole reason the loop exists.
+ * `pool.query` also spans more than the connect - a client already in the pool
+ * skips it entirely - so the pool's option cannot bound this call in the first
+ * place.
+ *
+ * ⚠ This paragraph used to argue from "the pool has none: it is built with
+ * `connectionString` alone, so `connectionTimeoutMillis` is 0". Every clause of
+ * that was falsified: the first two by the commit that added the pool option
+ * eight lines above and did not come back here, and the third by REVIEW-0,
+ * which established that `pg-pool` tests the value for falsiness and arms no
+ * timer rather than coercing anything to `0`. Recorded rather than quietly
+ * rewritten, because a docstring invalidated by its own commit is exactly the
+ * defect class round 3 went looking for in other people's code.
  *
  * A timed-out attempt leaves its query running on the pool, and the cost is
  * stated exactly rather than rounded down: with the default five attempts, up

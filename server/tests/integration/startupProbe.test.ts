@@ -100,11 +100,21 @@ describe("assertDatabaseReachable", () => {
     expect(Date.now() - startedAt).toBeGreaterThan(2_000);
   }, 30_000);
 
-  it("gives up on a probe that never settles, because the pool sets no connect timeout", async () => {
-    // PR-9: createDb passes connectionString alone, so connectionTimeoutMillis
-    // is 0 - "wait forever". If the probe leaned on the pool's timeout instead
-    // of carrying its own, a black-holed host would hang startup indefinitely
-    // rather than refusing it.
+  it("gives up on a probe that never settles, carrying its own bound", async () => {
+    // ⚠ This comment used to read "because the pool sets no connect timeout:
+    // createDb passes connectionString alone, so connectionTimeoutMillis is 0".
+    // Round 3 made all three clauses false - PR-9(a) gave the pool a 10 s
+    // connect timeout, and REVIEW-0 established that an unset value is never
+    // coerced to 0, it simply arms no timer. Corrected here rather than left,
+    // for the same reason as the docstring in src/db/client.ts: this round's
+    // own findings were about prose that outlived the code it described.
+    //
+    // The behaviour under test is unchanged and still worth pinning. The
+    // probe's race bounds an ATTEMPT, which is not what the pool's option
+    // bounds: `pool.query` spans more than a connect, and a checkout served by
+    // an already-open client never touches the connect timeout at all. The
+    // fake below never settles for any reason, so only the probe's own bound
+    // can end it.
     const neverSettles = {
       query() {
         return new Promise(() => {});
@@ -233,7 +243,7 @@ describe("the entrypoint's startup probe", () => {
     //   Predicted: reverting src/index.ts to the old wording fails this case on
     //   the `not.toContain("PROD-READINESS-ROUND-2.md")` assertion.
     //   Actual: it failed two assertions EARLIER, on `toMatch(/GetObject/)`
-    //   (startupProbe.test.ts:244), because the old message names no operation
+    //   (startupProbe.test.ts:248), because the old message names no operation
     //   at all and vitest reports only the first failure.
     //   Gap, recorded rather than smoothed over: the prediction was written
     //   about what the old message says WRONG, and the assertion that fires
