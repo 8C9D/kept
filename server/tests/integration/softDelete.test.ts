@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { receipts } from "../../src/db/schema.js";
+import { receiptImages, receipts } from "../../src/db/schema.js";
 import {
   createTestHarness,
   imageFor,
@@ -41,6 +41,52 @@ describe("DELETE /api/receipts/:id (soft delete)", () => {
     // toBeInstanceOf rather than not-null: with optional chaining an absent
     // row would yield undefined, which "not.toBeNull()" would wave through.
     expect(rows[0]?.deletedAt).toBeInstanceOf(Date);
+  });
+
+  it("does not move an image tombstone that is already set", async () => {
+    // PR-11. The image update carried no `deleted_at IS NULL` of its own. That
+    // it could not overwrite an older tombstone was a property of the CALLER,
+    // not of the statement: the receipts update above returns zero rows and
+    // short-circuits first, and only because `visibleTo` carries
+    // `isNull(receipts.deletedAt)`.
+    //
+    // The state below - image tombstoned, receipt still visible - is reachable
+    // by no route in this codebase (there is no image-delete endpoint), so it
+    // is set by hand, exactly as the August 2026 audit reached PR-4's state.
+    // A migration, a dev script or a future admin tool reaches it the same way.
+    //
+    // Falsification, predicted then run:
+    //   Predicted: with `isNull(receiptImages.deletedAt)` removed, this fails
+    //   on the final assertion, with the tombstone moved forward to the
+    //   delete's own timestamp.
+    //   Actual: exactly that, at :85 - expected '2026-01-15T10:00:00.000Z',
+    //   received '2026-08-11T14:13:35.176Z', which is the moment the delete
+    //   ran. No gap. The seven-month jump is the finding, rendered.
+    const ORIGINAL_TOMBSTONE = new Date("2026-01-15T10:00:00.000Z");
+    await harness.db
+      .update(receiptImages)
+      .set({ deletedAt: ORIGINAL_TOMBSTONE })
+      .where(eq(receiptImages.receiptId, receiptId));
+
+    // The receipt itself is untouched and still visible, which is what makes
+    // the receipts update return a row and stop guarding the images update.
+    const response = await harness.request(
+      token,
+      "DELETE",
+      `/api/receipts/${receiptId}`,
+    );
+    expect(response.status).toBe(204);
+
+    const images = await harness.db
+      .select()
+      .from(receiptImages)
+      .where(eq(receiptImages.receiptId, receiptId));
+    expect(images).toHaveLength(1);
+    // The original tombstone survives. Without the guard this reads as the
+    // delete's own `new Date()`, seconds ago rather than January.
+    expect(images[0]?.deletedAt?.toISOString()).toBe(
+      ORIGINAL_TOMBSTONE.toISOString(),
+    );
   });
 
   it("excludes a deleted receipt from the list and its count", async () => {

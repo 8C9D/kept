@@ -419,6 +419,16 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
           and(
             eq(receiptImages.receiptId, id),
             eq(receiptImages.userId, userId),
+            // ⚠ The statement carries its own tombstone guard rather than
+            // borrowing the receipts update's. Nothing above stops this from
+            // rewriting an ALREADY-tombstoned image forward: the short-circuit
+            // at the top of this transaction only proves the RECEIPT is still
+            // visible, and an image tombstoned while its receipt is not is a
+            // state no route produces but a migration, a dev script or a
+            // future admin tool can. `deleted_at` is what a §10B retention
+            // sweep would be written against, so the value this moves is the
+            // one that decides when an object may be swept.
+            isNull(receiptImages.deletedAt),
           ),
         );
       return rows;
