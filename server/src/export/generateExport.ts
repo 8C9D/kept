@@ -189,12 +189,14 @@ export async function generateExport(
           throw error;
         }
         throw new Error(
+          // Delete first, then re-capture: the other order 409s when the
+          // re-captured bytes are identical, because the duplicate-image
+          // index only frees its slot once the old row is tombstoned.
           `Receipt ${row.receiptId} has no image in storage, so this export ` +
             `cannot be completed - its photo never finished uploading. ` +
-            `Capture that receipt again so a copy with its photo exists, then ` +
-            `delete this one; or delete this one now to export without it. ` +
-            `A deleted receipt is kept as a record but does not appear in ` +
-            `exports.`,
+            `Delete that receipt, then capture it again if you still have ` +
+            `the paper. Deleting alone will let the export run, without ` +
+            `that receipt in it.`,
           { cause: error },
         );
       }
@@ -235,8 +237,13 @@ function periodLabel(period: ExportPeriod): string {
 
 /**
  * "The object is not there", as opposed to "storage did not answer". S3 and
- * R2 both name this on the error rather than in its text; the same two names
- * `createBucketIfMissing` already matches on.
+ * R2 name this on the error rather than in its text, and the distinction is
+ * pinned by a test against a real client (`objectStorage.test.ts`) rather
+ * than by the fake, which could only assert it by fiat.
+ *
+ * Everything else a misconfigured or unreachable store produces has a
+ * different name - `NoSuchBucket`, `SignatureDoesNotMatch`, a connection
+ * error - so none of them is mistaken for a lost photo.
  */
 function isMissingObject(error: unknown): boolean {
   if (typeof error !== "object" || error === null || !("name" in error)) {

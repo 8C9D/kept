@@ -262,13 +262,16 @@ describe("the export pipeline", () => {
     // schema has no `image` key and `/upload-url` mints a fresh key every
     // call. So the message must not say "re-attach" - an earlier draft did,
     // and it sent the person looking for a control that does not exist.
-    expect(job.error).toMatch(/Capture that receipt again/);
+    expect(job.error).toMatch(/Delete that receipt, then capture it again/);
     expect(job.error).not.toMatch(/re-attach/i);
-    // And it states the cost of the other remedy rather than leaving the
-    // person to discover that deleting drops the receipt from every export.
-    expect(job.error).toMatch(/does not appear in exports/);
-    // The storage layer's own message is not what reaches the export screen.
-    expect(job.error).not.toContain("No such object");
+    // And it states the cost rather than leaving the person to discover that
+    // deleting drops the receipt from every export.
+    expect(job.error).toMatch(/without\s+that receipt in it/);
+    // The storage layer's own text does not reach the export screen. Asserted
+    // against the object key rather than the fake's wording: the key is what
+    // the real client's failure could carry, and it is a user id plus a path.
+    expect(job.error).not.toContain(userId);
+    expect(job.error).not.toMatch(/\.jpg/);
     // No receipt field beyond the id: this string is also logged, and the
     // §10B invariant is that server logs carry no receipt contents.
     expect(job.error).not.toContain("2026-03-15");
@@ -286,14 +289,11 @@ describe("the export pipeline", () => {
       image: imageFor(userId, "b2".repeat(32)),
     });
     expect(response.status).toBe(201);
-    const { id: receiptId } = (await response.json()) as { id: string };
-    // The bytes DO exist - this is not the missing-object case.
-    harness.storage.objects.set(
-      (await harness.db.select().from(receiptImages).where(eq(receiptImages.receiptId, receiptId)))[0]
-        ?.objectKey ?? "",
-      new Uint8Array([1, 2, 3]),
-    );
 
+    // No bytes are planted: the stub below replaces `download` outright, so
+    // whether the object exists is irrelevant to what this test asserts.
+    // (An earlier draft planted them under a comment claiming it mattered;
+    // deleting that block changed nothing, which is how it was caught.)
     const originalDownload = harness.storage.download;
     harness.storage.download = async () => {
       const error = new Error("connect ETIMEDOUT 1.2.3.4:443");

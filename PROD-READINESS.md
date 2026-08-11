@@ -243,11 +243,11 @@ create a receipt naming an object never uploaded  -> HTTP 201
 
 GET /api/export/<job>
 status: failed
-error:  Receipt 8a0ede75-5c83-4190-a0aa-d73d560e61ff has no image in storage,
+error:  Receipt b62a3acd-bca7-428f-9d09-6fa15ba63402 has no image in storage,
         so this export cannot be completed - its photo never finished
-        uploading. Capture that receipt again so a copy with its photo exists,
-        then delete this one; or delete this one now to export without it. A
-        deleted receipt is kept as a record but does not appear in exports.
+        uploading. Delete that receipt, then capture it again if you still
+        have the paper. Deleting alone will let the export run, without that
+        receipt in it.
 ```
 
 Before, that field read `The specified key does not exist.`
@@ -261,7 +261,9 @@ Two changes came out of it, and the second is the one that would have hurt:
 
 `tests/helpers/fakeObjectStorage.ts` was corrected in the same change: it threw a nameless `Error`, so a caller conflating "not there" with "storage did not answer" would still have passed. It now carries `name = "NoSuchKey"` like the real client.
 
-Three tests, each falsified independently: reverting to the bare `download` fails the naming test; removing the not-found discrimination fails the storage-outage test. **No receipt field beyond the id is in the string** - the purchase date was in the first version and is gone, because this message is also logged, and `grep` for the vendor and the date in the server log returns 0.
+Three tests, each falsified independently: reverting to the bare `download` fails the naming test; removing the not-found discrimination fails the storage-outage test. **No receipt field beyond the id is in the string** - the purchase date was in the first version and is gone, because this message is also logged, and `grep` for the user id, the vendor and the date in the server log returns 0.
+
+**REVIEW-3b then passed it, with four further corrections to this same change, all taken:** the remedy order is reversed (capture-then-delete 409s on the duplicate-image index when the re-captured bytes are identical; delete-then-capture does not); `objectStorage.test.ts` now asserts the **real** client names a missing object `NoSuchKey`, which the whole fix pivots on and which only the fake had been asserting; a dead setup block in the storage-outage test is removed (deleting it changed nothing, which is how it was caught); and `isMissingObject`'s comment no longer cites `createBucketIfMissing` as precedent for a name it does not match.
 
 ---
 

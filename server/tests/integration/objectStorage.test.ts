@@ -70,10 +70,20 @@ describe("s3ObjectStorage against MinIO", () => {
     expect(await storage.download(objectKey)).toEqual(bytes);
   });
 
-  it("download of a missing key fails loudly", async () => {
+  it("download of a missing key fails loudly, and names itself NoSuchKey", async () => {
+    // The name is load-bearing, not incidental. `generateExport` decides
+    // whether a failed download means "this receipt's photo is gone" or
+    // "storage did not answer" by `error.name === "NoSuchKey"`, and the two
+    // lead to opposite advice - one of them tells a person to delete a
+    // receipt. Only this test runs against a real S3 client; the fake
+    // asserts the name by fiat, so if the real name ever drifts, that check
+    // silently becomes a no-op with every other test still green.
     await expect(
       storage.download(`${runPrefix}/does-not-exist.jpg`),
     ).rejects.toThrow();
+    await expect(
+      storage.download(`${runPrefix}/does-not-exist.jpg`),
+    ).rejects.toMatchObject({ name: "NoSuchKey" });
   });
 });
 
