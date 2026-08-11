@@ -74,3 +74,36 @@ export function assertLocalDatabase(
     );
   }
 }
+
+/**
+ * Whether a Postgres URL asks for an encrypted connection.
+ *
+ * ⚠ `pg` negotiates nothing on its own. A `postgres://` URL with no `sslmode`
+ * connects in cleartext and reports `pool.options.ssl === undefined`, so the
+ * only thing standing between receipt data and the wire is what the URL says.
+ * `assertProductionEnv` refuses a production URL that says nothing.
+ *
+ * The accepted spellings are libpq's, which is what `pg` parses:
+ * `require`, `verify-ca` and `verify-full` all encrypt. `prefer` and `allow`
+ * are deliberately NOT accepted - both fall back to cleartext when the server
+ * declines, which is exactly the silent downgrade this exists to prevent.
+ * `disable` is a refusal in so many words. `ssl=true` is accepted because
+ * `pg` honours it as a synonym.
+ */
+export function requiresTls(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // Unparseable is not "requires TLS". The caller has its own refusal for a
+    // malformed URL; saying "yes" here would let one skip the other.
+    return false;
+  }
+  const sslmode = parsed.searchParams.get("sslmode");
+  if (sslmode !== null) {
+    return ENCRYPTING_SSLMODES.has(sslmode.toLowerCase());
+  }
+  return parsed.searchParams.get("ssl") === "true";
+}
+
+const ENCRYPTING_SSLMODES = new Set(["require", "verify-ca", "verify-full"]);

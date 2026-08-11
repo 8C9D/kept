@@ -1,4 +1,4 @@
-import { databaseIdentity } from "./db/databaseUrl.js";
+import { databaseIdentity, requiresTls } from "./db/databaseUrl.js";
 import { resolveStorageConfig } from "./storage/s3ObjectStorage.js";
 
 /**
@@ -21,6 +21,12 @@ import { resolveStorageConfig } from "./storage/s3ObjectStorage.js";
  *   there; the deployment target is Neon, whose hostnames are remote by
  *   construction. This is the mirror image of assertLocalDatabase, which
  *   keeps the destructive dev scripts OFF remote databases.
+ * - A DATABASE_URL that does not require TLS sends every receipt field, the
+ *   HST, the supplier's GST/HST number and ocr_raw_text over cleartext, for
+ *   the same reason the storage endpoint above must be https. `pg`
+ *   negotiates nothing on its own. This clause was missing for the list's
+ *   whole life: the same function required encryption of one backing service
+ *   and not of the other, eight lines apart (round 3, R2-4).
  * - A short SESSION_JWT_SECRET undermines HS256; 32 bytes is the minimum
  *   the algorithm's security argument assumes. Checked only in production
  *   so a throwaway dev secret stays a dev convenience.
@@ -61,6 +67,35 @@ export function assertProductionEnv(
     throw new Error(
       "DATABASE_URL names a loopback database, which does not exist on a " +
         "production machine. Point it at the Neon connection string.",
+    );
+  }
+
+  // The symmetry with the storage check eight lines above is the whole
+  // argument. That one refuses cleartext because presigned URLs would carry
+  // receipt IMAGES over http; this connection carries the same receipts in
+  // structured form - vendor, purchase date, subtotal, HST, the supplier's
+  // GST/HST registration number, notes, and ocr_raw_text, which is the entire
+  // receipt - and `pg` negotiates no TLS on its own. Measured: a postgres://
+  // URL with no sslmode yields `pool.options.ssl === undefined`, and the
+  // connection goes out in the clear.
+  //
+  // In practice Neon's connection strings carry `?sslmode=require` and Neon
+  // refuses cleartext anyway, so this should never fire on the intended
+  // deployment. That is the point: it costs nothing when the deployment is
+  // right and it is the only thing that would notice when it is not.
+  //
+  // ⚠ This is boot-blocking, and round 2 was burned by making a boot-blocking
+  // requirement out of a permission a third party grants (HeadBucket against
+  // R2), trading a P1 for a P0. This is deliberately not that shape: it reads
+  // a string the operator sets and can see, the message names the exact edit,
+  // and one `fly secrets set` fixes it. Nothing outside this machine has to
+  // agree.
+  if (!requiresTls(env.DATABASE_URL ?? "")) {
+    throw new Error(
+      "DATABASE_URL does not require TLS, so receipt data would cross the " +
+        "network in cleartext. Add ?sslmode=require to the connection string " +
+        "(Neon's own connection strings already carry it). STORAGE_ENDPOINT is " +
+        "held to the same rule for the same reason.",
     );
   }
 
