@@ -3,7 +3,9 @@ import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { createAppleIdentityVerifier } from "./auth/appleVerifier.js";
 import { createSessionTokens } from "./auth/session.js";
-import { createDb } from "./db/client.js";
+import { assertDatabaseReachable, createDb } from "./db/client.js";
+import { databaseIdentity } from "./db/databaseUrl.js";
+import { errorSummary } from "./observability/errorSummary.js";
 import {
   findPortListeners,
   formatPortInUseMessage,
@@ -13,6 +15,7 @@ import { createLlmParseSweep } from "./parse/llmParseSweep.js";
 import { assertProductionEnv } from "./productionEnv.js";
 import {
   LOCAL_DEV_STORAGE_CONFIG,
+  assertBucketReachable,
   createBucketIfMissing,
   createS3ObjectStorage,
   resolveStorageConfig,
@@ -73,9 +76,52 @@ if (configuredStorage === null) {
       { cause: error },
     );
   }
+} else {
+  // The branch above has always proved local storage answers. Configured
+  // storage - R2 in deployment, and any STORAGE_* set on a laptop - had no
+  // equivalent, so a wrong token surfaced as the first image upload rather
+  // than at boot. Read-only: this asks whether the bucket is there, and
+  // never creates one.
+  try {
+    await assertBucketReachable(storageConfig);
+  } catch (error) {
+    throw new Error(
+      `Object storage did not answer at ${storageConfig.endpoint} for bucket ` +
+        `"${storageConfig.bucket}" - check STORAGE_ENDPOINT, STORAGE_BUCKET and ` +
+        `the credentials in STORAGE_ACCESS_KEY_ID / STORAGE_SECRET_ACCESS_KEY.`,
+      { cause: error },
+    );
+  }
 }
 
-const { db } = createDb(databaseUrl);
+const { db, pool } = createDb(databaseUrl);
+
+// The configuration checks above all ask whether a value is present and
+// well-shaped. This is the one that asks whether the service it names is
+// actually there - the gap that let a wrong password produce a process that
+// listened, satisfied the Runbook's `GET /api/me` → 401 deploy check (which
+// never opens a connection), and answered 500 to every real request.
+//
+// Named without the URL, deliberately: DATABASE_URL carries the password.
+const database = databaseIdentity(databaseUrl, "DATABASE_URL");
+try {
+  await assertDatabaseReachable(pool);
+} catch (error) {
+  // Reported through errorSummary and exited, rather than thrown like the
+  // storage failures above. The difference is not style: a `pg` failure
+  // carries database-error markers, and a thrown error is printed by node's
+  // default handler, which dumps the whole object - the exact thing PR-2
+  // established must never happen. A connection failure happens to carry no
+  // row values; "happens to" is not the guarantee this project chose to rest
+  // on, and the next failure to reach this line might be a different one.
+  console.error(
+    `Database at ${database.host}:${database.port}/${database.database} did not ` +
+      `answer, so this process is refusing to serve. Check DATABASE_URL and that ` +
+      `the database is running and reachable from here.`,
+  );
+  console.error(errorSummary(error));
+  process.exit(1);
+}
 
 // The server-side LLM parse (spec §7.3). Kicked at startup for anything a
 // restart interrupted, after each capture by the receipt routes, and on an

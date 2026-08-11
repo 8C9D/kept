@@ -161,6 +161,31 @@ export async function createBucketIfMissing(
   await client.send(new CreateBucketCommand({ Bucket: config.bucket }));
 }
 
+/**
+ * Prove configured object storage ANSWERS, without creating anything.
+ *
+ * The sibling above conjures a bucket, and only local development may call it
+ * - a deployed bucket is provisioned deliberately, lifecycle rules and all
+ * (spec §10B). So the deployed shape gets the read-only half of the same
+ * question, and a wrong R2 token stops the process at startup instead of
+ * surfacing as the first image upload.
+ *
+ * One attempt, unlike the database probe's five: R2 does not autosuspend, so
+ * there is no cold start to wait out, and Fly restarts a machine whose process
+ * exits - which makes a transient blip a retry at the platform's layer rather
+ * than a loop in ours.
+ *
+ * Deliberately NOT a method on ObjectStorage: adding a `head` operation to
+ * that interface is the open ruling about an existence check at capture time,
+ * and this must not decide it in passing.
+ */
+export async function assertBucketReachable(
+  config: S3StorageConfig,
+): Promise<void> {
+  const client = makeClient(config);
+  await client.send(new HeadBucketCommand({ Bucket: config.bucket }));
+}
+
 function makeClient(config: S3StorageConfig): S3Client {
   return new S3Client({
     endpoint: config.endpoint,

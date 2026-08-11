@@ -36,3 +36,78 @@ export function createDb(databaseUrl: string) {
 }
 
 export type Db = ReturnType<typeof createDb>["db"];
+
+/**
+ * Prove the database ANSWERS before the process agrees to serve.
+ *
+ * The entrypoint already refuses to start on a missing environment variable
+ * and on a configuration that is not production-shaped. Both of those ask
+ * about the string. Neither asks whether the service it names is there - and
+ * `pg` connects lazily, so nothing else did either: a wrong password produced
+ * a process that printed "Kept API listening", passed the `curl /api/me` →
+ * 401 check the Runbook prescribes (that path never opens a connection), and
+ * answered 500 to every authenticated request.
+ *
+ * Retried rather than probed once, because the deployment target autosuspends.
+ * A Neon compute waking is the expected first-connection experience, not a
+ * fault, and crashing on it would turn a routine cold start into a restart
+ * loop. A wrong credential fails all the attempts and costs only the budget
+ * below.
+ *
+ * Each attempt carries its own timeout because the pool has none: the pool is
+ * built with `connectionString` alone, so `connectionTimeoutMillis` is 0 and a
+ * connect against a black-holed host would otherwise hang here forever.
+ *
+ * A timed-out attempt leaves its query running on the pool. That is deliberate
+ * and bounded: the only caller is startup, and startup either proceeds (in
+ * which case one stray checkout is reclaimed by pg's 10 s idle reaper) or
+ * throws and takes the process with it.
+ */
+export async function assertDatabaseReachable(
+  pool: Pool,
+  options: { attempts?: number; delayMs?: number; timeoutMs?: number } = {},
+): Promise<void> {
+  const attempts = options.attempts ?? 5;
+  const delayMs = options.delayMs ?? 1000;
+  const timeoutMs = options.timeoutMs ?? 5000;
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await withTimeout(pool.query("select 1"), timeoutMs);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw new Error(
+    `Database did not answer after ${attempts} attempts`,
+    { cause: lastError },
+  );
+}
+
+class ProbeTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Probe did not answer within ${timeoutMs}ms`);
+    this.name = "ProbeTimeoutError";
+  }
+}
+
+async function withTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new ProbeTimeoutError(timeoutMs)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
