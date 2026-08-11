@@ -92,13 +92,24 @@ if (configuredStorage === null) {
   try {
     await assertStorageReachable(storageConfig);
   } catch (error) {
+    // ⚠ This names the operation the probe actually issues, and that is the
+    // whole point of the sentence. It used to say "read the bucket's metadata"
+    // and to cite a ledger file, and both were wrong: the probe was moved off
+    // `HeadBucket` and onto a `GetObject` precisely BECAUSE bucket metadata is
+    // the permission an R2 token scoped "read and write to one bucket" is not
+    // known to carry, so the old text sent an operator to check the one thing
+    // the fix exists to avoid needing. The cited file is not copied into the
+    // image (see the Dockerfile), so it named a document the reader cannot
+    // open. A refusal message is read exactly once, by someone with a broken
+    // deploy, and it has to be true on its own.
     throw new Error(
       `Object storage did not answer at ${storageConfig.endpoint} for bucket ` +
         `"${storageConfig.bucket}", so this process is refusing to serve. Check ` +
         `STORAGE_ENDPOINT, STORAGE_BUCKET and the credentials in ` +
         `STORAGE_ACCESS_KEY_ID / STORAGE_SECRET_ACCESS_KEY - and, if those are ` +
-        `right, that the token is permitted to read the bucket's metadata ` +
-        `(see ASSUMPTIONS in PROD-READINESS-ROUND-2.md).`,
+        `right, that the token may read objects in that bucket: the probe ` +
+        `issues one GetObject and expects it to come back "no such key". ` +
+        `That is the same permission the export download path needs.`,
       { cause: error },
     );
   }

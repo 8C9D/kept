@@ -220,6 +220,41 @@ describe("the entrypoint's startup probe", () => {
     expect(result.output).not.toContain("kept-local-dev");
   }, 40_000);
 
+  it("tells the operator which permission the probe actually needs, and names no file the image does not carry", async () => {
+    // R3-1. `868d796` moved the probe from HeadBucket to a GetObject of a key
+    // that cannot exist, deliberately, because a bucket-scoped "read and write"
+    // R2 token is not known to permit bucket-level metadata - and it left this
+    // refusal telling the operator to go check exactly that metadata
+    // permission. It also pointed at PROD-READINESS-ROUND-2.md, which
+    // server/Dockerfile does not COPY into the image, so the one reader of this
+    // sentence cannot open the document it sends them to.
+    //
+    // Falsification, predicted then run, per the project's rule:
+    //   Predicted: reverting src/index.ts to the old wording fails this case on
+    //   the `not.toContain("PROD-READINESS-ROUND-2.md")` assertion.
+    //   Actual: it failed two assertions EARLIER, on `toMatch(/GetObject/)`
+    //   (startupProbe.test.ts:244), because the old message names no operation
+    //   at all and vitest reports only the first failure.
+    //   Gap, recorded rather than smoothed over: the prediction was written
+    //   about what the old message says WRONG, and the assertion that fires
+    //   first is about what it does not say at ALL. Both directions are pinned
+    //   deliberately - the positive assertions fail if the operation is
+    //   unnamed, the negative ones fail if either half of the old text returns
+    //   - so a partial revert cannot slip through whichever fires first.
+    const result = await runEntrypoint({ STORAGE_ENDPOINT: "http://127.0.0.1:9089" });
+
+    expect(result.output).toContain("Object storage did not answer");
+    // The permission it names must be the one the probe uses.
+    expect(result.output).toMatch(/GetObject/);
+    expect(result.output).toMatch(/may read objects in that bucket/);
+    // Neither half of the old message may come back.
+    expect(result.output).not.toMatch(/bucket's metadata/);
+    expect(result.output).not.toContain("PROD-READINESS-ROUND-2.md");
+    // A refusal is read on a machine that has only what the Dockerfile copied,
+    // so it may not send the reader to a repository file at all.
+    expect(result.output).not.toMatch(/PROD-READINESS|reviews\//);
+  }, 40_000);
+
   it("still starts against a database that answers, so the probe cannot be a false alarm", async () => {
     // The negative test above passes if the entrypoint refuses to start for
     // ANY reason. This is the one that says the refusal is specific.
