@@ -213,6 +213,14 @@ describe("the LLM parse sweep's failure log", () => {
 
 describe("the request log", () => {
   async function captureRequest(run: () => Promise<void>): Promise<string> {
+    // ⚠ Reset per capture, not only per test. `lines` is module-level and was
+    // cleared in `beforeEach` alone, which is invisible while every case
+    // captures exactly once and wrong the moment one captures twice:
+    // `requestLine` returns the FIRST request line it can parse, so a second
+    // capture in the same test silently re-reads the first capture's line.
+    // Found by the two-capture case below, which passed its "rejected" leg and
+    // then failed its "absent" leg against the rejected leg's own line.
+    lines = [];
     captureConsole();
     try {
       await run();
@@ -296,6 +304,66 @@ describe("the request log", () => {
     const line = requestLine(logs);
     expect(line?.status).toBe(401);
     expect(line?.authenticated).toBe(false);
+    // No Authorization header at all, so nothing was presented either.
+    expect(line?.sessionPresented).toBe(false);
+  });
+
+  it("separates a rejected session from no session, which is the question this log exists to answer", async () => {
+    // R3-2. The docstring on requestLog listed "whether a session was
+    // presented" as the diagnostic fact it keeps in exchange for withholding
+    // the user id, and the spec said so too - and the line reported only
+    // whether authentication SUCCEEDED. So a client that stopped sending a
+    // token and a client whose every token is being rejected produced byte-
+    // identical lines, and those have opposite remedies.
+    //
+    // Falsification, predicted then run, both directions:
+    //   Predicted: deleting `sessionPresented` from requestLog.ts fails this on
+    //   `expect(rejected?.sessionPresented).toBe(true)` with undefined.
+    //   Actual: exactly that, at :355. No gap.
+    //   Predicted: hardcoding the field to `true` fails the absent leg.
+    //   Actual: exactly that, at :356, "expected true to be false". No gap.
+    // The pairing is what makes it discriminate. Asserting `true` on one line
+    // alone passes against a hardcoded field, which is why the no-header case
+    // must come out false in the same run.
+    //
+    // ⚠ The first version of this case was itself unfalsifiable, and the way it
+    // failed is worth keeping. `lines` is module-level and was cleared only in
+    // `beforeEach`, while `requestLine` returns the FIRST parseable request
+    // line - so the second capture below re-read the first capture's line and
+    // the absent leg was asserting against the rejected leg's own output. It
+    // showed up as "expected true to be false" on unmutated code. `captureRequest`
+    // now resets per capture; every single-capture case above is unaffected.
+    const rejectedLogs = await captureRequest(async () => {
+      // Genuine shape, wrong signature: this is what a revoked or forged
+      // session looks like at the boundary.
+      const response = await harness.request(
+        "not-a-real-token.and-not-signed.by-this-server",
+        "GET",
+        "/api/me",
+      );
+      expect(response.status).toBe(401);
+    });
+    const rejected = requestLine(rejectedLogs);
+
+    const absentLogs = await captureRequest(async () => {
+      const response = await harness.request(null, "GET", "/api/me");
+      expect(response.status).toBe(401);
+    });
+    const absent = requestLine(absentLogs);
+
+    // Both are 401s and both failed to authenticate, which is precisely why
+    // the status code could not separate them.
+    expect(rejected?.status).toBe(401);
+    expect(absent?.status).toBe(401);
+    expect(rejected?.authenticated).toBe(false);
+    expect(absent?.authenticated).toBe(false);
+
+    // And this is the fact that now tells them apart.
+    expect(rejected?.sessionPresented).toBe(true);
+    expect(absent?.sessionPresented).toBe(false);
+
+    // The credential itself still never reaches the log.
+    expect(rejectedLogs).not.toContain("not-a-real-token");
   });
 
   it("reports a request that produced no response as such, rather than as a success", async () => {
