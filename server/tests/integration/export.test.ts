@@ -622,4 +622,91 @@ describe("the export pipeline", () => {
       expect(job.downloadUrl).not.toBeNull();
     }
   });
+
+  it("refuses to presign an export key naming another user's prefix", async () => {
+    // PR-4, and an unfulfilled 2026-08-06 ruling: "stored object keys are
+    // re-validated on read, in both places one is dereferenced". There are
+    // three places, and the export download URL was the one with no check.
+    //
+    // No route can produce this row, so it is hand-edited, exactly as the
+    // August 2026 audit reached it. That is the whole point of a read-time
+    // check: write-time validation cannot speak for rows a migration, a dev
+    // script or a bug changed later.
+    //
+    // Falsification, predicted then run:
+    //   Predicted: with `isIssuedExportKey` removed from downloadUrlFor, this
+    //   fails on `expect(job.downloadUrl).toBeNull()`, with a presigned URL
+    //   naming the victim's prefix.
+    //   Actual: exactly that, at :661 - "expected
+    //   'https://fake-r2.test/download/exports...' to be null". The URL that
+    //   came back is the leak, rendered. No gap.
+    const started = await harness.request(token, "POST", "/api/export", {
+      periodStart: "2026-01-01",
+      periodEnd: "2026-12-31",
+    });
+    const { id } = (await started.json()) as JobResponse;
+    await pollUntilSettled(token, id);
+
+    const victimId = "00000000-0000-4000-8000-000000000000";
+    const foreignKey = `${EXPORTS_PREFIX}${victimId}/${id}/Receipts-2026.zip`;
+    await harness.db
+      .update(exportJobs)
+      .set({ objectKey: foreignKey })
+      .where(eq(exportJobs.id, id));
+
+    const detail = await harness.request(token, "GET", `/api/export/${id}`);
+    expect(detail.status).toBe(200);
+    const job = (await detail.json()) as JobResponse;
+    // Still reported complete - the job DID complete. What is refused is the
+    // URL, which is the only thing that would have leaked.
+    expect(job.status).toBe("complete");
+    expect(job.downloadUrl).toBeNull();
+  });
+
+  it("contains a corrupt export key to its own job instead of failing the whole history list", async () => {
+    // REVIEW-0 RV3-E. `GET /api/export` maps downloadUrlFor over up to 50 rows
+    // inside a Promise.all, so copying assertIssuedObjectKey's throw would have
+    // relocated the blast radius rather than bounded it: one hand-edited row
+    // would take down the only route that lists a user's exports, making every
+    // OTHER export unreachable. This is the case that pins the containment.
+    //
+    // Falsification, predicted then run:
+    //   Predicted: replacing the refusal in downloadUrlFor with a throw fails
+    //   this on `expect(response.status).toBe(200)`, receiving 500.
+    //   Actual: exactly that, at :697 - "expected 500 to be 200". No gap, and
+    //   it is the measurement that settles RV3-E: a throw here really does
+    //   take the whole history list down, rather than the one bad row.
+    const ids: string[] = [];
+    for (const period of ["2024", "2025"]) {
+      const response = await harness.request(token, "POST", "/api/export", {
+        periodStart: `${period}-01-01`,
+        periodEnd: `${period}-12-31`,
+      });
+      const { id } = (await response.json()) as JobResponse;
+      await pollUntilSettled(token, id);
+      ids.push(id);
+    }
+
+    // Exactly one of the two rows is corrupted.
+    const [corruptedId, healthyId] = ids as [string, string];
+    await harness.db
+      .update(exportJobs)
+      .set({
+        objectKey: `${EXPORTS_PREFIX}00000000-0000-4000-8000-000000000000/${corruptedId}/Receipts-2024.zip`,
+      })
+      .where(eq(exportJobs.id, corruptedId));
+
+    const response = await harness.request(token, "GET", "/api/export");
+    // The list still answers. This is the assertion RV3-E is about.
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { jobs: JobResponse[] };
+    expect(body.jobs).toHaveLength(2);
+
+    const corrupted = body.jobs.find((j) => j.id === corruptedId);
+    const healthy = body.jobs.find((j) => j.id === healthyId);
+    // The bad row loses its URL...
+    expect(corrupted?.downloadUrl).toBeNull();
+    // ...and the good one keeps its own, which is the containment claim.
+    expect(healthy?.downloadUrl).not.toBeNull();
+  });
 });

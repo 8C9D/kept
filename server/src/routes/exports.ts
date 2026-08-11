@@ -16,6 +16,7 @@ import {
 import { sessionAuth, type AuthedEnv } from "../http/sessionAuth.js";
 import { errorSummary } from "../observability/errorSummary.js";
 import { runExportJob } from "../export/runExportJob.js";
+import { isIssuedExportKey } from "../storage/objectKeys.js";
 import type { ObjectStorage } from "../storage/objectStorage.js";
 
 interface ExportRouteDependencies {
@@ -144,10 +145,41 @@ export function exportRoutes(deps: ExportRouteDependencies): Hono<AuthedEnv> {
 
   return router;
 
+  /**
+   * The third place a stored object key is dereferenced, and until round 3 the
+   * only one that did not re-validate it (PR-4). Write-time validation says
+   * "we issued every key we accepted"; it cannot say "we issued every key we
+   * are about to hand out", because a row can change by paths that are not the
+   * create route - a migration, a dev script, a future admin tool, a bug. The
+   * August 2026 audit proved the difference by hand-editing one row.
+   *
+   * ⚠ This refuses per job rather than throwing, and that is a deliberate
+   * departure from `assertIssuedObjectKey`, which throws and renders as a 500.
+   * The reason is the caller: `GET /api/export` maps this over up to 50 rows
+   * inside a `Promise.all`, so a throw would fail the entire history list and
+   * make every OTHER export unreachable through the only route that lists
+   * them. One corrupt row would cost a user their whole export history.
+   *
+   * The isolation guarantee is identical either way - no URL is issued. What
+   * differs is the blast radius of a data-integrity fault, and the load-bearing
+   * half of `objectKeys.ts`'s "fail the request loudly and leave a log line" is
+   * the log line, not the status code. A 500 does not say WHICH row was wrong;
+   * the line below does.
+   */
   async function downloadUrlFor(
     job: typeof exportJobs.$inferSelect,
   ): Promise<string | null> {
     if (reportedStatus(job, new Date()) !== "complete" || job.objectKey === null) {
+      return null;
+    }
+    if (!isIssuedExportKey(job.objectKey, job.userId, job.id)) {
+      // The key itself is deliberately absent, for the same reason
+      // assertIssuedObjectKey withholds it: if it names another user's prefix,
+      // that prefix IS their user id. The job id is enough to find the row.
+      console.error(
+        `Export job ${job.id} holds an object key this server did not issue; ` +
+          `refusing to presign a URL for it`,
+      );
       return null;
     }
     return deps.storage.presignDownload(job.objectKey);

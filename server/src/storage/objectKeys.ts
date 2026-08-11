@@ -97,6 +97,42 @@ const ISSUED_KEY_REMAINDER =
   /^\d{4}\/\d{2}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[a-z]+$/;
 
 /**
+ * The export half of the same question, on the way *out* of the database.
+ *
+ * The 2026-08-06 ruling was "stored object keys are re-validated on read, in
+ * both places one is dereferenced". There are **three** places: the receipt
+ * detail route, export generation, and the export download URL - and the third
+ * had no check at all, so this is an unfulfilled ruling as much as a hardening
+ * step.
+ *
+ * Stricter than `isIssuedObjectKey`, because it can afford to be. A receipt
+ * image key can only be pinned to its owner, since the caller does not know
+ * which uuid or which month to expect. An export key is dereferenced from the
+ * job row itself, so the user id AND the job id are both in hand, and the whole
+ * string is checked against exactly what `exportObjectKey` would have produced
+ * for that row. There is no wildcard segment.
+ *
+ * The filename is the only varying part, and `generateExport` builds it from
+ * `periodLabel`, which emits either `yyyy` or `yyyy-mm-dd_to_yyyy-mm-dd` over
+ * dates that are already `isoDateSchema`-validated and cannot contain a slash.
+ */
+export function isIssuedExportKey(
+  objectKey: string,
+  userId: string,
+  jobId: string,
+): boolean {
+  const prefix = `${EXPORTS_PREFIX}${userId}/${jobId}/`;
+  if (!objectKey.startsWith(prefix)) {
+    return false;
+  }
+  return ISSUED_EXPORT_FILENAME.test(objectKey.slice(prefix.length));
+}
+
+/** `Receipts-2026.zip`, or `Receipts-2025-04-01_to_2026-03-31.zip`. */
+const ISSUED_EXPORT_FILENAME =
+  /^Receipts-(\d{4}|\d{4}-\d{2}-\d{2}_to_\d{4}-\d{2}-\d{2})\.zip$/;
+
+/**
  * The same check on the way *out* of the database, before a stored key is
  * turned into a presigned URL or a download.
  *
