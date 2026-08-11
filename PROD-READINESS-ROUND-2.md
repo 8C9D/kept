@@ -472,6 +472,8 @@ ssl: undefined
 **P2, taking the lower of an ambiguous pair.** In practice Neon's connection strings carry `?sslmode=require` and Neon's endpoints refuse cleartext, so the realistic deployment is encrypted - but that is Neon enforcing it, not this repository requiring it, and nothing here would notice if a URL arrived without it. The symmetry argument is what makes it a finding at all: the same function, eight lines apart, requires TLS of one backing service and not of the other.
 Discovered after Review 0, so it is documented here and not fixed, regardless of severity.
 
-**Carried in from round 2's own P2/P3 set, as round 3's candidate input:** PR-4, PR-6, PR-7, PR-8, PR-9, PR-10, PR-11, PR-12, PR-13, N-1, N-2, N-3, N-4, N-5, R2-2, R2-3, R2-4.
+**Carried in from round 2's own P2/P3 set, as round 3's candidate input - eighteen items:** PR-4, **PR-5**, PR-6, PR-7, PR-8, PR-9, PR-10, PR-11, PR-12, PR-13, N-1, N-2, N-3, N-4, N-5, R2-2, R2-3, R2-4.
+
+*(Corrected after REVIEW-FINAL. The first version of this line omitted **PR-5** - which §1 grades P2 and which this round explicitly considered and declined to elevate - and so enumerated seventeen. Recorded rather than silently repaired: a carry list that drops an item is how a finding stops existing, and the omission was of the one finding whose severity this round argued about most.)*
 
 **Plus one nit not worth a finding row:** `.githooks/pre-commit` tells the reader to "bypass once with `--no-verify`" when gitleaks is missing, and `CLAUDE.md` says never to use it. The hook is fail-closed and correct; only its advice contradicts the standing instruction.
