@@ -4,6 +4,56 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-11 - Production-readiness round 3: the backlog nobody was allowed to fix, and five sentences that outlived the code they described
+
+**A third staged, adversarially reviewed hardening pass over `server/` only**, on branch `prod-readiness/round-3`, cut from round 2's branch rather than from `main`.
+Same constraints: no features, no new endpoint, table, column or config key, nothing deployed, no remote, no Anthropic API call, `ios/` untouched.
+Ledger at `PROD-READINESS-ROUND-3.md`, review trail at `reviews/round3/`; rounds 1 and 2 are left intact.
+**This entry is again the exception to the per-commit doc-ownership rule**, honoured once here with its spec amendment in the same commit.
+
+**The rule that changed, and why.** Rounds 1 and 2 each froze a P0/P1-only work list and documented every P2, on the reasoning that a hardening pass should not spend itself on small things.
+Two independent sweeps have now re-verified the same backlog and found no further P1s in it, so this round drew its list from the P2s instead, capped at eight, on the thesis that what is left is an accumulation of small things nobody was allowed to fix rather than one large thing nobody has found.
+**Eighteen candidates carried in and eighteen survived re-verification, none struck as fabricated and no severity moved.**
+That is a weaker result than it sounds and was recorded as such: agreement between two sweeps a day apart is cheap.
+
+**Eight findings frozen, eight resolved, one commit each, every fix shipped with a test that dies when the behaviour is removed.**
+Ordered smallest blast radius first: the storage refusal named the wrong permission (**R3-1**); the request log answered the wrong question (**R3-2**); the image soft-delete would overwrite an older tombstone (**PR-11**); export download URLs were the third dereference site and the only one not re-validated (**PR-4**); a genuine token with a non-uuid subject answered 500 instead of 401 (**PR-12**); the pool armed no connect timer, so a checkout against a black-holed host waited forever (**PR-9a**); the production image ran as root (**PR-7**, `DEPLOY-CONFIG`); and nothing required TLS on `DATABASE_URL` though the same function required it of `STORAGE_ENDPOINT` eight lines earlier (**R2-4**).
+
+**Two of the eight were found by this round rather than inherited, and both are the same shape: a sentence in this repository describing behaviour the code does not have.**
+Round 1's blind spot was existence and round 2's was that its own new code had no test; fired as a lens, the question "what does this codebase assert in prose and nowhere else" found a refusal message telling an operator to check a permission the previous round's fix existed to avoid needing, citing a ledger file the Dockerfile does not copy into the image, and a request-log field documented in three places as "whether a session was presented" that in fact reported whether authentication succeeded, so a client sending no token and a client whose every token was rejected logged identical lines.
+
+**Then the same lens, turned on this round, found five more instances in its own output.**
+This is the part worth carrying.
+A docstring was falsified by the commit editing the file eight lines above it and left standing; R2-4's cited measurement (`pool.options.ssl === undefined`) **did not discriminate**, because `Pool` never parses the connection string and reports `undefined` for correct URLs too; the refusal of `sslmode=prefer` and `allow` was justified as current `pg` behaviour when it is true only of a future major version; this ledger claimed in the present tense that this entry already existed; and the export refusal was described as logging through `errorSummary`, which it does not.
+All five were prose, none was a runtime defect, and all five are corrected.
+**The method a round uses to audit other people's work is not automatically applied to its own.**
+
+**Rejected: copying `assertIssuedObjectKey`'s throw into the export path.**
+The obvious fix for PR-4 was the one its sibling already uses, and it would have relocated the blast radius rather than bounded it: `GET /api/export` maps the dereference over up to fifty rows inside a `Promise.all`, so one hand-edited row would have failed the entire history list and made every other export unreachable through the only route that lists them.
+Measured rather than argued - replacing the refusal with a throw returns **500 for the whole list**.
+The export path refuses per job, logs the refusal naming the job and withholding the key, and returns a null download URL for that job alone.
+The isolation guarantee is identical; what differs is what one corrupt row costs.
+
+**Rejected: adding a health check to `fly.toml` (PR-8), on scope rather than on severity.**
+A check worth adding must re-ask R2-1's question, and no route can answer it: `GET /api/me` returns 401, which Fly reads as failure, and nothing answers 2xx unauthenticated.
+The honest remedy is a new endpoint, which is the feature line this run may not cross, and it is also an unauthenticated route reporting whether the database is up.
+Surfaced as a ruling instead.
+
+**Deferred inside a frozen finding: PR-9's statement timeout.**
+The connect timeout was set; the statement timeout was not, and the reason is receipt data.
+One number applies to every query in the process, `generateExport` reads a whole fiscal year and streams every image through one connection, and nothing here has measured that against a realistic row count.
+A value guessed low truncates an export rather than failing a request, so the honest move was to leave it open with the measurement named.
+
+**One defect of this round's own making was caught inside the pass that caused it**: R3-2's first test passed its rejected-token leg and failed its no-token leg against unmutated code, because the log-capture helper reset per test while the reader returned the first line it could parse, so the second capture re-read the first capture's output.
+**No assertion that could not fail was shipped**; the project's running count stays at eight.
+The final reviewer re-ran every mutation independently and confirmed all ten new tests die when their behaviour is removed.
+
+**Gates: 299 tests green across 31 files (289 at baseline), `tsc --noEmit` clean, `npm audit` 6 moderate, `drizzle-kit check` clean, and the real entrypoint answering `GET /api/me` with 401 and `Cache-Control: no-store`.**
+
+**Everything else is documented and unfixed, by the run's own rule.** Twelve P2/P3 findings carry to round 4: PR-5, PR-6, PR-8, PR-10, PR-13, N-1, N-2, N-3, N-4, N-5, R2-2, R2-3, plus PR-9's deferred statement-timeout half.
+
+**Still the owner's, and none implemented here:** R-1's existence check at capture time, the orphaned-object policy, the scheduled `pg_dump` destination and the Neon plan, what a replayed create should be told, whether the export CSV should be mutated to defend a spreadsheet, whether any of the three branches merges to `main` (none is; `main` is still at `ca82907`), confirming at first deploy that the R2 token can read from its bucket, and one new item - **what a health check should ask, given that no route can answer it.**
+
 ## 2026-08-11 - Production-readiness round 2: the checks all asked whether configuration was well-formed, and none asked whether anything was there
 
 **A second staged, adversarially reviewed hardening pass over `server/` only**, on branch `prod-readiness/round-2`, cut from round 1's branch rather than from `main`.
