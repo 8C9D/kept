@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { createServer, type Server, type Socket } from "node:net";
+import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sql } from "drizzle-orm";
@@ -150,4 +152,92 @@ describe("database pool error handling", () => {
     // EventEmitter without one throws. Deleting the listener fails this line.
     expect(() => pool.emit("error", new Error("synthetic"))).not.toThrow();
   });
+});
+
+describe("the pool's connect timeout", () => {
+  /**
+   * PR-9(a). The pool was built with `connectionString` alone, so no connect
+   * timer was ever armed and a checkout against a host that accepts the TCP
+   * connection and never completes the handshake waited forever.
+   *
+   * ⚠ These pass NO options, deliberately. That is the whole point: the
+   * project has now caught eight assertions that could not fail, and two of
+   * them were tests that passed an override for the very value they claimed to
+   * pin, leaving the DEFAULT that production uses covered by nothing. What
+   * `createDb` produces from a URL alone is what `src/index.ts` runs on, so it
+   * is what these measure.
+   *
+   * Falsification, predicted then run, by deleting `connectionTimeoutMillis`
+   * from `createDb`:
+   *   Predicted: the first case fails on `toBe(10_000)` with undefined, and
+   *   the second fails its upper time bound.
+   *   Actual: the first failed exactly as predicted at :211. The second did
+   *   NOT fail an assertion - it never reached one. It hung until vitest
+   *   killed it at 40 s ("Test timed out in 40000ms"), and the afterEach hook
+   *   then timed out too, because `pool.end()` on a pool with a pending
+   *   connect never settles either.
+   *   Gap, and it is the better outcome: the failure mode of the mutation is
+   *   the finding itself. "Waits forever" is not something an assertion can
+   *   observe from inside the wait, which is why the upper bound exists at all
+   *   and why the vitest timeout is the real witness.
+   */
+  const opened: ReturnType<typeof createDb>[] = [];
+  const sinks: Server[] = [];
+  const held: Socket[] = [];
+
+  afterEach(async () => {
+    // ⚠ Order matters, and getting it wrong hangs the suite rather than
+    // failing it. `server.close()` stops accepting but does NOT drop sockets
+    // already accepted, and `pool.end()` waits on a connect that the sink is
+    // still holding open. So the held sockets are destroyed first, which lets
+    // both of the others settle. Found by this teardown timing out at 10 s
+    // while the test it followed had already passed.
+    for (const socket of held.splice(0)) {
+      socket.destroy();
+    }
+    await Promise.all(opened.splice(0).map(({ pool }) => pool.end().catch(() => {})));
+    await Promise.all(
+      sinks.splice(0).map(
+        (server) => new Promise<void>((resolve) => server.close(() => resolve())),
+      ),
+    );
+  });
+
+  it("is set by DEFAULT, not only when a caller asks for one", () => {
+    const db = createDb(TEST_DATABASE_URL);
+    opened.push(db);
+    // Unset this reads `undefined`, which pg-pool tests for falsiness and
+    // treats as "no timer".
+    expect(db.pool.options.connectionTimeoutMillis).toBe(10_000);
+  });
+
+  it("fails a checkout against a black-holed host instead of waiting forever", async () => {
+    // A socket that accepts the connection and then says nothing at all: the
+    // wedged-proxy / black-holed-endpoint case, which is the one an unset
+    // timeout hangs on. A closed port would fail fast on its own and would
+    // prove nothing.
+    const sink = createServer((socket) => {
+      // Accept and hold. No Postgres handshake will ever arrive. The socket is
+      // kept so teardown can destroy it; dropping it here would make this a
+      // connection-refused test, which proves nothing.
+      held.push(socket);
+    });
+    sinks.push(sink);
+    await new Promise<void>((resolve) => sink.listen(0, "127.0.0.1", resolve));
+    const { port } = sink.address() as AddressInfo;
+
+    const db = createDb(`postgres://kept:kept@127.0.0.1:${port}/kept_test`);
+    opened.push(db);
+
+    const startedAt = Date.now();
+    await expect(db.pool.query("select 1")).rejects.toThrow(/timeout/i);
+    const elapsed = Date.now() - startedAt;
+
+    // Bounded by the default, not by anything this test passed in. The upper
+    // bound is what fails if the timeout is removed; the lower bound is what
+    // fails if someone "fixes" a slow test by dropping the value to something
+    // that would refuse a waking Neon compute.
+    expect(elapsed).toBeGreaterThan(8_000);
+    expect(elapsed).toBeLessThan(20_000);
+  }, 40_000);
 });

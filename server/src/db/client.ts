@@ -7,8 +7,39 @@ import * as schema from "./schema.js";
 export const LOCAL_DEV_DATABASE_URL =
   "postgres://kept:kept@localhost:5432/kept";
 
+/**
+ * How long a single connection attempt may take before the checkout that asked
+ * for it fails.
+ *
+ * ⚠ Unset, this is not "some library default" - `pg-pool` tests the option for
+ * falsiness (`if (!this.options.connectionTimeoutMillis)`) and simply arms no
+ * timer, so a connect against a host that accepts the TCP connection and never
+ * completes the handshake waits forever. `assertDatabaseReachable` below has
+ * always carried its own race for exactly this reason, which protected startup
+ * and nothing else: every checkout after boot, including one during a Neon
+ * failover, had no bound at all.
+ *
+ * 10 s is a judgement, not a measurement, and is written down as one. It sits
+ * above the probe's own 5 s per-attempt budget deliberately - the probe may
+ * give up on an attempt and retry, and a request's checkout has nothing to
+ * retry into - and matches the storage probe's `PROBE_TIMEOUT_MS`, the only
+ * comparable constant in this codebase. Set too low it fails a request that
+ * would have succeeded; that is the failure this project prefers to a hang,
+ * which is the one nothing reports.
+ *
+ * The statement timeout is deliberately NOT set here. It applies to every
+ * query in the process, and `generateExport` reads a whole fiscal year of rows
+ * and streams every image through one connection. Nothing here has measured
+ * that against a realistic row count, and a value guessed low truncates an
+ * export rather than failing one request. See PROD-READINESS-ROUND-3.md.
+ */
+const CONNECT_TIMEOUT_MS = 10_000;
+
 export function createDb(databaseUrl: string) {
-  const pool = new Pool({ connectionString: databaseUrl });
+  const pool = new Pool({
+    connectionString: databaseUrl,
+    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+  });
 
   // ⚠ Without this listener the process DIES when a pooled connection sitting
   // idle is closed from the server side. `pg` re-emits that client's error on
