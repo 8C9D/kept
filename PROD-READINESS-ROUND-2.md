@@ -113,6 +113,10 @@ It is graded **P1** on the narrower ground that survives that: the failure is **
 
 *What would deflate it to P2.* If Review 0 judges that "a wrong secret after the first deploy" is too narrow a conjunction to count as realistic, P2 is defensible and the work list is then empty. That is a legitimate outcome of this round, not a failure of it.
 
+**REVIEW-0 declined the deflation and kept it P1, on narrower ground than the one offered above** - not on how likely a mistyped secret is, but on this: the project's deploy verification, documented in three places, returns green against a machine that cannot reach its database, and a check that returns green on a broken system converts operator attention into false confidence. REVIEW-0 also reproduced the whole chain independently.
+It added one fact that strengthens the finding beyond what was claimed here: **with the current `.env.local`, `STORAGE_*` is set, so the MinIO probe at `src/index.ts:66-75` does not run in local development either.** No configuration this repository can produce touches object storage before `serve()`.
+And one constraint on the fix, honoured in pass 4: the storage probe must **not** add a `head` operation to the `ObjectStorage` interface, because RULING 1 reserves that decision. `createBucketIfMissing` is already a module-level function the entrypoint imports, so a sibling `assertBucketReachable(config)` is the in-scope shape.
+
 *Fix.* Probe the database once at startup and refuse to serve if it never answers, with a bounded retry so a cold Neon compute (which autosuspends, and is the expected deployment) is waited for rather than crashed on. Probe configured object storage the same way with a read-only `HeadBucket` - never `CreateBucket`, which `src/storage/s3ObjectStorage.ts:149-162` already reserves for local development on the stated reasoning that a deployed bucket is provisioned deliberately.
 No new endpoint, no new configuration key, no schema change: this extends the startup posture `src/index.ts:21-25` and `src/productionEnv.ts:4-33` already state in their own comments ("stop at startup with the fix named, not later, at the first request that needed it").
 The probe must carry its **own** timeout rather than the pool's, because PR-9 records that `connectionTimeoutMillis` is unset (`0` = wait forever) and PR-9 is not on this round's list.
@@ -158,9 +162,19 @@ The server behaves correctly and the data is safe; what is unresolved is what a 
 `server/fly.toml:13-21` configures `[http_service]` with no `[[http_service.http_checks]]` and no `[checks]`.
 Fly falls back to a TCP connect on port 3000 (ASSUMPTION 4). **R2-1 sharpens this**: a machine that cannot reach its database is listening, so it passes a TCP check *and* passes the `curl`-for-401 check, and there is no automated signal anywhere that would notice. `DEPLOY-CONFIG`.
 
-**PR-9 · resilience · P2 · The pool has no connection, statement, or idle timeout and no size cap**
-`server/src/db/client.ts:11` passes only `connectionString`. `connectionTimeoutMillis` unset means `0`, which is "wait forever".
-Inert at three users; matters against Neon's autosuspend wake latency. Load-bearing for R2-1's fix, which must therefore carry its own timeout rather than lean on the pool's.
+**PR-9 · resilience · P2 · The pool sets no connection timeout and no statement timeout** *(headline corrected at REVIEW-0 R0-1)*
+`server/src/db/client.ts:11` passes only `connectionString`.
+Round 1 recorded this as "no connection, statement, or idle timeout **and no size cap**", and round 2 re-asserted it under "re-verified" without measuring the library. **Two of those four clauses are false.** Measured against the installed `pg`:
+
+```
+$ node -e "const {Pool}=require('pg'); const p=new Pool({connectionString:'...'});
+           console.log(p.options.max, p.options.idleTimeoutMillis,
+                       p.options.connectionTimeoutMillis, p.options.statement_timeout)"
+max: 10 | idleTimeoutMillis: 10000 | connectionTimeoutMillis: undefined | statement_timeout: undefined
+```
+
+So `pg` already caps the pool at 10 and reaps idle connections after 10 s. What is genuinely absent is a **connection** timeout (`undefined` → `0` → wait forever) and a **statement** timeout, which is what round 1's crash dump actually showed.
+Inert at three users; matters against Neon's autosuspend wake latency. Load-bearing for R2-1's fix, which must therefore carry its own timeout rather than lean on the pool's - and now for a sharper reason, since the pool's connect timeout is genuinely unbounded.
 
 **PR-10 · config · P2 · `drizzle.config.ts` silently falls back to localhost**
 `server/drizzle.config.ts:9`: `url: process.env.DATABASE_URL ?? "postgres://kept:kept@localhost:5432/kept"`.
@@ -168,7 +182,8 @@ Run inside a Fly machine with `DATABASE_URL` absent, drizzle-kit targets a datab
 
 **PR-11 · correctness · P2 · The image soft-delete has no tombstone guard of its own**
 `server/src/routes/receipts.ts:415-423` sets `deleted_at` on `receipt_images` with no `deleted_at IS NULL` condition.
-It cannot overwrite an older tombstone today only because the receipts update above returns zero rows first and short-circuits at `:426-428`. The guarantee rests on caller ordering rather than on the statement.
+It cannot overwrite an older tombstone today only because the receipts update above returns zero rows first and short-circuits at `:409-411` - inside the transaction, and working only because `visibleTo` carries `isNull(receipts.deletedAt)`. *(Cited as `:426-428` in the first draft of this ledger, which is the `throw notFoundError()` outside the transaction and stops nothing - REVIEW-0 R0-2.)*
+The guarantee rests on caller ordering rather than on the statement.
 
 **PR-12 · session · P2 · `sub` is not validated as a UUID**
 `server/src/auth/session.ts:52` checks `typeof payload.sub === "string"` and non-empty, nothing more.
@@ -198,7 +213,7 @@ LlmParseError: Model response was not parseable JSON
   caused by SyntaxError: Unexpected token 'D', "Dr Smith P"... is not valid JSON
 ```
 
-**Blast radius measured this round, and it is smaller than "any non-database error".** The other branch that could leak - `claudeReceiptParser.ts:88-93`, where a *valid* JSON reply fails `validateLlmParseResponse` - was tested with a reply carrying a vendor, a tax number, a total and an extra key:
+**Blast radius measured this round, and it is smaller than "any non-database error".** The other branch that could leak - `claudeReceiptParser.ts:89-94`, where a *valid* JSON reply fails `validateLlmParseResponse` - was tested with a reply carrying a vendor, a tax number, a total and an extra key:
 
 ```
 caused by ZodError: [ { "expected": "number", "code": "invalid_type", "path": ["totalCents"], ... },
@@ -233,7 +248,7 @@ xlsx vendor cell type: 3   (ExcelJS ValueType.String = 3, .Formula = 6)
 *Why it is not fixed here.* Every available remedy mutates the exported data - the standard defence prefixes the field with `'`, which is then what accounting software imports. Choosing between a wrong cell in a spreadsheet and a wrong string in an import is a product decision. **RULINGS.**
 
 **R2-3 · deploy · P2 · new · The 2 GB machine sizing is argued in RSS, but what bounds a Node process is V8's old-space cap, which inside a 2 GB container is ~1120 MiB**
-`server/fly.toml:23-27` sizes the machine at 2 GB on the measurement "a 250 MiB export peaks at 891 MiB RSS (2.8x the payload)".
+`server/fly.toml:23-28` sizes the machine at 2 GB (`memory = "2gb"` at `:28`) on the measurement at `:25-27`, "a 250 MiB export peaks at 891 MiB RSS (2.8x the payload)".
 *Measured this round*, in a container limited exactly as the machine is:
 
 ```
@@ -298,7 +313,7 @@ Considered this round and rejected as findings, with the measurement that reject
 - **Fiscal periods are contiguous; no purchase date falls outside every period.** `fiscalPeriodEndingIn` (`src/domain/fiscalPeriod.ts:47-58`) computes `start` as `nextDay(<previous year's end>)`, so consecutive periods abut by construction. The Feb 29 case, which is where a gap would hide, was walked: ending-2024 is `2023-03-01 .. 2024-02-29`, ending-2025 is `2024-03-01 .. 2025-02-28`, ending-2026 is `2025-03-01 .. 2026-02-28`. Contiguous, no overlap. A receipt silently absent from every export would have been top-of-scale; it cannot happen this way.
 - **Error responses do carry `Cache-Control: no-store`.** The middleware at `src/app.ts:87-90` sets the header *after* `await next()`, which reads like it would be skipped when a handler throws. It is not: hono's `compose` catches at the dispatch frame that owns the throwing handler, calls `onError` there, and returns normally up the chain (`node_modules/hono/dist/compose.js`), so the outer middleware resumes. Confirmed live - the 401 in the baseline carries the header.
 - **No migration or schema drift.** `npx drizzle-kit check` → "Everything's fine", exit 0. Five migrations with matching snapshots.
-- **The destructive dev scripts are guarded.** `src/db/seed.ts:14-18` and `src/db/claim.ts:19-24` both call `assertLocalDatabase` before constructing a pool, and `src/db/databaseUrl.ts:41-47` normalizes `127.0.0.1`, `::1` and `[::1]` to `localhost` so the guard cannot be walked around by spelling.
+- **The destructive dev scripts are guarded.** `src/db/seed.ts:14-18` and `src/db/claim.ts:19-23` both call `assertLocalDatabase` before constructing a pool, and `src/db/databaseUrl.ts:41-47` normalizes `127.0.0.1`, `::1` and `[::1]` to `localhost` so the guard cannot be walked around by spelling.
 - **`.env.local` is not tracked**, `.gitignore` covers `.env.local` and `.env`, `core.hooksPath` is `.githooks`, and the gitleaks pre-commit hook is present and fail-closed (it refuses to commit if gitleaks is not installed).
 - **No linter.** A tooling addition no finding cites; `tsc --noEmit` under `strict` is doing the load-bearing work.
 - **The 6 `npm audit` moderates.** Unchanged, both unreachable, both fixed only by major downgrades the prohibitions forbid.
@@ -376,10 +391,22 @@ Everything else on this ledger is P2 or P3 and is documented rather than fixed, 
 
 ## 8 · NEXT ROUND
 
-Findings discovered after Review 0 - by any reviewer or by the builder - land here with full evidence and are **not** fixed in this run.
+Findings discovered after Review 0 - by any reviewer or by the builder - land here with full evidence and are **not** fixed in this run. The work list froze at Review 0.
 
-*(Empty until Review 0 returns; the work list freezes there.)*
+**R2-4 · security · P2 · Nothing requires TLS on `DATABASE_URL`, though the same startup check requires it on `STORAGE_ENDPOINT` for the same reason** *(REVIEW-0 R0-3 - the round's own lens, fired once more at the module the round was already looking at)*
+`src/productionEnv.ts:51-57` refuses a non-`https` `STORAGE_ENDPOINT` in production, and states the reason: "Presigned URLs inherit this endpoint, so a plain-http value sends receipt images over cleartext."
+The database connection carries the same class of data in the other direction - vendor, purchase date, subtotal, **HST**, the supplier's GST/HST registration number, notes, and `ocr_raw_text`, which is the whole receipt - and `assertProductionEnv` checks only that its host is not loopback (`:59-65`).
+*Measured*: a `postgres://…` URL with no `sslmode` yields `pool.options.ssl === undefined`; `pg` does not negotiate TLS on its own.
 
-**Carried in from round 2's own P2/P3 set, as round 3's candidate input:** PR-4, PR-6, PR-7, PR-8, PR-9, PR-10, PR-11, PR-12, PR-13, N-1, N-2, N-3, N-4, N-5, R2-2, R2-3.
+```
+$ node -e "const {Pool}=require('pg');
+           console.log(JSON.stringify(new Pool({connectionString:'postgres://kept:kept@neon.example.com:5432/kept'}).options.ssl))"
+ssl: undefined
+```
+
+**P2, taking the lower of an ambiguous pair.** In practice Neon's connection strings carry `?sslmode=require` and Neon's endpoints refuse cleartext, so the realistic deployment is encrypted - but that is Neon enforcing it, not this repository requiring it, and nothing here would notice if a URL arrived without it. The symmetry argument is what makes it a finding at all: the same function, eight lines apart, requires TLS of one backing service and not of the other.
+Discovered after Review 0, so it is documented here and not fixed, regardless of severity.
+
+**Carried in from round 2's own P2/P3 set, as round 3's candidate input:** PR-4, PR-6, PR-7, PR-8, PR-9, PR-10, PR-11, PR-12, PR-13, N-1, N-2, N-3, N-4, N-5, R2-2, R2-3, R2-4.
 
 **Plus one nit not worth a finding row:** `.githooks/pre-commit` tells the reader to "bypass once with `--no-verify`" when gitleaks is missing, and `CLAUDE.md` says never to use it. The hook is fail-closed and correct; only its advice contradicts the standing instruction.
