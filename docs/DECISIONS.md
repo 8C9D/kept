@@ -4,6 +4,66 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-10 - Production-readiness sweep of the server: four findings, and the one that would have taken the API down
+
+**A staged, adversarially reviewed hardening pass over `server/` only.**
+No features, no new endpoints, tables, columns or config keys, nothing deployed, no remote, and no Anthropic API call.
+`ios/` was out of scope by construction: the reviewer's contract requires re-running verification independently, and §10.2 records that SwiftUI view-layer behaviour is executed by no test - a reviewer cannot discharge that contract against it.
+Full ledger and review trail at `PROD-READINESS.md` and `reviews/` in the repo root, deliberately outside `docs/` because they record one run rather than a living document.
+**This entry is the exception to the per-commit doc-ownership rule**, taken knowingly: twenty hardening commits would have produced twenty log entries and buried the log, so the rule is honoured once, here, with its spec amendment in the same commit.
+
+**The work list was frozen after an adversarial review of the ledger itself, at four P1s and no P0.**
+Thirteen findings were catalogued; the reviewer upheld all thirteen, struck none, and added one the ledger had missed.
+Ten P2s are documented and deliberately unfixed.
+**Freezing the list before writing code is the load-bearing part**, and it held: every later finding - including several the reviewers were right about - went to NEXT ROUND rather than being swept into the run.
+
+**1. A terminated idle Postgres connection killed the whole API.**
+`createDb` built a `Pool` with no `error` listener, so `pg` re-emitting an idle client's error was an unhandled `'error'` event - an uncaught exception.
+Measured against the real entrypoint: one `pg_terminate_backend` on one idle connection, and the process exited with `code: '57P01'` and the port went dead.
+**The trigger is routine, which is what makes it the worst of the four:** Neon's compute autosuspends when idle, which at three users is most of the time, and every failover and connection reap does the same thing.
+Ranked **P1 rather than P0** because it is loud rather than silent and loses no receipt - the outbox holds an unsent capture - and because Fly restarts the machine, which is a fact this run **could not verify** and therefore filed as an assumption rather than asserting. If that assumption is wrong it is a P0.
+Also removed as a side effect: the pre-fix crash dump printed the pg client's `connectionParameters`, **including the database password**.
+
+**2. The LLM parse sweep printed receipts to the log, two lines below a comment promising it never would.**
+`console.error(failure.error)` on a raw error. The `try` around the parse also spans the `UPDATE` that writes the record, and drizzle builds a statement's bound parameters **into the error's own message** - so a failed write printed the whole parsed record.
+Reproduced: vendor, GST/HST number and three amounts, on stdout.
+**This is the Aug 6 ruling's own class, reintroduced on Aug 8 in a module written after it**, with a green suite the entire time - because exactly one test in 263 looked at what was printed.
+So the fix arrived with the assertion that was missing: a `logHygiene` suite that pins "server logs carry no receipt contents" against the sweep's real drain rather than a re-implementation of its reporting.
+⚠ **Closed on the database branch only.** `errorSummary` redacts *database* errors specifically; a parse error's own message and cause chain pass through, and the parser's real failure carries a `SyntaxError` cause quoting the first characters of the model's output. Recorded as NEXT ROUND, not claimed as fixed.
+
+**3. Nothing was logged at the request boundary at all.**
+Three lines at boot and then silence - no rate, no latency, no status codes, nothing for a 400, 401, 403, 404, 409 or 413.
+`fly logs` after "the app says it can't sync" showed the boot banner and nothing else.
+Now one structured line per request, carrying **no path, no query string, no user id, no headers, no bodies** - the route *pattern*, the status, the duration, and whether a session was presented.
+That set is not squeamishness: `?q=` is vendor names the person typed, and a user id is the first segment of every one of their object keys.
+
+**4. A receipt whose image was never uploaded jammed every export of its period, with a message naming nothing.**
+Found by the reviewer, not by the ledger, which had audited the create path twice - for ownership and for idempotency - and never for **existence**.
+`isIssuedObjectKey` validates a key's shape; nothing checks the object is there, so an interrupted presigned PUT followed by a create the client still sent leaves a receipt pointing at nothing. The export then failed with `The specified key does not exist.` - no receipt, no vendor, no date, and no way to find the row.
+**Only the diagnosability half was taken.** An existence check at create would convert a broken export into a **refused capture**, which is the wrong direction when the paper is usually already in the bin - a receipt row with no image still holds the vendor, the date, the total and the HST. That half is deferred as a ruling, not done quietly.
+
+**The rejection is the most useful thing in this run, so it is recorded rather than smoothed over.**
+The first version of fix 4 told the person to *"open that receipt and re-attach its photo"*.
+**No endpoint in this server can do that** - `updateReceiptSchema` has no `image` key and `/upload-url` mints a fresh uuid on every call. A reviewer rejected it.
+A message that names an impossible remedy is worse than the storage error it replaced, because it is confidently wrong.
+Two further defects came out of the same rejection and its re-review, and the second is the one that would have hurt: the fix caught **every** download failure, so a storage timeout or a refused credential would have been reported as "this receipt's photo never uploaded" - telling someone to delete a receipt over a network blip. Only a genuine `NoSuchKey` is now described as one, and the test fake was corrected in the same change because it threw a nameless `Error` and would have let the conflation pass.
+A third review then caught the corrected message **leading with the destructive step**: "delete that receipt" as the first instruction, in the one commit no single-stage reviewer had seen. It now leads with the remedy that keeps the receipt.
+
+**What the reviews caught that the suite could not, which is the pattern worth keeping.**
+Five reviews returned findings and one returned REJECT; none of them was a rubber stamp.
+Among them: a test of mine that **passed with the behaviour deleted** - an in-process assertion that "the process survived", which vitest's own uncaught-exception handling makes unfalsifiable. It is now asserted across a process boundary, because an exit code read from outside is the only witness that cannot be intercepted. That is the sixth instance of this project's recurring anti-pattern, and the first one caught in the same session that wrote it.
+Also caught: a changed line with no assertion pointed at it, a dead setup block under a comment claiming it mattered, an assertion written against a test fake's wording rather than the real client's, and two NUL bytes this run wrote into its own ledger.
+
+**Not fixed, and stated so the absences are decisions.**
+Ten P2s including no SIGTERM drain, the image container running as root, no health check in `fly.toml`, no pool timeouts, and export zip keys not re-validated on read - the third dereference site, where the Aug 6 ruling said "both".
+NEXT ROUND carries five more found after the freeze.
+Unchanged and still the largest gap between retention as written and as implemented: **the scheduled `pg_dump` has no destination** (wave-6 §3 step 17), and Neon Free's history window is six hours.
+Sixteen of wave-6 §3's eighteen steps remain the owner's; nothing in this run superseded any of them.
+
+Suites: server **276** (was 263; 13 added, one rewritten), `tsc --noEmit` clean, `npm audit` unchanged at 6 moderate.
+Every added test was run in its failing direction, and the two that pass either way say so in place.
+Guardrail 7, with one stated deviation: the entrypoint was started the real way and answered a real `GET /api/me` with 401 and `Cache-Control: no-store`, but **with `ANTHROPIC_API_KEY` withheld**, because `index.ts` kicks the parse sweep at startup and this run was prohibited from calling that API. Every path that reaches Anthropic is therefore UNVERIFIED here.
+
 ## 2026-08-09 - The Done button is ours, because SwiftUI's never arrived
 
 **`ToolbarItemGroup(placement: .keyboard)` installs nothing through the confirm screen's presentation.**

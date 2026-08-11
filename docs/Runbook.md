@@ -247,6 +247,10 @@ In order:
 
 1. `curl -i https://api.keptapp.net/api/me` - 401 means the server is fine and the problem is the phone's network.
 2. `fly status` and `fly logs` - a startup refusal names exactly which environment variable is missing or wrong.
+   `fly logs` also carries **one JSON line per request**: `{"msg":"request","method":...,"route":...,"status":...,"durationMs":...,"authenticated":...}`.
+   That is how you tell "the phone is not reaching us at all" (no lines) from "we are refusing it" (401s) from "we are answering and the phone is unhappy" (200s).
+   `route` is the matched pattern, never the requested path, and the line carries no receipt id, no search term, no user id and no token - so a request cannot be traced to a person from the log alone, deliberately.
+   ⚠ A request refused **before** routing - the edge-secret 403 and the 1 MiB body limit's 413 - reports `route: "unmatched"`, the same as a 404. The status code is what separates them.
 3. Cloudflare dashboard - a 5xx page with a Cloudflare ray id means the edge is up and the origin is not.
 4. Neon console - the app cannot start without a reachable database.
 
