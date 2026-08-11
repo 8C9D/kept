@@ -26,6 +26,14 @@ export interface SessionTokens {
 
 const SESSION_LIFETIME = "30d";
 
+/**
+ * The shape `users.id` actually has. `randomUUID()` issues v4 lowercase, and
+ * the column is `uuid`, so anything else in `sub` names no user this system
+ * could have created.
+ */
+const USER_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 export function createSessionTokens(secret: string): SessionTokens {
   if (secret.length < 32) {
     throw new Error(
@@ -49,7 +57,16 @@ export function createSessionTokens(secret: string): SessionTokens {
         const { payload } = await jwtVerify(token, key, {
           algorithms: ["HS256"],
         });
-        if (typeof payload.sub !== "string" || payload.sub === "") {
+        // ⚠ Shape-checked, not merely non-empty. `sub` is spent at
+        // `eq(users.id, claims.userId)` in sessionAuth, where the column is
+        // `uuid`, so a genuine token carrying `sub: "not-a-uuid"` reached
+        // Postgres as a uuid parameter and came back `22P02
+        // invalid_text_representation` - a 500. 401 is the right answer: the
+        // token does not name a user of this system, which is a refusal and
+        // not a server fault. Minting one needs the signing secret, so this
+        // was never an isolation hole; what it fixes is that a forgery attempt
+        // read in the log as an outage.
+        if (typeof payload.sub !== "string" || !USER_ID.test(payload.sub)) {
           return null;
         }
         // A token without a usable tv claim predates (or forges) the

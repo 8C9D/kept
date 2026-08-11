@@ -25,7 +25,12 @@ import {
 // vitest (a future script, a REPL) must hit the same refusal.
 const TEST_DATABASE_URL = resolveTestDatabaseUrl(process.env);
 assertSeparateTestDatabase(TEST_DATABASE_URL, resolveDevDatabaseUrl(process.env));
-const TEST_SESSION_SECRET = "test-session-secret-0123456789abcdef";
+/**
+ * Exported so a test can sign a token this app will genuinely VERIFY, which is
+ * the only way to exercise what happens after verification succeeds (PR-12).
+ * A locally-minted garbage token is rejected before it gets there.
+ */
+export const TEST_SESSION_SECRET = "test-session-secret-0123456789abcdef";
 
 export interface TestHarness {
   app: Hono;

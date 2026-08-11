@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { users } from "../../src/db/schema.js";
-import { createTestHarness } from "../helpers/testApp.js";
+import { SignJWT } from "jose";
+import { createTestHarness, TEST_SESSION_SECRET } from "../helpers/testApp.js";
 
 const harness = createTestHarness();
 afterAll(() => harness.close());
@@ -89,6 +90,35 @@ describe("session enforcement on protected routes", () => {
     await harness.db.delete(users).where(eq(users.id, userId));
     const response = await harness.request(token, "GET", "/api/me");
     expect(response.status).toBe(401);
+  });
+
+  it("answers 401, not 500, to a genuinely-signed token whose subject is not a user id", async () => {
+    // PR-12, end to end. The unit case in tests/unit/session.test.ts pins the
+    // verifier; this pins the STATUS CODE, which is the part of the finding
+    // that mattered - `sub` reached `eq(users.id, ...)` against a `uuid`
+    // column and Postgres answered 22P02, which rendered as
+    // "Internal server error".
+    //
+    // Signed with the harness's own secret, which is what makes this a
+    // forgery-shaped input rather than a garbage-token one: the token is
+    // cryptographically genuine and names nobody.
+    //
+    // Falsification, predicted then run:
+    //   Predicted: reverting session.ts to the non-empty-string check fails
+    //   this on `expect(response.status).toBe(401)`, receiving 500.
+    //   Actual: exactly that, at :118 - "expected 500 to be 401". No gap, and
+    //   the 500 is the finding reproduced through the real route.
+    const forged = await new SignJWT({ tv: 0 })
+      .setProtectedHeader({ alg: "HS256" })
+      .setSubject("not-a-uuid")
+      .setIssuedAt()
+      .setExpirationTime("30d")
+      .sign(new TextEncoder().encode(TEST_SESSION_SECRET));
+
+    const response = await harness.request(forged, "GET", "/api/me");
+    expect(response.status).toBe(401);
+    const body = (await response.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe("unauthorized");
   });
 
   it("revokes every outstanding session when token_version is bumped", async () => {

@@ -58,6 +58,48 @@ describe("session tokens", () => {
     expect(await sessions.verify(subjectless)).toBeNull();
   });
 
+  it("rejects a genuinely-signed token whose subject is not a user id", async () => {
+    // PR-12. `sub` was checked for being a non-empty string and nothing more,
+    // and it is spent at `eq(users.id, claims.userId)` where the column is
+    // `uuid`. So a token signed with THIS server's secret carrying a non-uuid
+    // subject reached Postgres as a uuid parameter and produced a 500.
+    //
+    // Falsification, predicted then run:
+    //   Predicted: reverting the check to `payload.sub === ""` fails every
+    //   case below, since each would verify and return claims.
+    //   Actual: it fails on the FIRST of them and stops, at :89 -
+    //   "not-a-uuid: expected { userId: 'not-a-uuid', ... } to be null".
+    //   Gap, recorded: vitest reports one failure per case, so the loop pins
+    //   five inputs but falsifies visibly on one. The per-subject message
+    //   passed as the assertion label is what makes which one legible.
+    const sessions = createSessionTokens(SECRET);
+    for (const subject of [
+      "not-a-uuid",
+      // A uuid with one character too many, which a prefix check would pass.
+      `${USER_ID}0`,
+      // Uppercase: randomUUID never emits it and the column stores lowercase.
+      USER_ID.toUpperCase(),
+      // SQL-ish, to make the point that this value reaches a query parameter.
+      "'; select 1 --",
+      " ",
+    ]) {
+      const token = await new SignJWT({ tv: 0 })
+        .setProtectedHeader({ alg: "HS256" })
+        .setSubject(subject)
+        .setIssuedAt()
+        .setExpirationTime("30d")
+        .sign(KEY);
+      expect(await sessions.verify(token), subject).toBeNull();
+    }
+
+    // And a real one still verifies, so this cannot be satisfied by a verifier
+    // that rejects everything.
+    expect(await sessions.verify(await sessions.issue(USER_ID, 0))).toEqual({
+      userId: USER_ID,
+      tokenVersion: 0,
+    });
+  });
+
   it("rejects a token without a token-version claim", async () => {
     const sessions = createSessionTokens(SECRET);
     const versionless = await new SignJWT({})
