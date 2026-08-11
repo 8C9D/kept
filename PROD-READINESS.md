@@ -389,6 +389,18 @@ Filled in as passes complete. The frozen work list is the P0/P1 set surviving Re
 
 **The work list froze at REVIEW-0** and is `PR-1, PR-2, PR-3, R-1` - four items, no P0, under the fifteen-item cap so nothing was dropped for size. Ordering within the band is by blast radius, smallest first.
 
+**Passes run, and passes skipped.** One commit per pass, skipping any pass no frozen finding touches:
+
+| Pass | Ran? |
+|---|---|
+| 1 · Secrets, authn/authz, injection, vulnerable deps | **Skipped** - no frozen finding. Live source was read at Stage 0 and the gitleaks limit re-measured (NOT DEFECTS); history scanning was already done 2026-08-07 |
+| 2 · Correctness, resource leaks, Node/TS failure modes | **Ran** - PR-1 |
+| 3 · Migrations, constraints, transactions, restore path | **Skipped** - no frozen finding. Migration reversibility is a recorded decision, and the restore was tested 2026-08-07 |
+| 4 · Timeouts, retries, idempotency, dependency-down behaviour | **Ran** - R-1 |
+| 5 · Structured logging, error reporting, health signal | **Ran** - PR-2, PR-3 |
+| 6 · Reproducible build, pinned deps, startup config validation | **Skipped as a code change** - no frozen finding. The build was verified (`docker build`, exit 0) and wave-6 §3 is cross-referenced in full in §6 below |
+| 7 · Tests | **Folded into each pass**, so every fix ships with the assertion that fails without it, rather than arriving as a separate commit after the fact. The log-hygiene suite is the "single path that would hurt most if it broke silently" |
+
 | id | severity | status |
 |---|---|---|
 | PR-1 | P1 | **RESOLVED** - artifact at the finding |
@@ -402,6 +414,9 @@ Filled in as passes complete. The frozen work list is the P0/P1 set surviving Re
 ## 8 · NEXT ROUND
 
 Findings discovered after Review 0 - by any reviewer or by the builder - recorded with full evidence and **not** fixed in this run. The work list froze at Review 0; these are the next one's input.
+
+**N-3 · P3 · The duplicate-image index makes "re-capture the same paper" order-dependent** *(REVIEW-3b)*
+`src/db/schema.ts:187-189` scopes `receipt_images_user_id_sha256_uq` to live rows, so re-capturing a receipt whose photo produces byte-identical output 409s *until* the old row is tombstoned. Correct behaviour, and the export failure message now names the working order (delete, then capture) - but the ordering is a rule a person has to be told rather than one the API expresses, and nothing tells them anywhere else.
 
 **N-2 · P2 · The parse sweep's model branch still logs the first characters of the model's output, which is derived from the receipt** *(REVIEW-2 F-3)*
 `errorSummary` is a **database-error** redaction: `src/observability/errorSummary.ts:112-118` renders any error without a database marker as `${name}: ${error.message}` plus stack, and `:83-84` walks the `cause` chain to depth 5 doing the same. `src/parse/claudeReceiptParser.ts:84` throws `LlmParseError("Model response was not parseable JSON", { cause })` where the cause is `JSON.parse`'s `SyntaxError`, whose V8 message quotes the start of the model's output - and the model's output is derived from the receipt's own OCR text. Measured by REVIEW-2 locally, with no API call: `caused by SyntaxError: Unexpected token 'D', "Dr Smith P"... is not valid JSON`. Roughly ten characters of a vendor name, against the whole record PR-2 reported, which is why it is P2. Not fixed here: the work list froze at Review 0, and closing it means deciding what a non-database error may keep, which touches every `errorSummary` caller.
