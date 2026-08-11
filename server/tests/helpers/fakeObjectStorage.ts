@@ -27,8 +27,13 @@ export function fakeObjectStorage(): FakeObjectStorage {
       const data = objects.get(objectKey);
       if (data === undefined) {
         // The real R2 client errors on a missing key; the fake must too,
-        // or tests could never see the failure path.
-        throw new Error(`No such object: ${objectKey}`);
+        // or tests could never see the failure path - and it must carry the
+        // same `name`, because callers distinguish "the object is not there"
+        // from "storage did not answer" by that field. A fake that threw a
+        // nameless Error would let a caller conflate the two and still pass.
+        const error = new Error(`No such object: ${objectKey}`);
+        error.name = "NoSuchKey";
+        throw error;
       }
       return data;
     },

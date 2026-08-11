@@ -236,23 +236,32 @@ Two things stated rather than smoothed over. **`route` is not stable per endpoin
 
 *Blast radius.* The error path of one loop in `generateExport.ts`. No schema, no route, no response shape, no new interface method.
 
-*Status: RESOLVED (diagnosability half; the existence check stays DEFERRED).* Artifact - the reviewer's own scenario replayed against the real entrypoint with real MinIO behind it, after the fix. The create still returns 201, which is unchanged and deliberate; what changed is what the export screen is handed:
+*Status: RESOLVED (diagnosability half; the existence check stays DEFERRED). **REJECTED ONCE by REVIEW-3, remediated.*** Artifact - the reviewer's own scenario replayed against the real entrypoint with real MinIO behind it. The create still returns 201, which is unchanged and deliberate; what changed is what the export screen is handed:
 
 ```
 create a receipt naming an object never uploaded  -> HTTP 201
 
-GET /api/export/f8694515-...
-{
-  "status": "failed",
-  "error": "Receipt 2661e627-444b-4e86-9bc5-df38e6607268 (purchased 2026-03-15)
-            has no image in storage, so this export cannot be completed. Its
-            photo never finished uploading. Open that receipt and re-attach its
-            photo, or delete it, then run the export again.",
-  "downloadUrl": null
-}
+GET /api/export/<job>
+status: failed
+error:  Receipt 8a0ede75-5c83-4190-a0aa-d73d560e61ff has no image in storage,
+        so this export cannot be completed - its photo never finished
+        uploading. Capture that receipt again so a copy with its photo exists,
+        then delete this one; or delete this one now to export without it. A
+        deleted receipt is kept as a record but does not appear in exports.
 ```
 
-Before, that field read `The specified key does not exist.` The existing test that asserted the old message is rewritten rather than added to, and it now asserts the receipt id, the purchase date, and the remedy; restoring the bare `download` call fails it.
+Before, that field read `The specified key does not exist.`
+
+**What REVIEW-3 rejected, because the correction matters more than the fix.** The first version told the person to *"open that receipt and re-attach its photo"*. **No endpoint in this server can do that** - `updateReceiptSchema` has no `image` key, the PATCH handler has no image branch, and `/upload-url` mints a fresh uuid key on every call. So the message was diagnosable but not *actionable*: it sent someone looking for a control that does not exist, and its only working remedy, delete, silently drops the receipt from every export (`db/receiptQueries.ts:11`) without saying so. A message that names an impossible remedy is worse than the storage error it replaced, because it is confidently wrong.
+
+Two changes came out of it, and the second is the one that would have hurt:
+
+1. The message now names only remedies this server can perform, and states the cost of the destructive one.
+2. **Only a genuinely absent object is described as one.** The first version caught *every* download failure, so a storage timeout or a refused credential would have been reported as "this receipt's photo never uploaded" - telling someone to delete a receipt over a network blip, which is the worst available trade on a project whose top severity is a lost receipt. Non-`NoSuchKey` errors now rethrow unchanged.
+
+`tests/helpers/fakeObjectStorage.ts` was corrected in the same change: it threw a nameless `Error`, so a caller conflating "not there" with "storage did not answer" would still have passed. It now carries `name = "NoSuchKey"` like the real client.
+
+Three tests, each falsified independently: reverting to the bare `download` fails the naming test; removing the not-found discrimination fails the storage-outage test. **No receipt field beyond the id is in the string** - the purchase date was in the first version and is gone, because this message is also logged, and `grep` for the vendor and the date in the server log returns 0.
 
 ---
 

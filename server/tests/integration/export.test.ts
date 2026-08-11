@@ -257,11 +257,65 @@ describe("the export pipeline", () => {
     expect(job.downloadUrl).toBeNull();
     // The row is findable...
     expect(job.error).toContain(receiptId);
-    expect(job.error).toContain("2026-03-15");
-    // ...and the person is told what to do about it.
-    expect(job.error).toMatch(/re-attach its photo, or delete it/);
+    // ...and the remedy named is one this server can actually perform. There
+    // is no way to re-attach an image to an existing receipt: the PATCH
+    // schema has no `image` key and `/upload-url` mints a fresh key every
+    // call. So the message must not say "re-attach" - an earlier draft did,
+    // and it sent the person looking for a control that does not exist.
+    expect(job.error).toMatch(/Capture that receipt again/);
+    expect(job.error).not.toMatch(/re-attach/i);
+    // And it states the cost of the other remedy rather than leaving the
+    // person to discover that deleting drops the receipt from every export.
+    expect(job.error).toMatch(/does not appear in exports/);
     // The storage layer's own message is not what reaches the export screen.
     expect(job.error).not.toContain("No such object");
+    // No receipt field beyond the id: this string is also logged, and the
+    // §10B invariant is that server logs carry no receipt contents.
+    expect(job.error).not.toContain("2026-03-15");
+    expect(job.error).not.toContain("Test Vendor");
+  });
+
+  it("reports storage being unreachable as that, not as a missing photo", async () => {
+    // The dangerous conflation: a timeout, a refused credential or an R2
+    // outage described as "this receipt's photo never uploaded" tells the
+    // person to delete a receipt over a transient failure. On a project
+    // whose top severity is a lost receipt, that is the worst available
+    // trade, so only a genuinely absent object gets the missing-photo text.
+    const response = await harness.request(token, "POST", "/api/receipts", {
+      ...receiptBody({ status: "confirmed" }),
+      image: imageFor(userId, "b2".repeat(32)),
+    });
+    expect(response.status).toBe(201);
+    const { id: receiptId } = (await response.json()) as { id: string };
+    // The bytes DO exist - this is not the missing-object case.
+    harness.storage.objects.set(
+      (await harness.db.select().from(receiptImages).where(eq(receiptImages.receiptId, receiptId)))[0]
+        ?.objectKey ?? "",
+      new Uint8Array([1, 2, 3]),
+    );
+
+    const originalDownload = harness.storage.download;
+    harness.storage.download = async () => {
+      const error = new Error("connect ETIMEDOUT 1.2.3.4:443");
+      error.name = "TimeoutError";
+      throw error;
+    };
+    try {
+      const started = await harness.request(token, "POST", "/api/export", {
+        periodStart: "2026-01-01",
+        periodEnd: "2026-12-31",
+      });
+      const { id: jobId } = (await started.json()) as JobResponse;
+      const job = await pollUntilSettled(token, jobId);
+
+      expect(job.status).toBe("failed");
+      expect(job.error).toContain("ETIMEDOUT");
+      // Not described as a data problem, and not telling anyone to delete.
+      expect(job.error).not.toMatch(/never finished uploading/);
+      expect(job.error).not.toMatch(/delete/i);
+    } finally {
+      harness.storage.download = originalDownload;
+    }
   });
 
   it("hides other users' export jobs behind 404", async () => {

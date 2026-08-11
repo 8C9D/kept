@@ -179,11 +179,22 @@ export async function generateExport(
       try {
         bytes = await deps.storage.download(imageObjectKey);
       } catch (error) {
+        // ⚠ Only a genuinely absent object is described as one. Storage can
+        // also time out, refuse credentials, or be down, and reporting any of
+        // those as "this receipt's photo is missing" would tell someone to
+        // act destructively on a receipt over a network blip - the worst
+        // available trade on a project whose top severity is a lost receipt.
+        // Everything else rethrows unchanged and reports as what it was.
+        if (!isMissingObject(error)) {
+          throw error;
+        }
         throw new Error(
-          `Receipt ${row.receiptId} (purchased ${row.date}) has no image in ` +
-            `storage, so this export cannot be completed. Its photo never ` +
-            `finished uploading. Open that receipt and re-attach its photo, ` +
-            `or delete it, then run the export again.`,
+          `Receipt ${row.receiptId} has no image in storage, so this export ` +
+            `cannot be completed - its photo never finished uploading. ` +
+            `Capture that receipt again so a copy with its photo exists, then ` +
+            `delete this one; or delete this one now to export without it. ` +
+            `A deleted receipt is kept as a record but does not appear in ` +
+            `exports.`,
           { cause: error },
         );
       }
@@ -220,6 +231,19 @@ function periodLabel(period: ExportPeriod): string {
     return calendarYear;
   }
   return `${period.start}_to_${period.end}`;
+}
+
+/**
+ * "The object is not there", as opposed to "storage did not answer". S3 and
+ * R2 both name this on the error rather than in its text; the same two names
+ * `createBucketIfMissing` already matches on.
+ */
+function isMissingObject(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("name" in error)) {
+    return false;
+  }
+  const name = (error as { name: unknown }).name;
+  return name === "NoSuchKey" || name === "NotFound";
 }
 
 function extensionOf(objectKey: string): string {
