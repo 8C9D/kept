@@ -52,6 +52,13 @@ export function requestLog(): MiddlewareHandler {
           // The matched route pattern, never the requested path: a 404's path
           // is client-supplied, so it is reported as unmatched rather than
           // echoed into the log.
+          //
+          // ⚠ "unmatched" also covers refusals that answered BEFORE routing -
+          // the edge-secret 403 and the body-limit 413 - which are not 404s.
+          // The alternative is echoing the client's path, which is the one
+          // thing this field exists to avoid, so the ambiguity is kept and
+          // the status code is what separates the cases: 404 means no such
+          // route, 403 and 413 mean refused before we looked for one.
           route: c.req.routePath === "/*" ? "unmatched" : c.req.routePath,
           status: answered ? c.res.status : null,
           ...(answered ? {} : { threw: true }),

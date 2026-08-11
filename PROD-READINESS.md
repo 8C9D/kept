@@ -150,13 +150,13 @@ Three tests, `tests/integration/dbClient.test.ts`, all three falsified: with the
 
 The `try` at `:113` spans `writeIfStillNull` at `:121`, so a failed **database write** lands in `failure.error` and is printed raw. `DrizzleQueryError` builds the bound parameters **into its own message** - the fact `docs/DECISIONS.md` (2026-08-06) records as the reason redaction had to be structural.
 
-Reproduced: a receipt whose parse record carries a NUL in the vendor string (Postgres refuses ` ` inside `jsonb`; OCR text from a photograph can carry control characters, and the model echoes what it is given):
+Reproduced: a receipt whose parse record carries a NUL in the vendor string (Postgres refuses `` inside `jsonb`; OCR text from a photograph can carry control characters, and the model echoes what it is given):
 
 ```
 LLM parse failed for receipt 778b0193-...; a later sweep retries it
 Error: Failed query: update "receipts" set "llm_suggestions" = $1 where ...
 params: {"model":"claude-haiku-4-5","promptVersion":2,"requestedAt":"...",
- "suggestions":{"vendor":"Dr Smith Psychiatry Clinic  ",
+ "suggestions":{"vendor":"Dr Smith Psychiatry Clinic ",
  "purchasedAt":"2026-03-01","totalCents":12345,"hstCents":1600,
  "subtotalCents":10745,"vendorTaxNumber":"123456789RT0001"}},778b0193-...
 
@@ -243,11 +243,12 @@ create a receipt naming an object never uploaded  -> HTTP 201
 
 GET /api/export/<job>
 status: failed
-error:  Receipt b62a3acd-bca7-428f-9d09-6fa15ba63402 has no image in storage,
+error:  Receipt 9ef955ab-b801-4658-aad6-e36447589a4d has no image in storage,
         so this export cannot be completed - its photo never finished
-        uploading. Delete that receipt, then capture it again if you still
-        have the paper. Deleting alone will let the export run, without that
-        receipt in it.
+        uploading. If you still have the paper, delete that receipt and
+        capture it again; deleting it first is what lets the same photo be
+        accepted. If the paper is gone, deleting the receipt will let the
+        export run without it.
 ```
 
 Before, that field read `The specified key does not exist.`
@@ -263,7 +264,7 @@ Two changes came out of it, and the second is the one that would have hurt:
 
 Three tests, each falsified independently: reverting to the bare `download` fails the naming test; removing the not-found discrimination fails the storage-outage test. **No receipt field beyond the id is in the string** - the purchase date was in the first version and is gone, because this message is also logged, and `grep` for the user id, the vendor and the date in the server log returns 0.
 
-**REVIEW-3b then passed it, with four further corrections to this same change, all taken:** the remedy order is reversed (capture-then-delete 409s on the duplicate-image index when the re-captured bytes are identical; delete-then-capture does not); `objectStorage.test.ts` now asserts the **real** client names a missing object `NoSuchKey`, which the whole fix pivots on and which only the fake had been asserting; a dead setup block in the storage-outage test is removed (deleting it changed nothing, which is how it was caught); and `isMissingObject`'s comment no longer cites `createBucketIfMissing` as precedent for a name it does not match.
+**REVIEW-3b then passed it, and REVIEW-FINAL corrected it once more. Four corrections from 3b to this same change, all taken:** the remedy order is reversed (capture-then-delete 409s on the duplicate-image index when the re-captured bytes are identical; delete-then-capture does not); `objectStorage.test.ts` now asserts the **real** client names a missing object `NoSuchKey`, which the whole fix pivots on and which only the fake had been asserting; a dead setup block in the storage-outage test is removed (deleting it changed nothing, which is how it was caught); and `isMissingObject`'s comment no longer cites `createBucketIfMissing` as precedent for a name it does not match.
 
 ---
 
@@ -414,6 +415,12 @@ Filled in as passes complete. The frozen work list is the P0/P1 set surviving Re
 ## 8 · NEXT ROUND
 
 Findings discovered after Review 0 - by any reviewer or by the builder - recorded with full evidence and **not** fixed in this run. The work list froze at Review 0; these are the next one's input.
+
+**N-4 · P3 · Three review findings accepted during the run and neither fixed nor carried** *(REVIEW-FINAL X-4, which is itself the finding: they were agreed with in passing and then dropped)*
+(a) `src/observability/requestLog.ts` reads `c.req.routePath`, which hono marks deprecated (REVIEW-2); it works on hono 4.13 and the replacement is a different call, so it is a churn-now-or-churn-later choice rather than a defect. (b) `isMissingObject` in `src/export/generateExport.ts` duplicates the shape of `isNotFound` in `src/storage/s3ObjectStorage.ts`, and asking an S3 error's `name` inside the export module is the export layer reaching through the `ObjectStorage` abstraction (REVIEW-3b); the honest close is for `ObjectStorage` to express "not found" as its own type, which is an interface change no frozen finding cites. (c) The artifact block quoted in R-1's status is re-wrapped for width rather than verbatim (REVIEW-FINAL); the values are unaltered, but a ledger whose method is "verify artifacts, not reports" should paste rather than tidy.
+
+**N-5 · P3 · Every request-log line for a pre-routing refusal reads `route: "unmatched"`** *(REVIEW-FINAL X-2)*
+The edge-secret 403 and the body-limit 413 answer before hono routes, so they share the 404's label. Now pinned by test and stated in the code rather than left to be discovered, and the status code separates the cases - but a log consumer grouping by `route` sees three different events under one key. Closing it properly means labelling refusals distinctly without echoing the client's path, which is a design question rather than a line change.
 
 **N-3 · P3 · The duplicate-image index makes "re-capture the same paper" order-dependent** *(REVIEW-3b)*
 `src/db/schema.ts:187-189` scopes `receipt_images_user_id_sha256_uq` to live rows, so re-capturing a receipt whose photo produces byte-identical output 409s *until* the old row is tombstoned. Correct behaviour, and the export failure message now names the working order (delete, then capture) - but the ordering is a rule a person has to be told rather than one the API expresses, and nothing tells them anywhere else.

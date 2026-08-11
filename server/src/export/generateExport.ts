@@ -189,14 +189,24 @@ export async function generateExport(
           throw error;
         }
         throw new Error(
-          // Delete first, then re-capture: the other order 409s when the
-          // re-captured bytes are identical, because the duplicate-image
-          // index only frees its slot once the old row is tombstoned.
+          // Leads with the remedy that KEEPS the receipt. An earlier draft
+          // led with "delete that receipt", which reads as the instruction
+          // and takes the vendor, the date, the total and the HST out of
+          // every future export - the loss this whole finding exists to
+          // avoid. Deleting is still named, because it is what unblocks a
+          // year-end export when the paper is genuinely gone, and it is
+          // named second with its cost attached.
+          //
+          // The ordering inside the keep-it path is not a preference: an
+          // identical re-captured photo is refused while the old receipt is
+          // still live, because the duplicate-image index only frees its
+          // slot once that row is tombstoned.
           `Receipt ${row.receiptId} has no image in storage, so this export ` +
             `cannot be completed - its photo never finished uploading. ` +
-            `Delete that receipt, then capture it again if you still have ` +
-            `the paper. Deleting alone will let the export run, without ` +
-            `that receipt in it.`,
+            `If you still have the paper, delete that receipt and capture it ` +
+            `again; deleting it first is what lets the same photo be ` +
+            `accepted. If the paper is gone, deleting the receipt will let ` +
+            `the export run without it.`,
           { cause: error },
         );
       }

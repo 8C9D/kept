@@ -262,11 +262,17 @@ describe("the export pipeline", () => {
     // schema has no `image` key and `/upload-url` mints a fresh key every
     // call. So the message must not say "re-attach" - an earlier draft did,
     // and it sent the person looking for a control that does not exist.
-    expect(job.error).toMatch(/Delete that receipt, then capture it again/);
     expect(job.error).not.toMatch(/re-attach/i);
-    // And it states the cost rather than leaving the person to discover that
-    // deleting drops the receipt from every export.
-    expect(job.error).toMatch(/without\s+that receipt in it/);
+    // And it leads with the remedy that keeps the receipt. A message whose
+    // first instruction is "delete that receipt" takes the vendor, date,
+    // total and HST out of every future export - the loss this finding
+    // exists to avoid - so the keep-it path must come first.
+    const keepIt = job.error?.indexOf("If you still have the paper") ?? -1;
+    const deleteIt = job.error?.indexOf("If the paper is gone") ?? -1;
+    expect(keepIt).toBeGreaterThan(-1);
+    expect(deleteIt).toBeGreaterThan(keepIt);
+    // The destructive remedy is still named, with its cost attached.
+    expect(job.error).toMatch(/let\s+the export run without it/);
     // The storage layer's own text does not reach the export screen. Asserted
     // against the object key rather than the fake's wording: the key is what
     // the real client's failure could carry, and it is a user id plus a path.

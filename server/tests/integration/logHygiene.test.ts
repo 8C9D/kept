@@ -333,5 +333,10 @@ describe("the request log", () => {
     const line = requestLine(logs);
     expect(line?.status).toBe(413);
     expect(logs).not.toContain(oversize);
+    // Pinned rather than left to chance: a refusal that answered before
+    // routing has no route to report, so it reads "unmatched" like a 404
+    // does. The status is what tells the two apart, and the alternative -
+    // echoing the client's path - is the thing this field exists to avoid.
+    expect(line?.route).toBe("unmatched");
   });
 });
