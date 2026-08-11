@@ -173,6 +173,8 @@ LEAKED  10745
 
 *Blast radius.* Two log statements in one file. No control flow, no data, no responses.
 
+*Status: RESOLVED, on the database branch, which is the branch that was reported.* Both changed lines are now covered by tests that fail when reverted (`tests/integration/logHygiene.test.ts`), and the sweep's own drain is what drives them - not a re-implementation of its reporting. ⚠ **The model branch of the same `catch` is not closed and is not claimed to be:** `errorSummary` redacts *database* errors specifically, so a parse error's own message and cause chain pass through, and the parser's real failure carries a `SyntaxError` cause quoting the first characters of the model's output. Recorded as **N-2** rather than fixed, because it was found after the work list froze.
+
 ---
 
 **PR-3 · observability · P1 · Nothing is logged at the request boundary, so a production failure has no trace at all**
@@ -198,6 +200,19 @@ So a deployed machine emits three lines at boot and then - for every 400, 401, 4
 *Fix.* One middleware in `app.ts` emitting a single structured line per request: method, route path, status, duration, and whether a session was present. **No bodies, no query strings, no receipt fields, no tokens, no user ids** - `q=` on the list route carries vendor text the user typed, and a user id is the first segment of every object key.
 
 *Blast radius.* One middleware in `app.ts`; adds stdout volume (~3 lines per receipt captured, at three users). Changes no response.
+
+*Status: RESOLVED.* Artifact, against the real entrypoint started the real way:
+
+```
+{"msg":"request","method":"GET","route":"/api/me/*","status":401,"durationMs":3,"authenticated":false}
+{"msg":"request","method":"GET","route":"/api/me","status":200,"durationMs":26,"authenticated":true}
+{"msg":"request","method":"GET","route":"/api/receipts","status":200,"durationMs":8,"authenticated":true}
+{"msg":"request","method":"GET","route":"unmatched","status":404,"durationMs":0,"authenticated":false}
+```
+
+The third line is a `?q=Psychiatry%20Clinic` search: the term does not appear, and neither does the bearer token (`grep -c` for each: 0). Six tests, all falsified.
+
+Two things stated rather than smoothed over. **`route` is not stable per endpoint**: a request refused by the auth middleware reports the middleware's mount pattern (`/api/me/*`) while one that reaches the handler reports `/api/me`. It leaks nothing and both are legible, but a log consumer grouping by `route` sees two keys for one endpoint. **A request that produces no response at all** - Hono rethrows a non-`Error` without calling `onError` - is logged `status: null, threw: true`, because `c.res` is a lazy getter that would otherwise manufacture a 200 and report the one request most worth seeing as a success (REVIEW-2 F-1, fixed in stage).
 
 ---
 
@@ -348,8 +363,8 @@ Filled in as passes complete. The frozen work list is the P0/P1 set surviving Re
 | id | severity | status |
 |---|---|---|
 | PR-1 | P1 | **RESOLVED** - artifact at the finding |
-| PR-2 | P1 | OPEN |
-| PR-3 | P1 | OPEN |
+| PR-2 | P1 | **RESOLVED** (database branch; model branch → N-2) |
+| PR-3 | P1 | **RESOLVED** - artifact at the finding |
 | R-1 | P1 | OPEN (diagnosability half only; existence check DEFERRED) |
 | PR-4 … PR-13 | P2 | DOCUMENTED, not fixed |
 
@@ -358,6 +373,9 @@ Filled in as passes complete. The frozen work list is the P0/P1 set surviving Re
 ## 8 · NEXT ROUND
 
 Findings discovered after Review 0 - by any reviewer or by the builder - recorded with full evidence and **not** fixed in this run. The work list froze at Review 0; these are the next one's input.
+
+**N-2 · P2 · The parse sweep's model branch still logs the first characters of the model's output, which is derived from the receipt** *(REVIEW-2 F-3)*
+`errorSummary` is a **database-error** redaction: `src/observability/errorSummary.ts:112-118` renders any error without a database marker as `${name}: ${error.message}` plus stack, and `:83-84` walks the `cause` chain to depth 5 doing the same. `src/parse/claudeReceiptParser.ts:84` throws `LlmParseError("Model response was not parseable JSON", { cause })` where the cause is `JSON.parse`'s `SyntaxError`, whose V8 message quotes the start of the model's output - and the model's output is derived from the receipt's own OCR text. Measured by REVIEW-2 locally, with no API call: `caused by SyntaxError: Unexpected token 'D', "Dr Smith P"... is not valid JSON`. Roughly ten characters of a vendor name, against the whole record PR-2 reported, which is why it is P2. Not fixed here: the work list froze at Review 0, and closing it means deciding what a non-database error may keep, which touches every `errorSummary` caller.
 
 **N-1 · P2 · Five dev scripts build their own `Pool` and still carry PR-1's defect** *(REVIEW-1 F-2)*
 `src/db/seed.ts:20`, `src/db/claim.ts:25`, `src/db/llmParseProbe.ts:56`, `src/db/llmPromptReparse.ts:53`, `src/db/parseAccuracyReport.ts:26` each call `new Pool(...)` directly rather than `createDb`, so none of them gained the error listener. The consequence is far smaller than PR-1's - these are short-lived operator scripts, not the serving process, and a crash mid-run is visible to the person who typed the command - which is why it is P2 and why it is here rather than on the frozen list. The systematic close is to route them through `createDb`, which is a refactor no frozen finding cites.

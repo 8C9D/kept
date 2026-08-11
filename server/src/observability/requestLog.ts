@@ -38,15 +38,23 @@ export function requestLog(): MiddlewareHandler {
       // In a `finally` so a request that throws past the error handler is
       // still counted - an uncounted request is exactly the one worth seeing.
       const durationMs = Math.round(performance.now() - startedAt);
+
+      // ⚠ `c.res` is a lazy getter: read when nothing ever set a response, it
+      // MANUFACTURES a 200. So a request that died without producing one -
+      // Hono rethrows a non-Error without calling onError - would be logged
+      // as a success, which is worse than not logging it at all. `finalized`
+      // is the question actually being asked: did a response happen.
+      const answered = c.finalized;
       console.log(
         JSON.stringify({
           msg: "request",
           method: c.req.method,
-          // Falls back to the raw path only when nothing matched, and a 404's
-          // path is client-supplied rather than one of ours - so it is
-          // reported as unmatched rather than echoed into the log.
+          // The matched route pattern, never the requested path: a 404's path
+          // is client-supplied, so it is reported as unmatched rather than
+          // echoed into the log.
           route: c.req.routePath === "/*" ? "unmatched" : c.req.routePath,
-          status: c.res.status,
+          status: answered ? c.res.status : null,
+          ...(answered ? {} : { threw: true }),
           durationMs,
           authenticated: c.get("userId") !== undefined,
         }),

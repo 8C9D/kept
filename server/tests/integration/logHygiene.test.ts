@@ -1,5 +1,7 @@
+import { Hono } from "hono";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OcrFieldSuggestions } from "../../src/domain/ocrSuggestions.js";
+import { requestLog } from "../../src/observability/requestLog.js";
 import { createLlmParseSweep } from "../../src/parse/llmParseSweep.js";
 import {
   createTestHarness,
@@ -141,28 +143,71 @@ describe("the LLM parse sweep's failure log", () => {
     expect(logs).not.toContain("params:");
   });
 
-  it("keeps the model's own error text, and still withholds the receipt", async () => {
+  it("keeps a non-database error's own message, so redaction cannot swallow the one line worth reading", async () => {
     const receiptId = await createSensitiveReceipt();
 
     // The other way into the same catch: the parse throws. An error from a
-    // model client is not a database error, so its message is ours to keep -
-    // what must never appear is the receipt the sweep was working on.
+    // model client is not a database error, so its message is ours to keep.
     //
-    // ⚠ Stated because it matters: **this test passes with the redaction
-    // reverted.** A plain Error printed raw exposes nothing, which is the
-    // whole point of the branch it covers - it guards the *over*-redaction
-    // direction, so a future tightening cannot silently swallow the one
-    // message worth reading. The test above is the one that fails when the
-    // fix is removed, and it was falsified.
+    // ⚠ This test guards the OVER-redaction direction only, and says so
+    // because an earlier draft claimed more. It passes with the redaction
+    // reverted - a plain Error printed raw exposes nothing - so it is not
+    // evidence for PR-2's fix; the test above is, and it was falsified.
+    //
+    // ⚠ And it deliberately no longer asserts that this branch is free of
+    // receipt content, because **it is not**. `errorSummary` redacts
+    // *database* errors; every other message and its whole cause chain pass
+    // through verbatim, and the parser's real failure carries a `SyntaxError`
+    // cause quoting the first characters of the model's output, which is
+    // derived from the receipt's own OCR text. Asserting cleanliness here
+    // with a synthetic error that could never have carried a vendor would be
+    // a green light over a real leak. Recorded as N-2 in PROD-READINESS.md.
     const logs = await runSweep(async (text) => {
       throw new Error(`upstream refused after reading ${text.length} chars`);
     });
 
     expect(logs).toContain(receiptId);
     expect(logs).toContain("upstream refused");
-    expect(logs).not.toContain(OCR_TEXT);
-    expect(logs).not.toContain("session fee");
+  });
+
+  it("redacts a failure that stops the whole sweep, not only a single row's", async () => {
+    // The drain's own catch - the second of the two lines PR-2 changed, and
+    // the one no test pointed at. Reached when the sweep throws outside the
+    // per-row try: here, the SELECT that chooses rows.
+    const brokenDb = {
+      select() {
+        throw Object.assign(
+          new Error(
+            `Failed query: select ... from receipts\nparams: ${VENDOR},${TAX_NUMBER}`,
+          ),
+          // The marker that tells errorSummary this is a database error and
+          // its text is not safe to reproduce.
+          { query: "select ... from receipts", params: [VENDOR, TAX_NUMBER] },
+        );
+      },
+    };
+
+    captureConsole();
+    const sweep = createLlmParseSweep({
+      db: brokenDb as unknown as Parameters<typeof createLlmParseSweep>[0]["db"],
+      parse: async () => {
+        throw new Error("never reached");
+      },
+    });
+    sweep.kick();
+    await vi.waitFor(
+      () => {
+        expect(lines.join("\n")).toContain("LLM parse sweep did not complete");
+      },
+      { timeout: 10_000, interval: 25 },
+    );
+    restoreConsole?.();
+
+    const logs = lines.join("\n");
+    expect(logs).toContain("LLM parse sweep did not complete");
     expect(logs).not.toContain(VENDOR);
+    expect(logs).not.toContain(TAX_NUMBER);
+    expect(logs).not.toContain("params:");
   });
 });
 
@@ -251,6 +296,27 @@ describe("the request log", () => {
     const line = requestLine(logs);
     expect(line?.status).toBe(401);
     expect(line?.authenticated).toBe(false);
+  });
+
+  it("reports a request that produced no response as such, rather than as a success", async () => {
+    // Hono rethrows a non-Error without calling onError, so no response is
+    // ever set. `c.res` would manufacture a 200 on read, which would log the
+    // one request most worth seeing as a success. Driven through a bare app
+    // because nothing in this codebase throws a non-Error on purpose.
+    const app = new Hono();
+    app.use("*", requestLog());
+    app.get("/boom", () => {
+      throw "not an Error";
+    });
+
+    captureConsole();
+    await expect(app.request("/boom")).rejects.toBeTruthy();
+    restoreConsole?.();
+
+    const line = requestLine(lines.join("\n"));
+    expect(line).toBeDefined();
+    expect(line?.status).toBeNull();
+    expect(line?.threw).toBe(true);
   });
 
   it("records a body refused before any route ran", async () => {
