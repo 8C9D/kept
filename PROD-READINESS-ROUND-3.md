@@ -425,7 +425,7 @@ Every undeterminable fact resolved conservatively, and listed.
 5. **Neon Free-plan autosuspend and its wake latency** are taken from Neon's published behaviour. Load-bearing for PR-9(a): the connect timeout must be generous enough that a waking compute is waited for, not crashed on, which is why the value chosen is well above a healthy connect and well below a request timeout.
 6. **Fly restarts a machine whose process exits.** Carried from round 1 ASSUMPTION 8 and round 2 ASSUMPTION 6, load-bearing again for R2-4: a production boot refused for a cleartext `DATABASE_URL` is a visible crash-loop rather than a silent outage.
 7. **A production `DATABASE_URL` that omits TLS is an error rather than a deliberate choice.** This is the assumption R2-4's fix rests on, and it is the one that could refuse a deploy that would otherwise have worked. It is taken because the alternative reading, that someone deliberately runs receipt data over cleartext to a non-loopback host, is a configuration this project's own §10B forbids. Recorded rather than asserted: no Neon connection string has been seen by this run.
-8. **`node:24-slim` ships a `node` user at uid 1000, and `/app` is readable by it after a root `npm ci`.** Load-bearing for PR-7. **The first clause is verified** (`docker run --rm node:24-slim id node` reports `uid=1000(node) gid=1000(node)`). **The second clause is UNVERIFIED at Stage 0**, and it is the half that decides whether a one-line `USER node` actually boots. The frozen ledger claimed both were "verified by building and running the image" and pointed at an artifact that did not exist; REVIEW-0 RV3-A caught it, and the claim is withdrawn to what was actually measured. The image is built and run in pass 1, and PR-7 does not close without that artifact.
+8. **`node:24-slim` ships a `node` user at uid 1000, and `/app` is readable by it after a root `npm ci`.** Load-bearing for PR-7. **Both clauses are now verified, by building the image and running it** (the frozen ledger claimed this while pointing at an artifact that did not exist, which REVIEW-0 RV3-A caught; the claim was withdrawn and then earned). Measured: `docker run --rm kept-api:round3-pr7 id` → `uid=1000(node) gid=1000(node)`; `/app`, `/app/src` and `/app/node_modules` are `root:root drwxr-xr-x`, so the runtime user can read them and `touch /app/src/EVIL.ts` is refused with `Permission denied`; and the container boots, probes both services and answers `GET /api/me` with 401. The pre-fix image, built from `HEAD:server/Dockerfile` for contrast, reports `uid=0(root)` and writes to `/app/src` successfully.
 9. **The R2 token can read a key from its own bucket.** Carried unchanged from round 2 ASSUMPTION 9 and still unexercised: there are no R2 credentials on this machine and connecting to Cloudflare is prohibited. **RULING 7.**
 10. **`export_jobs.object_key` is only ever written by `generateExport`.** Load-bearing for PR-4's severity. Re-derived by grep this round: `exportObjectKey` has exactly one call site, `src/export/generateExport.ts:223`.
 
@@ -492,20 +492,33 @@ One is new.
 
 ## 7 · Status
 
-**Proposed frozen list, 8 items, at the cap:**
+**The frozen list, 8 items, at the cap.**
+**All 8 are RESOLVED, one commit each.**
 
-| # | id | severity | blast radius |
-|---|---|---|---|
-| 1 | R3-1 | P2 | one string in `src/index.ts` |
-| 2 | R3-2 | P2 | one log field, plus three prose sites |
-| 3 | PR-11 | P2 | one `where` clause on the delete path |
-| 4 | PR-4 | P2 | one predicate, one call site, two routes |
-| 5 | PR-12 | P2 | one guard on every authenticated request |
-| 6 | PR-9(a) | P2 | one pool option, every database connection |
-| 7 | PR-7 | P2 `DEPLOY-CONFIG` | the production image's runtime uid |
-| 8 | R2-4 | P2 | production boot refusal |
+| # | id | severity | commit | status | artifact |
+|---|---|---|---|---|---|
+| 1 | R3-1 | P2 | `9b9b332` | **RESOLVED** | Live boot with a wrong storage secret prints the `GetObject` wording; `grep -c` over the output returns 0 for both `bucket's metadata` and `PROD-READINESS-ROUND-2.md` |
+| 2 | R3-2 | P2 | `697213b` | **RESOLVED** | Live server, two 401s: `"sessionPresented":false` with no header, `"sessionPresented":true` with a rejected token. Token value absent from the log |
+| 3 | PR-11 | P2 | `66f3cf2` | **RESOLVED** | Row read straight from Postgres: `receipt_tombstone 2026-08-11 14:14:13`, `image_tombstone 2026-01-15 10:00:00`. The January tombstone did not move |
+| 4 | PR-4 | P2 | `48dfd74` | **RESOLVED** | Hand-edited row: `downloadUrl` is null and the list route still answers 200 with the healthy job's URL intact |
+| 5 | PR-12 | P2 | `54a36df` | **RESOLVED** | Live server, token signed with the real secret carrying `sub: "not-a-uuid"`: **401**, and `grep -c` for `22P02`/`internal_error` over the log returns 0 |
+| 6 | PR-9(a) | P2 | `e01be63` | **RESOLVED** | The real entrypoint's own pool reports `connectionTimeoutMillis: 10000`; the black-hole test fails the connect in ~10 s where the unmutated-away version hung past 40 s |
+| 7 | PR-7 | P2 `DEPLOY-CONFIG` | `f1a6324` | **RESOLVED** | Image built and run: `uid=1000(node)`, `/app/src` not writable, and it boots and answers `GET /api/me` with 401 from inside the container |
+| 8 | R2-4 | P2 | `499ec83` | **RESOLVED** | Production-shaped boot with no `sslmode` refuses and binds no port; the same shape with `?sslmode=require` reaches the storage probe, which is downstream of the check |
 
-No P0 and no P1 was found at Stage 0, so nothing preempts the P2s and the list is ordered by blast radius alone, smallest first.
+No P0 and no P1 was found at Stage 0, so nothing preempted the P2s and the list is ordered by blast radius alone, smallest first.
+
+**Gates at the end of the passes: 299 tests green across 31 files** (289 at baseline, plus this round's 10), **`tsc --noEmit` clean, `npm audit` 6 moderate, `npx drizzle-kit check` clean.**
+No gate is worse than baseline.
+
+**Every fix was falsified before it was committed**, by mutating or deleting the behaviour and re-running, with predicted-versus-actual recorded in the test file.
+Three predictions were wrong about *which assertion* fires first and the gaps are written down at the tests rather than smoothed over: R3-1 failed on the missing `GetObject` rather than on the stale file citation, and the two loop-driven cases (PR-12's subjects, R2-4's URLs) falsify visibly on their first element rather than on all of them.
+One prediction was wrong in a more interesting way: deleting PR-9(a)'s timeout did not fail an assertion at all, it hung until vitest killed the test at 40 s, which is the finding rather than a gap in it.
+
+**One defect of this round's own making was found and repaired inside the pass that caused it**, per the rule that a builder's own regression is not carried.
+R3-2's first test passed its rejected-token leg and then failed its no-token leg **against unmutated code**, because `captureRequest` reset its captured lines only per test while `requestLine` returns the first parseable line, so the second capture re-read the first capture's output.
+The helper now resets per capture.
+Recorded because it is exactly the shape this project keeps catching: a test that appeared to discriminate and was reading the wrong artifact.
 
 **The arithmetic, recounted against the ids actually present**, because round 2 shipped a carry list that dropped one:
 
@@ -517,7 +530,7 @@ No P0 and no P1 was found at Stage 0, so nothing preempts the P2s and the list i
 
 | id | count | severity | status |
 |---|---|---|---|
-| R3-1, R3-2, PR-4, PR-7, PR-9(a), PR-11, PR-12, R2-4 | 8 | P2 | FROZEN, status per finding filled in at the final stage |
+| R3-1, R3-2, PR-4, PR-7, PR-9(a), PR-11, PR-12, R2-4 | 8 | P2 | **RESOLVED**, one commit each, artifacts in the table above |
 | PR-5, PR-6, PR-8, PR-10, PR-13, N-1, N-2, R2-2, R2-3 | 9 | P2 | DOCUMENTED, not fixed, to NEXT ROUND |
 | N-3, N-4, N-5 | 3 | P3 | DOCUMENTED, not fixed, to NEXT ROUND |
 | **total** | **20** | | 8 frozen plus 12 carried, matching the bullets above |
@@ -526,7 +539,7 @@ No P0 and no P1 was found at Stage 0, so nothing preempts the P2s and the list i
 It is the deferred half of PR-9(a), which the first row already counts, and listing it as its own row is how the frozen version of this table enumerated 21 items against a stated total of 20 (REVIEW-0 RV3-B).
 Its disposition is under §3 DEFERRED and §8.
 
-Per-finding status with artifact evidence is filled in at the final stage, not here.
+Nothing on the frozen list is DEFERRED and nothing was REJECTED TWICE.
 
 ---
 
@@ -575,14 +588,14 @@ REVIEW-0 RV3-D caught the self-contradiction.)*
 
 One commit per finding.
 A pass no frozen finding touches is skipped and said so.
-Filled in as the passes run.
+All eight frozen findings ran; the table below is what actually happened, not what was planned.
 
 | Pass | Runs? |
 |---|---|
-| 1 · Secrets, authn/authz, injection, vulnerable deps | **Runs** - PR-12 (session `sub`), PR-4 (export key isolation), R2-4 (`DATABASE_URL` TLS), PR-7 (image uid) |
-| 2 · Correctness, resource leaks, Node/TS failure modes | **Runs** - PR-11 (tombstone guard) |
-| 3 · Migrations, constraints, transactions, restore path | **Skipped** - no frozen finding. `drizzle-kit check` is clean at baseline and PR-11 changes a statement, not a schema |
-| 4 · Timeouts, retries, idempotency, dependency-down behaviour | **Runs** - PR-9(a) (pool connect timeout) |
-| 5 · Structured logging, error reporting, health signal | **Runs** - R3-1 (the storage refusal), R3-2 (the request log's `authenticated`) |
+| 1 · Secrets, authn/authz, injection, vulnerable deps | **Ran**, four commits - PR-4 `48dfd74`, PR-12 `54a36df`, PR-7 `f1a6324`, R2-4 `499ec83` |
+| 2 · Correctness, resource leaks, Node/TS failure modes | **Ran**, one commit - PR-11 `66f3cf2` |
+| 3 · Migrations, constraints, transactions, restore path | **Skipped** - no frozen finding. `drizzle-kit check` is clean at baseline and after; PR-11 changes a statement, not a schema |
+| 4 · Timeouts, retries, idempotency, dependency-down behaviour | **Ran**, one commit - PR-9(a) `e01be63` |
+| 5 · Structured logging, error reporting, health signal | **Ran**, two commits - R3-1 `9b9b332`, R3-2 `697213b` |
 | 6 · Reproducible build, pinned deps, startup config validation | **Folded into pass 1** - R2-4 and PR-7 are both startup/build findings, and splitting either across two commits would leave one commit unverified |
 | 7 · Tests | **Folded into every pass**, so each fix ships with the assertion that fails without it |
