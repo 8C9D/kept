@@ -236,6 +236,24 @@ Two things stated rather than smoothed over. **`route` is not stable per endpoin
 
 *Blast radius.* The error path of one loop in `generateExport.ts`. No schema, no route, no response shape, no new interface method.
 
+*Status: RESOLVED (diagnosability half; the existence check stays DEFERRED).* Artifact - the reviewer's own scenario replayed against the real entrypoint with real MinIO behind it, after the fix. The create still returns 201, which is unchanged and deliberate; what changed is what the export screen is handed:
+
+```
+create a receipt naming an object never uploaded  -> HTTP 201
+
+GET /api/export/f8694515-...
+{
+  "status": "failed",
+  "error": "Receipt 2661e627-444b-4e86-9bc5-df38e6607268 (purchased 2026-03-15)
+            has no image in storage, so this export cannot be completed. Its
+            photo never finished uploading. Open that receipt and re-attach its
+            photo, or delete it, then run the export again.",
+  "downloadUrl": null
+}
+```
+
+Before, that field read `The specified key does not exist.` The existing test that asserted the old message is rewritten rather than added to, and it now asserts the receipt id, the purchase date, and the remedy; restoring the bare `download` call fails it.
+
 ---
 
 ### P2 - documented, not fixed
@@ -365,7 +383,7 @@ Filled in as passes complete. The frozen work list is the P0/P1 set surviving Re
 | PR-1 | P1 | **RESOLVED** - artifact at the finding |
 | PR-2 | P1 | **RESOLVED** (database branch; model branch → N-2) |
 | PR-3 | P1 | **RESOLVED** - artifact at the finding |
-| R-1 | P1 | OPEN (diagnosability half only; existence check DEFERRED) |
+| R-1 | P1 | **RESOLVED** (diagnosability half; existence check DEFERRED) |
 | PR-4 … PR-13 | P2 | DOCUMENTED, not fixed |
 
 ---

@@ -163,7 +163,30 @@ export async function generateExport(
     archive.append(Buffer.from(xlsx), { name: `receipts-${label}.xlsx` });
     archive.append(csv, { name: `receipts-${label}.csv` });
     for (const { row, imageObjectKey } of bundle) {
-      const bytes = await deps.storage.download(imageObjectKey);
+      // Named, because the storage layer's own answer is not actionable. A
+      // receipt can point at an object that was never uploaded - the create
+      // route validates the key's *shape*, and a presigned PUT that failed
+      // or was interrupted before the create still leaves a row behind. The
+      // raw failure is `NoSuchKey: The specified key does not exist.`, which
+      // reaches the export screen naming no receipt, no vendor and no date,
+      // so the person is told their year-end export is broken and given no
+      // way to find the row that broke it.
+      //
+      // Still fatal, deliberately: a missing image is a data-integrity
+      // failure, and shipping an accountant a zip whose click-through is
+      // silently absent is worse than refusing (see the page-1 check above).
+      let bytes;
+      try {
+        bytes = await deps.storage.download(imageObjectKey);
+      } catch (error) {
+        throw new Error(
+          `Receipt ${row.receiptId} (purchased ${row.date}) has no image in ` +
+            `storage, so this export cannot be completed. Its photo never ` +
+            `finished uploading. Open that receipt and re-attach its photo, ` +
+            `or delete it, then run the export again.`,
+          { cause: error },
+        );
+      }
       totalBytes += bytes.byteLength;
       if (totalBytes > limits.maxTotalBytes) {
         throw new Error(

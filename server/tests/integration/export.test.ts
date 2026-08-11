@@ -228,14 +228,23 @@ describe("the export pipeline", () => {
     );
   });
 
-  it("records a loud failure when an image is missing from storage", async () => {
+  it("records a loud failure when an image is missing from storage, naming the receipt that caused it", async () => {
     // Created via the API but its bytes never uploaded: generation must
     // fail and say why, not ship a zip with a broken click-through.
+    //
+    // The reachable trigger is not a hostile user. It is a presigned PUT
+    // that failed or was interrupted, followed by a create the client still
+    // sent - the create route validates the key's shape, never its
+    // existence. One such row jams every export of its period, so the
+    // message has to be enough to find and fix the row: the storage layer's
+    // own answer ("No such object" / R2's `NoSuchKey`) names no receipt, no
+    // vendor and no date, and leaves the person stuck.
     const response = await harness.request(token, "POST", "/api/receipts", {
-      ...receiptBody({ status: "confirmed" }),
+      ...receiptBody({ status: "confirmed", purchasedAt: "2026-03-15" }),
       image: imageFor(userId, "b1".repeat(32)),
     });
     expect(response.status).toBe(201);
+    const { id: receiptId } = (await response.json()) as { id: string };
 
     const started = await harness.request(token, "POST", "/api/export", {
       periodStart: "2026-01-01",
@@ -243,9 +252,16 @@ describe("the export pipeline", () => {
     });
     const { id: jobId } = (await started.json()) as JobResponse;
     const job = await pollUntilSettled(token, jobId);
+
     expect(job.status).toBe("failed");
-    expect(job.error).toContain("No such object");
     expect(job.downloadUrl).toBeNull();
+    // The row is findable...
+    expect(job.error).toContain(receiptId);
+    expect(job.error).toContain("2026-03-15");
+    // ...and the person is told what to do about it.
+    expect(job.error).toMatch(/re-attach its photo, or delete it/);
+    // The storage layer's own message is not what reaches the export screen.
+    expect(job.error).not.toContain("No such object");
   });
 
   it("hides other users' export jobs behind 404", async () => {
