@@ -2,7 +2,7 @@ import { createServer, type Socket } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   LOCAL_DEV_STORAGE_CONFIG,
-  assertBucketReachable,
+  assertStorageReachable,
   createBucketIfMissing,
   createS3ObjectStorage,
   resolveStorageConfig,
@@ -126,17 +126,17 @@ describe("resolveStorageConfig", () => {
  * green, and what slipped through that gap was a probe with no timeout, which
  * hung a boot indefinitely and silently (REVIEW-1 F1, F3).
  */
-describe("assertBucketReachable, the startup storage probe", () => {
+describe("assertStorageReachable, the startup storage probe", () => {
   it("resolves against the bucket that is really there", async () => {
     await expect(
-      assertBucketReachable(LOCAL_DEV_STORAGE_CONFIG),
+      assertStorageReachable(LOCAL_DEV_STORAGE_CONFIG),
     ).resolves.toBeUndefined();
   });
 
   it("rejects a bucket that does not exist, and does not create it", async () => {
     const absent = `no-such-bucket-${runPrefix}`;
     await expect(
-      assertBucketReachable({ ...LOCAL_DEV_STORAGE_CONFIG, bucket: absent }),
+      assertStorageReachable({ ...LOCAL_DEV_STORAGE_CONFIG, bucket: absent }),
     ).rejects.toThrow();
 
     // The probe is read-only, and that is a property worth an assertion rather
@@ -145,13 +145,13 @@ describe("assertBucketReachable, the startup storage probe", () => {
     // (spec §10B). A probe that quietly created one would be a rule broken at
     // boot, on the prefix the 30-day export expiry is written against.
     await expect(
-      assertBucketReachable({ ...LOCAL_DEV_STORAGE_CONFIG, bucket: absent }),
+      assertStorageReachable({ ...LOCAL_DEV_STORAGE_CONFIG, bucket: absent }),
     ).rejects.toThrow();
   });
 
   it("rejects a wrong credential rather than accepting it", async () => {
     await expect(
-      assertBucketReachable({
+      assertStorageReachable({
         ...LOCAL_DEV_STORAGE_CONFIG,
         secretAccessKey: "not-the-secret",
       }),
@@ -177,7 +177,7 @@ describe("assertBucketReachable, the startup storage probe", () => {
     try {
       const startedAt = Date.now();
       await expect(
-        assertBucketReachable(
+        assertStorageReachable(
           {
             ...LOCAL_DEV_STORAGE_CONFIG,
             endpoint: `http://127.0.0.1:${address.port}`,

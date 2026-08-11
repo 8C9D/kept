@@ -177,6 +177,23 @@ const PROBE_TIMEOUT_MS = 10_000;
  * question, and a wrong R2 token stops the process at startup instead of
  * surfacing as the first image upload.
  *
+ * ⚠ The operation is a `GetObject` on a key that cannot exist, NOT a
+ * `HeadBucket`. That difference is the finding, not a preference. A boot-
+ * blocking probe must use a permission the deployed credential is known to
+ * have, and `docs/gates/wave-6.md:118` provisions the R2 token as scoped to
+ * the bucket "with read and write" - it says nothing about bucket-level
+ * metadata, and nothing in this project has ever issued `HeadBucket` against
+ * R2 (`npm run storage:probe-keys` exercises `GetObject` and `PutObject`).
+ * A token that could serve every request in the app but not answer
+ * `HeadBucket` would have blocked the deploy outright, which is a P0 traded
+ * for a P1. Reading a key is exactly what `download` does on the export path,
+ * so a credential that fails this probe cannot serve an export either.
+ *
+ * `NoSuchKey`/`NotFound` is therefore SUCCESS: it is storage answering, in
+ * full sentences, that the bucket is there and the credential may read it.
+ * Everything else fails - `NoSuchBucket` (wrong bucket), a signature or
+ * access-key error (wrong credential), a timeout (nothing answered).
+ *
  * ⚠ The timeout is the whole reason this is safe to put in front of a boot,
  * and it was added after this shipped without one. The first version issued a
  * bare `HeadBucket`, and against a host that accepts the TCP connection and
@@ -209,7 +226,7 @@ const PROBE_TIMEOUT_MS = 10_000;
  * that interface is the open ruling about an existence check at capture time,
  * and this must not decide it in passing.
  */
-export async function assertBucketReachable(
+export async function assertStorageReachable(
   config: S3StorageConfig,
   timeoutMs: number = PROBE_TIMEOUT_MS,
 ): Promise<void> {
@@ -217,14 +234,19 @@ export async function assertBucketReachable(
   let timer: NodeJS.Timeout | undefined;
   try {
     await Promise.race([
-      client.send(new HeadBucketCommand({ Bucket: config.bucket })),
+      client
+        .send(new GetObjectCommand({ Bucket: config.bucket, Key: PROBE_KEY }))
+        .catch((error: unknown) => {
+          if (isMissingObject(error)) {
+            return; // storage answered: bucket present, credential may read
+          }
+          throw error;
+        }),
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () =>
             reject(
-              new Error(
-                `Object storage did not answer within ${timeoutMs}ms`,
-              ),
+              new Error(`Object storage did not answer within ${timeoutMs}ms`),
             ),
           timeoutMs,
         );
@@ -240,6 +262,27 @@ export async function assertBucketReachable(
     // own and nothing else ever sends through it.
     client.destroy();
   }
+}
+
+/**
+ * The key the probe reads and expects to be absent. Deliberately a shape
+ * neither `receiptImageObjectKey` ({userId}/yyyy/mm/{uuid}.{ext}) nor
+ * `exportObjectKey` (exports/{userId}/{jobId}/{filename}) can ever produce, so
+ * it cannot collide with a real object no matter who is signed in.
+ */
+const PROBE_KEY = ".startup-probe/reachability";
+
+/**
+ * "That object is not there", as distinct from `isNotFound` below, which
+ * answers "that BUCKET is not there". The probe needs them separated: an
+ * absent object is the answer it wants, and an absent bucket is a failure.
+ */
+function isMissingObject(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("name" in error)) {
+    return false;
+  }
+  const name = (error as { name: unknown }).name;
+  return name === "NoSuchKey" || name === "NotFound";
 }
 
 function makeClient(config: S3StorageConfig): S3Client {

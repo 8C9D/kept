@@ -4,6 +4,39 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-11 - Production-readiness round 2: the checks all asked whether configuration was well-formed, and none asked whether anything was there
+
+**A second staged, adversarially reviewed hardening pass over `server/` only**, on branch `prod-readiness/round-2`, cut from round 1's branch rather than from `main`.
+Same constraints: no features, no new endpoints, tables, columns or config keys, nothing deployed, no remote, no Anthropic API call, `ios/` untouched.
+Ledger at `PROD-READINESS-ROUND-2.md`, review trail at `reviews/round2/`; round 1's files are left intact.
+**This entry is again the exception to the per-commit doc-ownership rule**, honoured once here with its spec amendment in the same commit.
+
+**Round 1's backlog was re-verified rather than inherited, and the frozen list came out at exactly one P1.**
+Sixteen carried candidates were re-checked line by line; all survived as P2 or P3, none was struck as fabricated, and two new P2s were found (a CSV whose fields a spreadsheet reads as formulas, and a 2 GB machine sized in RSS against a V8 heap ceiling measured at 1120 MiB).
+Two severity moves are worth recording because both went *against* having work to do: **PR-5 was proposed for elevation to P1 and the elevation was withdrawn** when following the argument through showed the receipt is already committed when the retry is refused, and **N-2's leak was measured smaller than round 1 feared** — zod 4 reports types and key names, never values, so the exposure is the ten characters of `JSON.parse`'s `SyntaxError` and nothing more.
+
+**The one P1: the entrypoint validated that configuration was present and production-shaped, and never that either backing service answered.**
+`pg` connects lazily and object storage was probed only on the local-development branch, so a wrong `DATABASE_URL` password produced a process that printed `Kept API listening`, held the port, and answered 500 to every authenticated request — while **passing the deploy check the project documents in three places**, because `GET /api/me` returns 401 before opening a connection.
+Round 1's own weakness was named as auditing the create path for ownership and idempotency and never for existence; run as a lens over the rest of the system, the same shape appeared here.
+Fixed by probing both services before `serve()` and refusing to bind the port otherwise.
+
+**Rejected: probing once.** The deployment target autosuspends, so a cold Neon compute is the expected first connection rather than a fault; the database probe retries five times a second apart, each attempt with its own timeout because the pool's connect timeout is unset and means "wait forever".
+
+**Rejected: `HeadBucket` for the storage probe** — and this is the correction worth carrying. A boot-blocking check makes whatever call it issues into a deploy requirement, and nothing in this project has ever issued `HeadBucket` against R2, whose token is provisioned as "read and write" on one bucket. A token that could serve every request in the app but not answer that call would have refused to boot: a P0 traded for a P1. The probe now **reads a key that cannot exist and treats `NoSuchKey` as the answer** — the same permission `download` already needs on the export path.
+
+**Two P1 regressions were introduced by this round's own fix and repaired inside it**, which is the part of the run worth remembering.
+The storage probe shipped **with no timeout**, so a host that accepts a TCP connection and never answers left the boot pending indefinitely with zero bytes of output, no port bound and no exit — strictly worse than the defect it closed. And the refusal line rendered the parsed database *name*, which for a `DATABASE_URL` that lost its `postgres://` prefix is where the userinfo lands — so **the line whose own comment said it withheld the URL "because DATABASE_URL carries the password" printed the password.**
+Both were found by reviewers, not by the builder.
+
+**Three tests that could not fail were found and closed — two of them written by this round.**
+The project's count is now nine.
+A gutted storage probe left the suite at 287/287; forcing the retry defaults to one attempt with no delay left it at 287/287; and the entrypoint tests inherited a shell with no `STORAGE_*`, so every spawned child took the local-MinIO branch and the entire configured-storage block could be deleted with the suite green.
+**All three were found by mutation, none by reading.** The standing lesson: a test that passes an override for the value under test does not pin the default that production uses.
+
+**Deferred, unchanged and still the owner's:** the orphaned-object policy, the scheduled `pg_dump` destination and the Neon plan, R-1's existence check at capture time, what a replayed create should be told, whether the CSV should be mutated to defend a spreadsheet, whether either branch merges to `main`, and one new item — confirming at first deploy that the R2 token can read from its bucket, since the server now refuses to boot without it.
+
+**Everything else is documented and unfixed, by the run's own rule.** Sixteen P2/P3 findings carry to round 3.
+
 ## 2026-08-10 - Production-readiness sweep of the server: four findings, and the one that would have taken the API down
 
 **A staged, adversarially reviewed hardening pass over `server/` only.**

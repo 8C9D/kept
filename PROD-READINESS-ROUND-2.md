@@ -25,7 +25,9 @@ Two candidates changed status on re-verification, and both changes are *against*
 - **PR-5 was proposed for elevation to P1 and the elevation was withdrawn.** The argument was that round 1's P2 reasoning is circular: PR-5 is P2 because "the iOS outbox retries a severed capture", and PR-6 says an identical retry is refused with 409. Following it through kills it. The retry is refused *only* in the case where the transaction committed - and in that case the receipt is already in the database and appears on the next list fetch. The case where the retry matters (transaction did not commit) is the case where the retry succeeds. Nothing is lost either way. **PR-5 stays P2.** Recorded because a severity inflated and then withdrawn is worth more in the log than one that was never tested.
 - **N-2's blast radius was measured and came out smaller than feared.** See N-2.
 
-Nothing was struck as fabricated. Every round-1 citation re-checked to the line.
+Nothing was struck as fabricated.
+
+**On citations, corrected twice and stated plainly here rather than left as a boast.** The first draft of this section claimed "every round-1 citation re-checked to the line". That was not true: REVIEW-0 measured two of them wrong (PR-9's headline, PR-11's supporting line) and four more imprecise, and REVIEW-FINAL then found three citations that this round's *own* edits had moved out from under (REVIEW-FINAL F-4, F-5). Every citation in this file has since been re-resolved against the working tree at `cf794e8`; the ones that moved are listed at §9. The honest summary is that citations were checked, got two wrong, and were corrected when a reviewer measured them.
 
 ### The hunt: what round 1 asked two of three questions about
 
@@ -287,10 +289,11 @@ Every undeterminable fact resolved conservatively, and listed.
 6. **Fly restarts a machine whose process exits.** Carried from round 1's ASSUMPTION 8, and load-bearing again: it is why R2-1's fix (refuse to serve) is an improvement rather than a new outage - a crash-loop is visible where a listening-but-broken machine is not.
 7. **Node's heap ceiling inside the Fly machine is taken from a local 2 GB container**, not from the machine itself. Docker Desktop's VM reports 7936 MiB of total memory and Node still sized the heap to 1120 MiB, which is the cgroup limit being honoured; whether Fly's `shared-cpu-1x` presents the limit identically is unverified. R2-3 only.
 8. **The 409-on-retry consequence in PR-6 is stated as unknown, not as loss**, and this round narrowed *why*: the receipt is committed and reachable, so the open question is client UX, not data. Determining it requires reading `ios/`.
-9. **An R2 API token scoped to one bucket with read and write is assumed to permit `HeadBucket` on that bucket** *(added at REVIEW-1 F6, which found this load-bearing and unrecorded)*.
-   R2-1's storage probe makes a successful `HeadBucket` a precondition of serving. `docs/gates/wave-6.md:118` provisions the credential as a token "scoped to that bucket with read and write", and nothing in this repository has ever issued `HeadBucket` against R2 - `npm run storage:probe-keys` exercises `GetObject` and `PutObject`. There are no R2 credentials on this machine and connecting to Cloudflare is prohibited, so it cannot be checked here.
-   **If the assumption is wrong the consequence is "cannot deploy", which is P0**: `assertBucketReachable` propagates any error, so a `403 AccessDenied` on a bucket that is present and writable is indistinguishable from a wrong credential, and a machine that would have served refuses to boot.
-   Conservative resolution, per this run's rule: the strict behaviour is kept and the assumption is written down, because a wrong-credential refusal is loud and fixed by one `fly secrets set`, whereas failing open on 403 would let exactly the misconfiguration R2-1 exists to catch through. The startup message was amended to name the permission as a candidate cause so an operator who hits it is not sent chasing only credentials. **the owner's to confirm against the real token before the storage probe is trusted - see RULING 7.**
+9. **The deployed R2 token is assumed to permit reading a key from its own bucket** *(opened at REVIEW-1 F6, narrowed at REVIEW-FINAL F-1)*.
+   R2-1's storage probe makes one successful storage call a precondition of serving, so whatever call it makes becomes a boot-blocking permission requirement.
+   **The first version used `HeadBucket`, and that was the wrong call to bet a deploy on.** `docs/gates/wave-6.md:118` provisions the credential as a token "scoped to that bucket with read and write" - it says nothing about bucket-level metadata, and nothing in this repository has ever issued `HeadBucket` against R2 (`npm run storage:probe-keys` exercises `GetObject` and `PutObject`). A token that could serve every request in the app but not answer `HeadBucket` would have refused to boot: a P0 "cannot deploy" traded for a P1.
+   **The probe now issues `GetObject` on `.startup-probe/reachability`, a key that cannot exist**, and treats `NoSuchKey`/`NotFound` as success. That is the same permission `download` uses on the export path, so a credential that fails this probe could not have served an export either - the probe can no longer refuse a deploy that would otherwise have worked. `NoSuchBucket`, a signature or access-key error, and a timeout all still fail.
+   What remains assumed is only that a bucket-scoped read-and-write token permits a read, which is what "read" means. It is still recorded rather than asserted, because there are no R2 credentials on this machine and connecting to Cloudflare is prohibited, so nothing here has exercised it. **Confirming it against the real token at first deploy costs one command - see RULING 7.**
 
 ---
 
@@ -363,9 +366,9 @@ The owner's calls. **None of these is implemented in this run.**
 6. **Whether `prod-readiness/2026-08-10` and `prod-readiness/round-2` merge to `main`.**
    Neither branch is merged; `main` is still at `ca82907`, and nothing in either round has been exercised against a deployed environment.
 
-7. **Whether the storage startup probe should fail open on a permission error.**
-   R2-1's probe refuses to serve unless `HeadBucket` succeeds, and ASSUMPTION 9 records that no one has confirmed a bucket-scoped R2 token permits that call.
-   The trade: keeping it strict means a token that cannot `HeadBucket` blocks a deploy that would otherwise have worked, while treating `403` as "storage answered" would let a wrong access key - the exact misconfiguration the probe exists to catch - through to a machine that then fails every image request. Confirming the permission against the real token removes the choice entirely, and is the cheaper move.
+7. **Confirm at first deploy that the R2 token can read from its bucket, since the server now refuses to boot without it.**
+   The probe was moved off `HeadBucket` and onto a `GetObject` of a key that cannot exist (ASSUMPTION 9), so the permission it needs is the one `download` already uses - but no call of any kind has ever been made from this repository to R2, and a boot-blocking check deserves one confirmation before it is trusted.
+   The trade: the probe is what stops a machine serving 500s behind a green deploy check, and softening it to ignore permission errors would let the exact misconfiguration it exists to catch through. One `npm run storage:probe-keys` against R2 at wave-6 §3 step 12 - already in the deploy sequence - settles it, and if it passes there is nothing to decide.
 
 ---
 
@@ -412,6 +415,30 @@ $ PORT=3021 ... -> "Kept API listening on port 3021"; GET /api/me -> 401 + cache
 - **REVIEW-1 F2** - the refusal line rendered `databaseIdentity(...).database`, and a `DATABASE_URL` that lost its `postgres://` prefix still parses with the userinfo in the pathname, so the **password** was printed by the very line whose comment said it withheld the URL because "DATABASE_URL carries the password". Now host and port only, with parsing guarded. Measured: `Database at :5432 did not answer ...`, and `grep -c s3cr3t-PASSWORD` over the whole output returns 0.
 
 REVIEW-1's other findings were routed the same way: **F3** (the storage probe had no test and could be deleted with the suite green) closed with four cases in `tests/integration/objectStorage.test.ts`; **F4** (three comments that stated measurements they did not match) corrected; **F5** (the Runbook enumerates the startup refusals and this pass added two) closed in `docs/Runbook.md` §0 and §7; **F6** recorded as ASSUMPTION 9 and RULING 7.
+
+**REVIEW-FINAL then found two more tests of this round's own that could not fail, and both are closed.** Both were found by mutation rather than by reading, which is the only way they could have been found:
+
+- **F-2** - every `assertDatabaseReachable` case passed `attempts` and `delayMs` explicitly, so the *production* budget was pinned by nothing: forcing the defaults to `attempts = 1, delayMs = 0` left the suite at **287/287**. That budget is what ASSUMPTION 5 rests on and what `docs/Runbook.md` §0 now promises an operator. Closed by a case that passes no options, fails four times and requires the fifth to be attempted; the same mutation now fails it.
+- **F-3** - the entrypoint tests inherited the shell, which has no `STORAGE_*`, so every spawned child took the local-MinIO branch and the entrypoint's whole configured-storage `else` block could be deleted with the suite at **287/287**. Closed by setting `STORAGE_*` explicitly in the child environment (which also stops the suite depending on what a developer happens to have exported) and by a case that drives the real entrypoint at a dead storage port; the same deletion now fails it.
+- **F-1** - R2-1 was marked RESOLVED while its storage half rested on an R2 permission nothing had exercised, whose failure mode the ledger itself grades P0. Closed by changing the probe rather than by re-grading the risk: see ASSUMPTION 9.
+
+**Final gates after all of it: 289 tests green / 31 files, `tsc --noEmit` clean, `npm audit` 6 moderate, and the real entrypoint answering `GET /api/me` with 401 + `Cache-Control: no-store`.** MinIO's `/data` lists `kept` alone at the end of the run, so no probe created a bucket.
+
+---
+
+## 9 · Citations this round's own edits moved
+
+Recorded because a ledger that cites a line and then changes the file has made its own evidence stale *(REVIEW-FINAL F-5)*. Re-resolved against the working tree:
+
+| Cited as | Now | What it is |
+|---|---|---|
+| `docs/Runbook.md:77` | `:86` | "A 401 ... proves routing, TLS, the app, and the auth middleware all ran" - moved by this round's own §0 additions |
+| `src/index.ts:104` | `:183` | `llmParseSweep.kick()` at startup, the reason `ANTHROPIC_API_KEY` is withheld from every process this run started |
+| `src/index.ts:66-75` | `:64-77` | the local-MinIO probe branch |
+| `src/storage/s3ObjectStorage.ts:176-184` | `:300-308` | `isNotFound`, the bucket-absence predicate |
+| `src/storage/s3ObjectStorage.ts:149-162` | `:143-162` | `createBucketIfMissing`, the write-capable sibling only local development may call (its body still begins at `:149`; the docstring the claim rests on starts at `:143`) |
+
+`src/export/generateExport.ts:258-264` (`isMissingObject`, N-4(b)) is unmoved - that file was not touched this round.
 
 **Passes.** One commit per pass; a pass no frozen finding touches is skipped and said so.
 

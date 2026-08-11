@@ -69,6 +69,37 @@ describe("assertDatabaseReachable", () => {
     expect(calls).toBe(2);
   });
 
+  it("retries and waits by DEFAULT, not only when a caller asks for it", async () => {
+    // REVIEW-FINAL F-2. Every other case here passes `attempts` and `delayMs`
+    // explicitly, so the *production* budget - the one the entrypoint uses, the
+    // one ASSUMPTION 5 rests on, and the one docs/Runbook.md §0 now promises an
+    // operator - was pinned by nothing: forcing the defaults to `attempts = 1,
+    // delayMs = 0` left the whole suite at 287/287.
+    //
+    // This case passes NO options, so it fails if either default is weakened.
+    let calls = 0;
+    const startedAt = Date.now();
+    const real = poolFor(TEST_DATABASE_URL);
+    const flaky = {
+      async query(text: string) {
+        calls += 1;
+        // Fails four times, which is exactly what a five-attempt budget
+        // tolerates and a smaller one does not.
+        if (calls <= 4) {
+          throw new Error("ECONNREFUSED (still waking)");
+        }
+        return real.query(text);
+      },
+    } as unknown as Pool;
+
+    await expect(assertDatabaseReachable(flaky)).resolves.toBeUndefined();
+    expect(calls).toBe(5);
+    // And it actually waited between attempts rather than spinning: four gaps
+    // at the default second apart. Asserted well under 4000 ms so a slow
+    // machine cannot fail it, and well over 0 so a zeroed delay cannot pass it.
+    expect(Date.now() - startedAt).toBeGreaterThan(2_000);
+  }, 30_000);
+
   it("gives up on a probe that never settles, because the pool sets no connect timeout", async () => {
     // PR-9: createDb passes connectionString alone, so connectionTimeoutMillis
     // is 0 - "wait forever". If the probe leaned on the pool's timeout instead
@@ -175,6 +206,20 @@ describe("the entrypoint's startup probe", () => {
     expect(result.exitCode).not.toBe(0);
   }, 40_000);
 
+  it("refuses to serve when configured object storage does not answer", async () => {
+    // REVIEW-FINAL F-3: the entrypoint's storage branch had no coverage at all
+    // - the whole `else` block could be deleted with the suite green. This
+    // drives it through the real entrypoint, pointed at a port nothing listens
+    // on.
+    const result = await runEntrypoint({ STORAGE_ENDPOINT: "http://127.0.0.1:9089" });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.output).not.toContain("Kept API listening");
+    expect(result.output).toContain("Object storage did not answer");
+    // The credential is in this child's environment; it must not be in its log.
+    expect(result.output).not.toContain("kept-local-dev");
+  }, 40_000);
+
   it("still starts against a database that answers, so the probe cannot be a false alarm", async () => {
     // The negative test above passes if the entrypoint refuses to start for
     // ANY reason. This is the one that says the refusal is specific.
@@ -218,9 +263,26 @@ async function runEntrypoint(
         ...inherited,
         SESSION_JWT_SECRET: "startup-probe-secret-0123456789abcdef",
         APPLE_CLIENT_ID: "net.keptapp.test",
+        // Defaulted to a database that answers so each case below overrides
+        // only the thing it is actually exercising. Without this a test that
+        // varies STORAGE_* alone gets the missing-variable refusal instead,
+        // which looks like a pass for the wrong reason.
+        DATABASE_URL: TEST_DATABASE_URL,
         // A port nothing else in this suite uses, and never 3000 - a stale dev
-        // server has held that port on this machine for five recorded runs.
+        // server has held that port on this machine for six recorded runs.
         PORT: "3097",
+        // ⚠ STORAGE_* is set explicitly, and that is not tidiness. These are
+        // the branch selector at src/index.ts: unset, the entrypoint takes the
+        // local-MinIO path and the configured-storage probe never runs. The
+        // first version of these tests inherited the shell, which on this
+        // machine has no STORAGE_*, so every child took the MinIO branch and
+        // the entire `else` block could be deleted with the suite still green
+        // (REVIEW-FINAL F-3). Setting them here also stops the suite depending
+        // on whatever a developer happens to have exported.
+        STORAGE_ENDPOINT: "http://localhost:9000",
+        STORAGE_BUCKET: "kept",
+        STORAGE_ACCESS_KEY_ID: "kept",
+        STORAGE_SECRET_ACCESS_KEY: "kept-local-dev",
         ...env,
       },
       stdio: ["ignore", "pipe", "pipe"],

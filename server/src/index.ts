@@ -15,7 +15,7 @@ import { createLlmParseSweep } from "./parse/llmParseSweep.js";
 import { assertProductionEnv } from "./productionEnv.js";
 import {
   LOCAL_DEV_STORAGE_CONFIG,
-  assertBucketReachable,
+  assertStorageReachable,
   createBucketIfMissing,
   createS3ObjectStorage,
   resolveStorageConfig,
@@ -90,7 +90,7 @@ if (configuredStorage === null) {
     `Object storage: checking ${storageConfig.endpoint} for bucket "${storageConfig.bucket}"`,
   );
   try {
-    await assertBucketReachable(storageConfig);
+    await assertStorageReachable(storageConfig);
   } catch (error) {
     throw new Error(
       `Object storage did not answer at ${storageConfig.endpoint} for bucket ` +
