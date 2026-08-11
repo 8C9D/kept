@@ -26,7 +26,8 @@ A cold machine therefore fails in ways that read as code defects, so the machine
 | `main` unmerged | at `ca82907` | `ca829075c15f2d0588a145126fa033147b118621` | ok |
 | Port 3000 | note the holder | pid **31468**, four days old | **not this run's process; left alone** |
 
-Nothing needed fixing. `docker compose up -d` was not run because both containers were already healthy.
+Nothing needed fixing.
+`docker compose up -d` was not run because both containers were already healthy.
 
 **Port discipline.** Pid 31468 still holds 3000, unchanged since round 1 recorded it and now in its seventh recorded run.
 Round 3 used **3031** for its entrypoint gate and left 3000 alone.
@@ -61,7 +62,8 @@ Everything's fine
 | `npm audit` | 6 moderate | **6 moderate** | yes |
 | `npx drizzle-kit check` | clean | **"Everything's fine", exit 0** | yes |
 
-**No P0 for "the baseline does not reproduce". The run continues.**
+**No P0 for "the baseline does not reproduce".**
+**The run continues.**
 
 ## The fifth gate: the real entrypoint, started the real way
 

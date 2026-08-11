@@ -29,14 +29,19 @@ The frozen list is capped at **8**.
 Neither ledger was inherited.
 Every one of the eighteen carried candidates was re-checked against live source at `7035141`: does the cited line still say what it is said to say, is the severity defensible on this round's own reading, does the fix stay in scope.
 
-**Eighteen candidates carried in, eighteen survived. None was struck as fabricated, and no severity moved.**
+**Eighteen candidates carried in, and eighteen survived.**
+**None was struck as fabricated, and no severity moved.**
 That is a weaker result than it sounds and is stated as such: round 2 re-verified the same set six weeks of work ago in project time and one day ago in wall-clock time, so agreement is cheap.
 What was not cheap, and is recorded under §9, is that **five of the eighteen citations were measured wrong or stale** by round 2's own §9 warning, and every line number in this ledger was re-resolved by hand rather than copied.
 
-**Two candidates were re-measured rather than re-read**, because their claims are about library behaviour rather than about this repository's source:
+**Three candidates were re-measured rather than re-read**, because their claims are about library behaviour rather than about this repository's source:
 
 - **PR-9.** Round 2's correction holds exactly. Re-measured against the installed `pg`: `max: 10 | idleTimeoutMillis: 10000 | connectionTimeoutMillis: undefined | statement_timeout: undefined`. Two of round 1's four clauses remain false and two remain true.
 - **R2-3.** Re-measured in a container limited exactly as the machine is: `docker run --rm --memory=2g node:24-slim` reports `heap_size_limit MiB: 1120`. Reproduces to the megabyte.
+- **R2-4.** Re-measured the same way, since "`pg` does not negotiate TLS on its own" is a claim about the library: a `postgres://` URL with no `sslmode` yields `ssl: undefined`. The measurement is quoted under the finding.
+
+*(This set said "two" and named the first two when the ledger was frozen.
+REVIEW-0 RV3-C caught the undercount, which is the exact class round 2 shipped, so it is corrected here rather than silently.)*
 
 **One of round 2's own fixes was re-exercised rather than trusted**, because the prompt is right that round 2's fix shipped two P1 regressions that only a reviewer caught.
 The storage probe was driven against a bucket that does not exist:
@@ -115,7 +120,8 @@ Nothing is lost and nothing is exposed; the process refuses correctly and the ca
 The cost is that the one sentence written for the person diagnosing a refused boot points at the wrong permission and at a document they cannot open, which is a slower fix rather than a wrong one.
 
 *Fix.* Say what the probe does, in the message, with no cross-file reference.
-*Blast radius.* One template literal in `src/index.ts`. No behaviour, no route, no schema.
+*Blast radius.* One template literal in `src/index.ts`.
+No behaviour, no route, no schema.
 
 ---
 
@@ -151,7 +157,15 @@ A 500 says the failure is ours, a 401 says the session was refused, a 200 says i
 
 *Fix.* Make the line answer both questions.
 The existing field keeps its meaning, so nothing that reads it changes; the fact the docstring promises is added beside it.
-*Blast radius.* One JSON field in one middleware, plus the three prose sites that describe it. Every request logs one more boolean.
+
+*What REVIEW-0 corrected about the fix's reach* (RV3-G).
+The frozen version named three prose sites, one of them the 2026-08-10 entry in `docs/DECISIONS.md`.
+That file is the append-only log of how we got here, and editing a past entry to match new behaviour erases what was decided then.
+So the fix touches **two** prose sites, the docstring at `src/observability/requestLog.ts:22-24` and `docs/Kept-Build-Spec.md` §10B, which is the current-state document and is supposed to move.
+The 2026-08-10 DECISIONS entry stays exactly as written, and this round's own entry records the change forward.
+
+*Blast radius.* One JSON field in one middleware, plus the two prose sites that describe it.
+Every request logs one more boolean.
 
 ---
 
@@ -164,7 +178,7 @@ Round 2's citation is correct to the line and its reasoning is correct: the only
 
 *What this round adds.*
 Round 2 graded it on the guarantee resting on caller ordering.
-Re-derived here, the reachable state is narrower and the consequence is concrete: a row whose image is tombstoned while its receipt is **not** is unreachable through any route (`grep` over `src/routes/*.ts` finds five receipt routes and no image-delete route, and the create path inserts one image per receipt), so this needs a hand-edited row exactly as PR-4 does.
+Re-derived here, the reachable state is narrower and the consequence is concrete: a row whose image is tombstoned while its receipt is **not** is unreachable through any route (`grep` over `src/routes/receipts.ts` finds six routes, at `:58`, `:80`, `:171`, `:251`, `:305` and `:398`, none of them an image delete, and the create path inserts one image per receipt), so this needs a hand-edited row exactly as PR-4 does.
 In that state, deleting the receipt rewrites the older `deleted_at` forward.
 `deleted_at` is what a §10B retention rule would be written against, so the value that moves is the one that decides when an object may be swept.
 
@@ -195,8 +209,21 @@ The export key is **more** constrained than a receipt-image key, and the check c
 `exportObjectKey` produces exactly `exports/{userId}/{jobId}/Receipts-{label}.zip`, and at the call site in `downloadUrlFor` both the user id and the job id are in hand from the row.
 So the predicate can pin all three segments, where `isIssuedObjectKey` can only pin the user.
 
-*Fix.* An `isIssuedExportKey` predicate in `storage/objectKeys.ts` beside its receipt-image sibling, and an assertion at the one dereference site.
-*Blast radius.* One new predicate, one call site, two routes. A stored key that does not match becomes a 500 instead of a presigned URL.
+*And what REVIEW-0 changed about the fix, which is the part worth reading.*
+The frozen version of this row said a non-matching key "becomes a 500 instead of a presigned URL", and that was measured wrong.
+`downloadUrlFor` is called at `src/routes/exports.ts:126-128` inside a `Promise.all` over the row set, which `:125` caps at `.limit(50)`.
+A throwing assertion there does not fail one job, it fails `GET /api/export` entirely, so **one corrupt row makes every other export in that user's history unreachable through the only route that lists them** (RV3-E).
+Copying `assertIssuedObjectKey`'s throw would therefore have relocated the blast radius rather than bounded it.
+
+So the fix departs from its receipt-image sibling deliberately, and the departure is stated rather than smuggled.
+`objectKeys.ts:111-114` justifies the throw as "fail the request loudly and leave a log line", and the load-bearing half of that sentence is the log line, not the 500.
+`downloadUrlFor` refuses the URL for the offending job, logs the refusal through `errorSummary`, and returns `null` for that job alone.
+The isolation guarantee is identical, the failure is louder in the log than a 500 would be (a 500 says nothing about which row), and one bad row costs one download link instead of a history.
+This is explicit handling and not a swallowed error: the refusal is unconditional and the log line is unconditional.
+
+*Fix.* An `isIssuedExportKey` predicate in `storage/objectKeys.ts` beside its receipt-image sibling, and a refusal at the one dereference site that is contained to the job it concerns.
+*Blast radius.* One new predicate, one call site, two routes.
+A stored key that does not match yields `downloadUrl: null` for that job and a server log line naming the fault, on both routes, and leaves every other job in the response untouched.
 
 ---
 
@@ -227,7 +254,10 @@ Re-measured this round against the installed `pg`:
 max: 10 | idleTimeoutMillis: 10000 | connectionTimeoutMillis: undefined | statement_timeout: undefined
 ```
 
-`connectionTimeoutMillis: undefined` becomes `0`, which `pg` reads as "wait forever".
+`connectionTimeoutMillis` stays `undefined`, and `node_modules/pg-pool/index.js:206` and `:250` both test it for falsiness (`if (!this.options.connectionTimeoutMillis)` and `if (this.options.connectionTimeoutMillis)`), so **no timer is ever armed** and a connect waits forever.
+*(The frozen version of this row said the value "becomes `0`".
+It does not; nothing coerces it.
+The conclusion was right and the mechanism was wrong, which is precisely the defect class this round's hunt is built on, so REVIEW-0 RV3-I is corrected here rather than waved through.)*
 Round 2's correction of round 1's headline stands: `max` and `idleTimeoutMillis` **are** defaulted by the library, and round 1's claim that they were not was wrong.
 
 *What makes it load-bearing rather than theoretical.*
@@ -241,8 +271,23 @@ No measurement exists here of how long that query takes against Neon at a realis
 Guessing it is the kind of unmeasured constant this project has twice been burned by, so the honest move is to leave it open with the measurement named.
 See NEXT ROUND.
 
+*Why P2, and the P1 argument, since REVIEW-0 RV3-F is right that this was the one frozen finding shipped without a severity defence.*
+The P1 reading is real and comes straight from the rubric: a checkout that hangs forever "fails under realistic load or edge input", and a Neon failover is realistic.
+Three things hold it at P2.
+The startup path, which is the one that meets a cold or moved compute first, is already bounded by `assertDatabaseReachable`'s own race, so the unbounded case is a *mid-life* failover rather than a boot.
+The request that hangs is one request, not the process: `pg` caps the pool at 10 and the hono handler owns its own promise, so this degrades a caller rather than wedging the server.
+And nothing here has measured it happening, because measuring it needs Neon.
+Taking the lower of an ambiguous pair, as the rubric instructs.
+
+*And the constant this fix introduces, named rather than left implicit* (REVIEW-0's second ungraded risk).
+The value chosen is **10000 ms**, and it is a judgement rather than a measurement, so it is written down as one.
+It sits above `assertDatabaseReachable`'s own 5000 ms per-attempt probe, deliberately: the probe is allowed to give up on an attempt and retry, and a pool checkout has nothing to retry into.
+It is the same order as the storage probe's `PROBE_TIMEOUT_MS` of 10000 (`s3ObjectStorage.ts:169`), which is the only comparable constant in the codebase.
+This is precisely the kind of number PR-9(b) is deferred for not having, and the difference is that a connect timeout set too low fails one request that would have succeeded, while a statement timeout set too low truncates an export.
+
 *Fix.* Set `connectionTimeoutMillis` on the pool.
-*Blast radius.* One pool option, affecting every database connection the process opens. A connect that would have hung now fails, which changes a hang into an error the existing handlers already render.
+*Blast radius.* One pool option, affecting every database connection the process opens.
+A connect that would have hung now fails, which changes a hang into an error the existing handlers already render.
 
 ---
 
@@ -258,7 +303,8 @@ Defence in depth only, and the depth is real: the process reaches no filesystem 
 It is on the list because it is one line, it is the cheapest item on this ledger by a wide margin, and "the container runs as root" is the kind of finding that costs nothing until the day it is the difference.
 
 *Fix.* Add `USER node` before `CMD`, with the file ownership `npm ci` created accounted for.
-*Blast radius.* `DEPLOY-CONFIG`. The production image's runtime uid. Nothing in the application; everything in what a compromise of it could reach.
+*Blast radius.* `DEPLOY-CONFIG`, the production image's runtime uid.
+Nothing in the application; everything in what a compromise of it could reach.
 Verified by building the image and running it, not by reading the Dockerfile.
 
 ---
@@ -292,7 +338,8 @@ This is a string check on a value the operator sets and can read, in a function 
 It cannot refuse a deploy for a reason the operator cannot see and fix in one command.
 
 *Fix.* Require TLS on `DATABASE_URL` in production, accepting the spellings that mean it, beside the check that already requires it of storage.
-*Blast radius.* `assertProductionEnv`, production only, and it is boot-blocking: a production `DATABASE_URL` without TLS stops the process. Nothing changes in development or in tests, where `assertProductionEnv` returns immediately.
+*Blast radius.* `assertProductionEnv`, production only, and it is boot-blocking: a production `DATABASE_URL` without TLS stops the process.
+Nothing changes in development or in tests, where `assertProductionEnv` returns immediately.
 
 ---
 
@@ -309,7 +356,8 @@ Observed incidentally this round: `kill <pid>` on the entrypoint released port 3
 
 **PR-6 · idempotency · P2 · A severed-but-committed create is not replayable: the retry gets 409**
 `src/routes/receipts.ts:143-152` maps `receipt_images_user_id_sha256_uq` to `409 duplicate_image`, unchanged.
-The remedy is a ruling, not a fix. **RULING 4.**
+The remedy is a ruling, not a fix.
+**RULING 4.**
 
 **PR-8 · deploy · P2 · `fly.toml` defines no health check**
 Re-verified: `server/fly.toml:13-21` is the whole `[http_service]` block and there is no `[[http_service.http_checks]]` and no `[checks]` anywhere in the file's 28 lines.
@@ -320,7 +368,8 @@ R2-1 already covers the case a health check would have caught at boot, and leave
 Recorded as **RULING 8** rather than fixed.
 
 **PR-9(b) · resilience · P2 · No statement timeout**
-The deferred half of PR-9. See the finding above for why, and NEXT ROUND for what would close it.
+The deferred half of PR-9.
+See the finding above for why, and NEXT ROUND for what would close it.
 
 **PR-10 · config · P2 · `drizzle.config.ts` silently falls back to localhost**
 Re-verified verbatim at `server/drizzle.config.ts:9`: `url: process.env.DATABASE_URL ?? "postgres://kept:kept@localhost:5432/kept"`.
@@ -345,7 +394,10 @@ Re-verified at `src/db/schema.ts:187-189`.
 
 **N-4 · P3 · Three round-1 findings accepted and neither fixed nor carried**
 (a) `src/observability/requestLog.ts:62` still reads `c.req.routePath`, deprecated on hono 4.13 and working.
-(b) **This one got worse in round 2 and the ledger should say so.** N-4(b) was "`isMissingObject` in `src/export/generateExport.ts:258-264` duplicates the shape of `isNotFound` in `s3ObjectStorage.ts`". Round 2's probe added a *third* predicate, `isMissingObject` at `s3ObjectStorage.ts:280-286`, which is **byte-identical** to the export one (`diff` over both ranges: no output). So the file now holds two near-twin predicates and the duplication the finding names is now literal rather than merely shaped.
+(b) **This one got worse in round 2 and the ledger should say so.**
+N-4(b) was "`isMissingObject` in `src/export/generateExport.ts:258-264` duplicates the shape of `isNotFound` in `s3ObjectStorage.ts`".
+Round 2's probe added a *third* predicate, `isMissingObject` at `s3ObjectStorage.ts:280-286`, which is **byte-identical** to the export one (`diff` over both ranges: no output).
+So the file now holds two near-twin predicates and the duplication the finding names is now literal rather than merely shaped.
 (c) unchanged.
 
 **N-5 · P3 · Every request-log line for a pre-routing refusal reads `route: "unmatched"`**
@@ -353,7 +405,8 @@ Re-verified at `src/observability/requestLog.ts:62`, with the reasoning still in
 
 **R2-2 · export · P2 · The export CSV has no formula-injection defence**
 Re-verified verbatim at `src/export/writeFiles.ts:87-93`: `csvField` quotes only on `/[",\r\n]/`.
-Every available remedy mutates exported data, so the remedy is a ruling. **RULING 5.**
+Every available remedy mutates exported data, so the remedy is a ruling.
+**RULING 5.**
 
 **R2-3 · deploy · P2 · V8's heap ceiling is ~1120 MiB inside the 2 GB machine, against a 891 MiB export**
 Re-verified at `server/fly.toml:23-28` (`memory = "2gb"` at `:28`, the RSS measurement in the comment at `:25-27`) and re-measured at 1120 MiB.
@@ -372,7 +425,7 @@ Every undeterminable fact resolved conservatively, and listed.
 5. **Neon Free-plan autosuspend and its wake latency** are taken from Neon's published behaviour. Load-bearing for PR-9(a): the connect timeout must be generous enough that a waking compute is waited for, not crashed on, which is why the value chosen is well above a healthy connect and well below a request timeout.
 6. **Fly restarts a machine whose process exits.** Carried from round 1 ASSUMPTION 8 and round 2 ASSUMPTION 6, load-bearing again for R2-4: a production boot refused for a cleartext `DATABASE_URL` is a visible crash-loop rather than a silent outage.
 7. **A production `DATABASE_URL` that omits TLS is an error rather than a deliberate choice.** This is the assumption R2-4's fix rests on, and it is the one that could refuse a deploy that would otherwise have worked. It is taken because the alternative reading, that someone deliberately runs receipt data over cleartext to a non-loopback host, is a configuration this project's own §10B forbids. Recorded rather than asserted: no Neon connection string has been seen by this run.
-8. **`node:24-slim` ships a `node` user at uid 1000 and `/app` is world-readable after `npm ci`.** Load-bearing for PR-7 and **verified by building and running the image**, not assumed. See the artifact under §7.
+8. **`node:24-slim` ships a `node` user at uid 1000, and `/app` is readable by it after a root `npm ci`.** Load-bearing for PR-7. **The first clause is verified** (`docker run --rm node:24-slim id node` reports `uid=1000(node) gid=1000(node)`). **The second clause is UNVERIFIED at Stage 0**, and it is the half that decides whether a one-line `USER node` actually boots. The frozen ledger claimed both were "verified by building and running the image" and pointed at an artifact that did not exist; REVIEW-0 RV3-A caught it, and the claim is withdrawn to what was actually measured. The image is built and run in pass 1, and PR-7 does not close without that artifact.
 9. **The R2 token can read a key from its own bucket.** Carried unchanged from round 2 ASSUMPTION 9 and still unexercised: there are no R2 credentials on this machine and connecting to Cloudflare is prohibited. **RULING 7.**
 10. **`export_jobs.object_key` is only ever written by `generateExport`.** Load-bearing for PR-4's severity. Re-derived by grep this round: `exportObjectKey` has exactly one call site, `src/export/generateExport.ts:223`.
 
@@ -462,11 +515,16 @@ No P0 and no P1 was found at Stage 0, so nothing preempts the P2s and the list i
 - Frozen: **8**. R3-1, R3-2, PR-11, PR-4, PR-12, PR-9(a), PR-7, R2-4.
 - To NEXT ROUND: **12**. 20 minus 8.
 
-| id | severity | status |
-|---|---|---|
-| R3-1, R3-2, PR-4, PR-7, PR-9(a), PR-11, PR-12, R2-4 | P2 | FROZEN, status per finding below once the passes run |
-| PR-5, PR-6, PR-8, PR-9(b), PR-10, PR-13, N-1, N-2, R2-2, R2-3 | P2 | DOCUMENTED, not fixed, to NEXT ROUND |
-| N-3, N-4, N-5 | P3 | DOCUMENTED, not fixed, to NEXT ROUND |
+| id | count | severity | status |
+|---|---|---|---|
+| R3-1, R3-2, PR-4, PR-7, PR-9(a), PR-11, PR-12, R2-4 | 8 | P2 | FROZEN, status per finding filled in at the final stage |
+| PR-5, PR-6, PR-8, PR-10, PR-13, N-1, N-2, R2-2, R2-3 | 9 | P2 | DOCUMENTED, not fixed, to NEXT ROUND |
+| N-3, N-4, N-5 | 3 | P3 | DOCUMENTED, not fixed, to NEXT ROUND |
+| **total** | **20** | | 8 frozen plus 12 carried, matching the bullets above |
+
+**PR-9(b) is deliberately absent from this table.**
+It is the deferred half of PR-9(a), which the first row already counts, and listing it as its own row is how the frozen version of this table enumerated 21 items against a stated total of 20 (REVIEW-0 RV3-B).
+Its disposition is under §3 DEFERRED and §8.
 
 Per-finding status with artifact evidence is filled in at the final stage, not here.
 
@@ -506,7 +564,10 @@ The five §9 entries were checked first.
 | `docs/Runbook.md:77` → `:86` | not re-resolved; no round-3 finding cites the Runbook | not needed |
 
 Round 2's own P2 citations were re-resolved individually and are quoted inline in §1 above.
-The two that had drifted are corrected there rather than listed here: **PR-4** is `routes/exports.ts:147-153` (round 2 cited `:150-153`, which is the body and omits the signature the finding is about), and **R2-4**'s pair is `productionEnv.ts:51-57` and `:59-65`, which round 2 cited correctly.
+**Exactly one had drifted**, and it is corrected there rather than listed here: **PR-4** is `routes/exports.ts:147-153`, where round 2 cited `:150-153`, which is the body and omits the signature the finding is about.
+*(The frozen version of this paragraph said "the two that had drifted" and then named R2-4 as the second while stating in the same sentence that round 2 had cited it correctly.
+`PROD-READINESS-ROUND-2.md:462` does cite `productionEnv.ts:51-57` correctly.
+REVIEW-0 RV3-D caught the self-contradiction.)*
 
 ---
 
