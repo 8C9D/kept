@@ -24,4 +24,16 @@ COPY src ./src
 
 EXPOSE 3000
 
+# Defence in depth, and nothing more: the process reaches no filesystem path at
+# runtime beyond reading its own source, and a Fly machine is a single-tenant
+# VM. It is here because it costs one line and because "the container runs as
+# root" is free to fix now and expensive to fix after something else goes wrong.
+#
+# node:24-slim ships this user at uid 1000. Everything above ran as root, so
+# /app and node_modules are root-owned - which is FINE and is the point of not
+# chowning them: the runtime user can read them and cannot modify them, so the
+# image's own code is not writable by the process running it. Nothing here
+# writes to disk; exports are built in memory and streamed to object storage.
+USER node
+
 CMD ["node", "--import", "tsx", "src/index.ts"]
