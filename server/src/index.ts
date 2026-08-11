@@ -82,13 +82,23 @@ if (configuredStorage === null) {
   // equivalent, so a wrong token surfaced as the first image upload rather
   // than at boot. Read-only: this asks whether the bucket is there, and
   // never creates one.
+  //
+  // Announced before it blocks, like the MinIO branch above: this is the
+  // first thing that talks to a network at boot, and a boot that says
+  // nothing until it succeeds is indistinguishable from a boot that hung.
+  console.log(
+    `Object storage: checking ${storageConfig.endpoint} for bucket "${storageConfig.bucket}"`,
+  );
   try {
     await assertBucketReachable(storageConfig);
   } catch (error) {
     throw new Error(
       `Object storage did not answer at ${storageConfig.endpoint} for bucket ` +
-        `"${storageConfig.bucket}" - check STORAGE_ENDPOINT, STORAGE_BUCKET and ` +
-        `the credentials in STORAGE_ACCESS_KEY_ID / STORAGE_SECRET_ACCESS_KEY.`,
+        `"${storageConfig.bucket}", so this process is refusing to serve. Check ` +
+        `STORAGE_ENDPOINT, STORAGE_BUCKET and the credentials in ` +
+        `STORAGE_ACCESS_KEY_ID / STORAGE_SECRET_ACCESS_KEY - and, if those are ` +
+        `right, that the token is permitted to read the bucket's metadata ` +
+        `(see ASSUMPTIONS in PROD-READINESS-ROUND-2.md).`,
       { cause: error },
     );
   }
@@ -101,9 +111,6 @@ const { db, pool } = createDb(databaseUrl);
 // actually there - the gap that let a wrong password produce a process that
 // listened, satisfied the Runbook's `GET /api/me` → 401 deploy check (which
 // never opens a connection), and answered 500 to every real request.
-//
-// Named without the URL, deliberately: DATABASE_URL carries the password.
-const database = databaseIdentity(databaseUrl, "DATABASE_URL");
 try {
   await assertDatabaseReachable(pool);
 } catch (error) {
@@ -115,12 +122,38 @@ try {
   // row values; "happens to" is not the guarantee this project chose to rest
   // on, and the next failure to reach this line might be a different one.
   console.error(
-    `Database at ${database.host}:${database.port}/${database.database} did not ` +
-      `answer, so this process is refusing to serve. Check DATABASE_URL and that ` +
-      `the database is running and reachable from here.`,
+    `Database at ${describeDatabaseTarget(databaseUrl)} did not answer, so this ` +
+      `process is refusing to serve. Check DATABASE_URL and that the database ` +
+      `is running and reachable from here.`,
   );
   console.error(errorSummary(error));
   process.exit(1);
+}
+
+/**
+ * Name the database this process was pointed at, for a log line, carrying
+ * nothing secret.
+ *
+ * ⚠ Host and port ONLY. The first version of this message also rendered the
+ * database name, and that is how a password reaches the log: `databaseIdentity`
+ * reads it from the URL's pathname, and a DATABASE_URL that lost its
+ * `postgres://` prefix still parses - the userinfo then lands in the pathname,
+ * so `kept:hunter2@localhost:5432/kept` renders as `:5432/hunter2@localhost:
+ * 5432/kept`. Measured, on the very line whose comment said it withheld the
+ * URL because "DATABASE_URL carries the password".
+ *
+ * Parsing is guarded for the same reason: `databaseIdentity` throws with the
+ * whole URL inside its own message, and this is called on a path where nothing
+ * has parsed it first (`assertProductionEnv` returns immediately outside
+ * production).
+ */
+function describeDatabaseTarget(url: string): string {
+  try {
+    const identity = databaseIdentity(url, "DATABASE_URL");
+    return `${identity.host}:${identity.port}`;
+  } catch {
+    return "the configured DATABASE_URL (which is not a parseable URL)";
+  }
 }
 
 // The server-side LLM parse (spec §7.3). Kicked at startup for anything a

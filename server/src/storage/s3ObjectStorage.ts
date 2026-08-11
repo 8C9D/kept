@@ -162,6 +162,13 @@ export async function createBucketIfMissing(
 }
 
 /**
+ * How long the startup probe below will wait for storage to answer. Generous
+ * enough for a cold TLS handshake to R2 from another continent, and short
+ * enough that a boot cannot stall behind it.
+ */
+const PROBE_TIMEOUT_MS = 10_000;
+
+/**
  * Prove configured object storage ANSWERS, without creating anything.
  *
  * The sibling above conjures a bucket, and only local development may call it
@@ -170,10 +177,33 @@ export async function createBucketIfMissing(
  * question, and a wrong R2 token stops the process at startup instead of
  * surfacing as the first image upload.
  *
- * One attempt, unlike the database probe's five: R2 does not autosuspend, so
- * there is no cold start to wait out, and Fly restarts a machine whose process
- * exits - which makes a transient blip a retry at the platform's layer rather
- * than a loop in ours.
+ * ⚠ The timeout is the whole reason this is safe to put in front of a boot,
+ * and it was added after this shipped without one. The first version issued a
+ * bare `HeadBucket`, and against a host that accepts the TCP connection and
+ * never answers - a black-holed endpoint, a wedged proxy - it stayed pending
+ * indefinitely: measured at 45 s and still going, with the process emitting
+ * zero bytes, binding no port and never exiting. That traded a failure the
+ * operator could read at the first image upload for one nothing anywhere
+ * reports, which is the exact shape this round exists to remove.
+ *
+ * The second version passed `requestHandler: { connectionTimeout,
+ * requestTimeout }` to the client, and that was measured too: it does nothing.
+ * The same sink held it past 180 s. Configuring the SDK's handler properly
+ * needs `@smithy/node-http-handler`, which is a dependency of the S3 client
+ * rather than one this project declares, and importing it would be reaching
+ * through someone else's manifest. So the bound is a race this module owns.
+ *
+ * That race is a near-copy of the one in db/client.ts, deliberately. The two
+ * startup probes belong to different subsystems with no shared home, and the
+ * alternatives are worse: a storage module importing from the database module
+ * inverts the layering, and a new module for twelve lines is a boundary that
+ * does not exist. If a third probe ever appears, that is the moment to hoist
+ * it.
+ *
+ * Retries are the SDK's own rather than a loop here. R2 does not autosuspend,
+ * so there is no cold start to wait out the way the database probe must, and
+ * beyond that Fly restarts a machine whose process exits - which is only true
+ * now that this is guaranteed to settle.
  *
  * Deliberately NOT a method on ObjectStorage: adding a `head` operation to
  * that interface is the open ruling about an existence check at capture time,
@@ -181,9 +211,35 @@ export async function createBucketIfMissing(
  */
 export async function assertBucketReachable(
   config: S3StorageConfig,
+  timeoutMs: number = PROBE_TIMEOUT_MS,
 ): Promise<void> {
   const client = makeClient(config);
-  await client.send(new HeadBucketCommand({ Bucket: config.bucket }));
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      client.send(new HeadBucketCommand({ Bucket: config.bucket })),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `Object storage did not answer within ${timeoutMs}ms`,
+              ),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+    // The abandoned send keeps a socket open until the SDK gives up on it.
+    // Destroying the client releases it, so a timed-out probe cannot leave the
+    // process holding a handle it will never use - this client is the probe's
+    // own and nothing else ever sends through it.
+    client.destroy();
+  }
 }
 
 function makeClient(config: S3StorageConfig): S3Client {

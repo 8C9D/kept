@@ -287,6 +287,10 @@ Every undeterminable fact resolved conservatively, and listed.
 6. **Fly restarts a machine whose process exits.** Carried from round 1's ASSUMPTION 8, and load-bearing again: it is why R2-1's fix (refuse to serve) is an improvement rather than a new outage - a crash-loop is visible where a listening-but-broken machine is not.
 7. **Node's heap ceiling inside the Fly machine is taken from a local 2 GB container**, not from the machine itself. Docker Desktop's VM reports 7936 MiB of total memory and Node still sized the heap to 1120 MiB, which is the cgroup limit being honoured; whether Fly's `shared-cpu-1x` presents the limit identically is unverified. R2-3 only.
 8. **The 409-on-retry consequence in PR-6 is stated as unknown, not as loss**, and this round narrowed *why*: the receipt is committed and reachable, so the open question is client UX, not data. Determining it requires reading `ios/`.
+9. **An R2 API token scoped to one bucket with read and write is assumed to permit `HeadBucket` on that bucket** *(added at REVIEW-1 F6, which found this load-bearing and unrecorded)*.
+   R2-1's storage probe makes a successful `HeadBucket` a precondition of serving. `docs/gates/wave-6.md:118` provisions the credential as a token "scoped to that bucket with read and write", and nothing in this repository has ever issued `HeadBucket` against R2 - `npm run storage:probe-keys` exercises `GetObject` and `PutObject`. There are no R2 credentials on this machine and connecting to Cloudflare is prohibited, so it cannot be checked here.
+   **If the assumption is wrong the consequence is "cannot deploy", which is P0**: `assertBucketReachable` propagates any error, so a `403 AccessDenied` on a bucket that is present and writable is indistinguishable from a wrong credential, and a machine that would have served refuses to boot.
+   Conservative resolution, per this run's rule: the strict behaviour is kept and the assumption is written down, because a wrong-credential refusal is loud and fixed by one `fly secrets set`, whereas failing open on 403 would let exactly the misconfiguration R2-1 exists to catch through. The startup message was amended to name the permission as a candidate cause so an operator who hits it is not sent chasing only credentials. **the owner's to confirm against the real token before the storage probe is trusted - see RULING 7.**
 
 ---
 
@@ -359,6 +363,10 @@ The owner's calls. **None of these is implemented in this run.**
 6. **Whether `prod-readiness/2026-08-10` and `prod-readiness/round-2` merge to `main`.**
    Neither branch is merged; `main` is still at `ca82907`, and nothing in either round has been exercised against a deployed environment.
 
+7. **Whether the storage startup probe should fail open on a permission error.**
+   R2-1's probe refuses to serve unless `HeadBucket` succeeds, and ASSUMPTION 9 records that no one has confirmed a bucket-scoped R2 token permits that call.
+   The trade: keeping it strict means a token that cannot `HeadBucket` blocks a deploy that would otherwise have worked, while treating `403` as "storage answered" would let a wrong access key - the exact misconfiguration the probe exists to catch - through to a machine that then fails every image request. Confirming the permission against the real token removes the choice entirely, and is the cheaper move.
+
 ---
 
 ## 7 · Status
@@ -371,9 +379,39 @@ Everything else on this ledger is P2 or P3 and is documented rather than fixed, 
 
 | id | severity | status |
 |---|---|---|
-| R2-1 | P1 | *pending Review 0* |
-| PR-4 … PR-13, N-1, N-2, R2-2, R2-3 | P2 | DOCUMENTED, not fixed |
+| R2-1 | P1 | **RESOLVED** - artifacts below |
+| PR-4 … PR-13, N-1, N-2, R2-2, R2-3, R2-4 | P2 | DOCUMENTED, not fixed |
 | N-3, N-4, N-5 | P3 | DOCUMENTED, not fixed |
+
+**R2-1's artifacts**, from the real entrypoint started the real way, `ANTHROPIC_API_KEY` withheld:
+
+```
+# wrong DATABASE_URL password - before: listened, answered 401, 500'd every real request
+$ PORT=3016 node --env-file=<env> --import tsx src/index.ts
+Object storage: checking http://dev-mac.local:9000 for bucket "kept"
+Database at localhost:5432 did not answer, so this process is refusing to serve. Check
+DATABASE_URL and that the database is running and reachable from here.
+Error: Database did not answer after 5 attempts
+  caused by DatabaseError [message and detail withheld] code=28P01 routine=auth_failed
+EXIT CODE: 1
+$ lsof -ti tcp:3016      -> (nothing bound)
+
+# unreachable storage endpoint
+$ PORT=3017 ... -> EXIT 1, "Object storage did not answer at http://localhost:9999 ..."
+
+# absent bucket - and MinIO's /data still lists only `kept`, so the probe created nothing
+$ PORT=3018 ... -> EXIT 1
+
+# a database that answers: unchanged
+$ PORT=3021 ... -> "Kept API listening on port 3021"; GET /api/me -> 401 + cache-control: no-store
+```
+
+**Two P1 regressions this pass introduced were caught by REVIEW-1 and fixed inside it**, per the rule that a defect of the builder's own making is repaired in the stage that caused it rather than carried:
+
+- **REVIEW-1 F1** - the storage probe shipped with no timeout, so a host that accepts a TCP connection and never answers left the boot pending indefinitely with zero bytes of output, no port bound and no exit. Measured at 45 s and still going. Strictly worse than the defect R2-1 closed. Now bounded, and measured refusing in 11 s: `Object storage: checking http://127.0.0.1:9096 ... -> EXIT 1`. The second attempt at this fix - `requestHandler: { connectionTimeout, requestTimeout }` on the client - was measured to do nothing at all (still pending past 180 s), which is why the bound is a race the module owns.
+- **REVIEW-1 F2** - the refusal line rendered `databaseIdentity(...).database`, and a `DATABASE_URL` that lost its `postgres://` prefix still parses with the userinfo in the pathname, so the **password** was printed by the very line whose comment said it withheld the URL because "DATABASE_URL carries the password". Now host and port only, with parsing guarded. Measured: `Database at :5432 did not answer ...`, and `grep -c s3cr3t-PASSWORD` over the whole output returns 0.
+
+REVIEW-1's other findings were routed the same way: **F3** (the storage probe had no test and could be deleted with the suite green) closed with four cases in `tests/integration/objectStorage.test.ts`; **F4** (three comments that stated measurements they did not match) corrected; **F5** (the Runbook enumerates the startup refusals and this pass added two) closed in `docs/Runbook.md` §0 and §7; **F6** recorded as ASSUMPTION 9 and RULING 7.
 
 **Passes.** One commit per pass; a pass no frozen finding touches is skipped and said so.
 
@@ -382,7 +420,7 @@ Everything else on this ledger is P2 or P3 and is documented rather than fixed, 
 | 1 · Secrets, authn/authz, injection, vulnerable deps | **Skipped as a code change** - no frozen finding. Live source was read at Stage 0 and the results are under NOT DEFECTS |
 | 2 · Correctness, resource leaks, Node/TS failure modes | **Skipped** - no frozen finding. The one candidate (the abandoned archiver) was measured and is not a defect |
 | 3 · Migrations, constraints, transactions, restore path | **Skipped** - no frozen finding. `drizzle-kit check` is clean and recorded at BASELINE |
-| 4 · Timeouts, retries, idempotency, dependency-down behaviour | **Runs** - R2-1 |
+| 4 · Timeouts, retries, idempotency, dependency-down behaviour | **Ran** - R2-1, in two commits: the fix, then the remediation REVIEW-1 required |
 | 5 · Structured logging, error reporting, health signal | **Skipped** - no frozen finding. N-2 stays P2 on this round's own measurement |
 | 6 · Reproducible build, pinned deps, startup config validation | **Folded into pass 4** - R2-1 *is* the startup-config-validation finding, and splitting it across two commits would leave one of them unverified |
 | 7 · Tests | **Folded into the pass**, so the fix ships with the assertion that fails without it |

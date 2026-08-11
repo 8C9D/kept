@@ -119,11 +119,23 @@ describe("assertDatabaseReachable", () => {
  *   listening line is what actually distinguishes the two worlds, which is
  *   why it is asserted separately rather than being left to the exit code.
  *
- * The three `assertDatabaseReachable` cases above were falsified the same way:
- * forcing `attempts` to 1 fails the retry test ("promise rejected ... instead
- * of resolving"), and replacing `withTimeout(pool.query(...))` with a bare
- * `pool.query(...)` fails the never-settles test with "Test timed out in
- * 5000ms" instead of rejecting in under a second.
+ * All four `assertDatabaseReachable` cases above were falsified, each by
+ * deleting or inverting the behaviour it pins - the count was wrong in the
+ * first draft of this comment, which said three and then named two mutations
+ * (REVIEW-1 F4a):
+ *
+ *   - forcing `attempts` to 1 fails the retry case, and both cases that pin
+ *     the "after 2 attempts" wording;
+ *   - replacing `withTimeout(pool.query(...))` with a bare `pool.query(...)`
+ *     fails the never-settles case with "Test timed out in 5000ms" instead of
+ *     rejecting in under a second;
+ *   - inverting the probe so it never accepts fails the "resolves against a
+ *     database that answers" case.
+ *
+ * "rejects a wrong credential rather than waiting forever" is the weak one and
+ * is left standing deliberately: a probe that ALWAYS rejects satisfies it, so
+ * it discriminates only in company with the resolves-when-answering case above
+ * it. Said here rather than left for a reviewer to find.
  */
 describe("the entrypoint's startup probe", () => {
   it("refuses to serve when the database does not answer, and never binds the port", async () => {
@@ -141,6 +153,26 @@ describe("the entrypoint's startup probe", () => {
     // ...and without the credential, because DATABASE_URL carries a password
     // and this text goes to the machine's log.
     expect(result.output).not.toContain("wrong-password");
+  }, 40_000);
+
+  it("never prints the password, even when DATABASE_URL is malformed enough to confuse a URL parser", async () => {
+    // REVIEW-1 F2. A DATABASE_URL that lost its `postgres://` prefix still
+    // parses: `new URL()` puts the userinfo in the pathname, so databaseIdentity
+    // returns the password as the *database name*. The refusal message used to
+    // render that field, on the line whose own comment said it withheld the URL
+    // because "DATABASE_URL carries the password".
+    //
+    // The password below is fabricated, and the assertion is that it does not
+    // come back out.
+    const result = await runEntrypoint({
+      DATABASE_URL: "kept:s3cr3t-PASSWORD@localhost:5432/kept_test",
+    });
+
+    expect(result.output).not.toContain("s3cr3t-PASSWORD");
+    // ...and the refusal still happened, so this cannot be satisfied by a
+    // process that silently did nothing.
+    expect(result.output).not.toContain("Kept API listening");
+    expect(result.exitCode).not.toBe(0);
   }, 40_000);
 
   it("still starts against a database that answers, so the probe cannot be a false alarm", async () => {

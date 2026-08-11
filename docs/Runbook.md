@@ -48,6 +48,15 @@ A missing one stops the process at startup with the name in the message, rather 
 
 **Under `NODE_ENV=production` the server additionally refuses to start** if storage is unconfigured (there is no MinIO to fall back to), if `STORAGE_ENDPOINT` is not https (presigned URLs inherit it, so plain http would send receipt images in the clear), if `DATABASE_URL` is a loopback address, if the session secret is under 32 characters, or if `ANTHROPIC_API_KEY` is unset.
 
+**And in every environment the server refuses to start unless both backing services answer.** Added 2026-08-11; before that, every check above asked whether a value was *present and well-shaped*, and none asked whether the service it named was *there*.
+A wrong `DATABASE_URL` password produced a process that printed `Kept API listening on port 3000`, answered the `curl .../api/me` → 401 check in §1 (that path never opens a database connection), and returned 500 to every authenticated request.
+
+- **The database** is probed with `select 1`, retried up to five times a second apart with a 5-second cap on each attempt, so a Neon compute waking from autosuspend is waited for rather than crashed on. If it never answers, the process prints `Database at <host>:<port> did not answer, so this process is refusing to serve` and exits 1. The host and port are named; the URL is not, because it carries the password.
+- **Object storage** is probed with a read-only `HeadBucket` - it never creates a bucket - with a 10-second cap. If it does not answer, the process names the endpoint and bucket and exits 1.
+
+Both refusals happen **before the port is bound**, so a machine in this state is not listening at all, rather than listening and failing.
+⚠ Neither of these is an "environment variable is missing" refusal, so when §7 step 2 sends you to `fly logs`, expect one of these two sentences as well as the variable-name ones.
+
 ---
 
 ## 1 · Deploy
@@ -246,12 +255,13 @@ Symptoms come from the phone: pull-to-refresh fails within 10 seconds with a sta
 In order:
 
 1. `curl -i https://api.keptapp.net/api/me` - 401 means the server is fine and the problem is the phone's network.
-2. `fly status` and `fly logs` - a startup refusal names exactly which environment variable is missing or wrong.
+2. `fly status` and `fly logs` - a startup refusal names either the environment variable that is missing or wrong, or the backing service that did not answer (§0).
+   A machine that keeps restarting with `Database at ... did not answer` or `Object storage did not answer at ...` is telling you the secret is wrong or the service is down, not that the app is broken.
    `fly logs` also carries **one JSON line per request**: `{"msg":"request","method":...,"route":...,"status":...,"durationMs":...,"authenticated":...}`.
    That is how you tell "the phone is not reaching us at all" (no lines) from "we are refusing it" (401s) from "we are answering and the phone is unhappy" (200s).
    `route` is the matched pattern, never the requested path, and the line carries no receipt id, no search term, no user id and no token - so a request cannot be traced to a person from the log alone, deliberately.
    ⚠ A request refused **before** routing - the edge-secret 403 and the 1 MiB body limit's 413 - reports `route: "unmatched"`, the same as a 404. The status code is what separates them.
 3. Cloudflare dashboard - a 5xx page with a Cloudflare ray id means the edge is up and the origin is not.
-4. Neon console - the app cannot start without a reachable database.
+4. Neon console - the app cannot start without a reachable database. (That sentence was aspirational until 2026-08-11 and is now literally true: see §0's startup probes.)
 
 A shipped iOS build has **no server-settings screen**, by design: its address is fixed at `https://api.keptapp.net` and cannot be redirected from the phone. Moving the API to another host means an app update.

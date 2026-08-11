@@ -1,6 +1,8 @@
+import { createServer, type Socket } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   LOCAL_DEV_STORAGE_CONFIG,
+  assertBucketReachable,
   createBucketIfMissing,
   createS3ObjectStorage,
   resolveStorageConfig,
@@ -114,4 +116,90 @@ describe("resolveStorageConfig", () => {
       forcePathStyle: true,
     });
   });
+});
+
+/**
+ * The startup probe (src/index.ts) refuses to serve until storage answers.
+ *
+ * These exist because the first version of that probe shipped with no test at
+ * all: its body could be replaced with `return;` and the whole suite stayed
+ * green, and what slipped through that gap was a probe with no timeout, which
+ * hung a boot indefinitely and silently (REVIEW-1 F1, F3).
+ */
+describe("assertBucketReachable, the startup storage probe", () => {
+  it("resolves against the bucket that is really there", async () => {
+    await expect(
+      assertBucketReachable(LOCAL_DEV_STORAGE_CONFIG),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects a bucket that does not exist, and does not create it", async () => {
+    const absent = `no-such-bucket-${runPrefix}`;
+    await expect(
+      assertBucketReachable({ ...LOCAL_DEV_STORAGE_CONFIG, bucket: absent }),
+    ).rejects.toThrow();
+
+    // The probe is read-only, and that is a property worth an assertion rather
+    // than a comment: its sibling createBucketIfMissing conjures a bucket, and
+    // a deployed bucket is provisioned deliberately with lifecycle rules
+    // (spec §10B). A probe that quietly created one would be a rule broken at
+    // boot, on the prefix the 30-day export expiry is written against.
+    await expect(
+      assertBucketReachable({ ...LOCAL_DEV_STORAGE_CONFIG, bucket: absent }),
+    ).rejects.toThrow();
+  });
+
+  it("rejects a wrong credential rather than accepting it", async () => {
+    await expect(
+      assertBucketReachable({
+        ...LOCAL_DEV_STORAGE_CONFIG,
+        secretAccessKey: "not-the-secret",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("gives up on an endpoint that accepts the connection and never answers", async () => {
+    // The regression this file exists to prevent. Without the probe client's
+    // own timeouts the SDK waits forever: measured at 45 s and still pending,
+    // with the entrypoint emitting zero bytes, binding no port and never
+    // exiting - strictly worse than the defect the probe was added to close.
+    const accepted: Socket[] = [];
+    const sink = createServer((socket) => {
+      accepted.push(socket);
+      socket.on("error", () => {});
+    });
+    await new Promise<void>((resolve) => sink.listen(0, "127.0.0.1", resolve));
+    const address = sink.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("could not read the sink's port");
+    }
+
+    try {
+      const startedAt = Date.now();
+      await expect(
+        assertBucketReachable(
+          {
+            ...LOCAL_DEV_STORAGE_CONFIG,
+            endpoint: `http://127.0.0.1:${address.port}`,
+          },
+          // An explicit short timeout so this test costs a second rather than
+          // the ten the default spends. What is under test is that SOME bound
+          // exists and is honoured - the default's value is a judgement call,
+          // its existence is the property.
+          800,
+        ),
+      ).rejects.toThrow(/did not answer within 800ms/);
+      // Bounded, not merely eventual.
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+    } finally {
+      // The accepted sockets are destroyed by hand first: `close()` alone
+      // waits for open connections to end, and the whole point of this sink is
+      // that its connections never end. (net.Server has no
+      // closeAllConnections; that is http.Server's.)
+      for (const socket of accepted) {
+        socket.destroy();
+      }
+      await new Promise((resolve) => sink.close(resolve));
+    }
+  }, 30_000);
 });

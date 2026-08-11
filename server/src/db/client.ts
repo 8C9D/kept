@@ -58,10 +58,14 @@ export type Db = ReturnType<typeof createDb>["db"];
  * built with `connectionString` alone, so `connectionTimeoutMillis` is 0 and a
  * connect against a black-holed host would otherwise hang here forever.
  *
- * A timed-out attempt leaves its query running on the pool. That is deliberate
- * and bounded: the only caller is startup, and startup either proceeds (in
- * which case one stray checkout is reclaimed by pg's 10 s idle reaper) or
- * throws and takes the process with it.
+ * A timed-out attempt leaves its query running on the pool, and the cost is
+ * stated exactly rather than rounded down: with the default five attempts, up
+ * to four can time out before one succeeds, so up to four checkouts outlive
+ * their probe. One that eventually settles returns to the pool and is reclaimed
+ * by pg's 10 s idle reaper; one that never settles is never idle and never
+ * reaped, permanently costing a slot of the pool's `max` of 10. The bound that
+ * makes this acceptable is not the reaper - it is that the only caller is
+ * startup, which either proceeds once (worst case: a pool of 6) or exits.
  */
 export async function assertDatabaseReachable(
   pool: Pool,
