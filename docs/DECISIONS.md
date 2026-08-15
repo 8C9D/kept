@@ -4,6 +4,47 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-15 - Production-readiness round 4 is deferred: the remaining backlog waits for production evidence
+
+**Decided: there is no fourth desk-review round before the first deploy.**
+The deploy-prep triage (`DEPLOY-PREP.md` §1) re-read all thirteen carried items against the round ledgers and asked one question of each: does it get worse, or become unfixable, once real user data is in production, or does it block the first deploy itself.
+The answer left one deploy-blocker (PR-8, fixed this pass), one reserved decision (R2-2, decided this pass), and eleven items that lose nothing by waiting.
+Those eleven carry exactly as documented, deferred to a post-deploy pass informed by what production actually measures.
+
+**Why deploying is now the higher-yield move.**
+Two independent sweeps have re-verified this backlog and found no further P1s in it: round 2 re-checked round 1's fifteen carried candidates line by line and all survived as P2 or P3, and round 3 re-checked eighteen and moved no severity.
+Round 3 already had to draw its work list from the P2s to have work to do.
+The deploy-prep triage classified every remaining item as one that does not worsen with real user data, and several cannot be fixed honestly without production: PR-9(b)'s timeout must be set above a measured worst case, and the measurement - `generateExport` against the deployed Neon at a realistic row count - cannot exist before the deploy; R2-3 is unfixable from inside the repository (machine size or export architecture), and zero receipts exist at first deploy, so there is no real export size to weigh either change against; PR-6's remedy needs `ios/` (RULING 4), which no server-side round may touch.
+
+**What reopens this - triggers, not vibes.**
+
+- PR-9(b) reopens once production holds a realistic fiscal-year export to measure `generateExport`'s row query and image loop against; the timeout is then set above the measured worst case, never at a round number.
+- R2-3 reopens when production exports are large enough to measure: the first real fiscal-year export's size and peak memory decide between a machine-size change and an export-architecture change, the only two fixes round 3 names - and it reopens before any raise of the 256 MiB export budget, which is what bounds a single export under the ~1120 MiB heap ceiling today.
+- PR-6 reopens with the first pass allowed to read `ios/`, where its remedy lives.
+- Any production incident traceable to a carried finding reopens that finding immediately, at the incident's severity rather than the filed one.
+- A new P1, found by any future sweep or surfaced by production, reopens a full round, not just the one finding.
+
+**Rejected: a fourth pre-deploy desk round over the same backlog.**
+The recurring lesson of rounds 2 and 3 is that each round's real finds came from a new lens, not from re-grinding the carried list: round 2's one P1 came from asking whether anything was *there* rather than whether configuration was well-shaped, and round 3's two new finds came from asking what the repository asserts in prose and nowhere else.
+Re-verifying the carried list, by contrast, produced agreement and nothing else - round 3 recorded its own 18-for-18 re-verification as "a weaker result than it sounds" because agreement between two sweeps a day apart is cheap.
+A fourth pass over the same list buys more of that agreement at the cost of delaying the deploy that produces the evidence the deferred items are waiting on.
+
+**What carries, so this entry is self-contained** - eleven items, one-liners from `DEPLOY-PREP.md` §1:
+
+- PR-5 - no SIGTERM drain: in-flight requests severed on every deploy.
+- PR-6 - a severed-but-committed create retried gets 409.
+- PR-10 - `drizzle.config.ts` falls back to localhost.
+- PR-13 - production image ships dev dependencies.
+- N-1 - five dev scripts build their own `Pool` without PR-1's error listener.
+- N-2 - `errorSummary`'s `JSON.parse` branch leaks ~10 chars of model output to the log.
+- N-3 - duplicate-image index makes re-capturing the same paper order-dependent.
+- N-4 - three hygiene items (deprecated `routePath`, duplicated `isMissingObject`, a re-wrapped artifact quote).
+- N-5 - pre-routing refusals log `route: "unmatched"`.
+- R2-3 - V8 heap ceiling (~1120 MiB) vs the 891 MiB export measurement.
+- PR-9(b) - no statement timeout; post-deploy by construction.
+
+With them travel round 3's three not-yet-findings observations (`PROD-READINESS-ROUND-3.md` §8) and the `nanoid` dev-chain advisory that deploy-prep's gate surfaced and flagged rather than fixed (`DEPLOY-PREP.md` §5), so the post-deploy pass starts from them rather than rediscovering them.
+
 ## 2026-08-15 - The export CSV is not mutated to defend a spreadsheet
 
 **Decided: R2-2's remedy is no remedy - a free-text field beginning `=`, `+`, `-` or `@` is exported byte-for-byte, in both files, and the decision is pinned by tests rather than left as an omission.**
