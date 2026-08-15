@@ -52,7 +52,7 @@ A missing one stops the process at startup with the name in the message, rather 
 A wrong `DATABASE_URL` password produced a process that printed `Kept API listening on port 3000`, answered the `curl .../api/me` → 401 check in §1 (that path never opens a database connection), and returned 500 to every authenticated request.
 
 - **The database** is probed with `select 1`, retried up to five times a second apart with a 5-second cap on each attempt, so a Neon compute waking from autosuspend is waited for rather than crashed on. If it never answers, the process prints `Database at <host>:<port> did not answer, so this process is refusing to serve` and exits 1. The host and port are named; the URL is not, because it carries the password.
-- **Object storage** is probed with a read-only `HeadBucket` - it never creates a bucket - with a 10-second cap. If it does not answer, the process names the endpoint and bucket and exits 1.
+- **Object storage** is probed read-only with a 10-second cap: one `GetObject` on `.startup-probe/reachability`, a key that cannot exist, treating "no such key" as success - never a `HeadBucket` (bucket metadata is a permission the R2 token is not known to carry) and never a create. If it does not answer, the process names the endpoint and bucket and exits 1. *(This sentence said `HeadBucket` until 2026-08-15; the probe moved off it on 2026-08-11 and the code's own refusal message was corrected in round 3, but this line was missed.)*
 
 Both refusals happen **before the port is bound**, so a machine in this state is not listening at all, rather than listening and failing.
 ⚠ Neither of these is an "environment variable is missing" refusal, so when §7 step 2 sends you to `fly logs`, expect one of these two sentences as well as the variable-name ones.
@@ -78,14 +78,46 @@ An exit code is not evidence, and neither is a health check that proves only tha
 
 ```sh
 fly status                       # one machine, state "started"
+fly checks list                  # the /health HTTP check "passing"
 fly logs                         # expect: Kept API listening on port 3000
 curl -i https://api.keptapp.net/api/me
 ```
+
+`fly checks list` reports the `GET /health` liveness check (added 2026-08-15).
+It proves only that the process is up and answering HTTP - deliberately, so it never keeps Neon's autosuspending compute awake (docs/DECISIONS.md, 2026-08-15).
+The `curl` below stays the real proof that routing, TLS and the app all ran.
 
 The last one must answer **401** with a JSON body `{"error":{"code":"unauthorized",...}}` and a `Cache-Control: no-store` header.
 A 401 is the correct answer - it proves routing, TLS, the app, and the auth middleware all ran.
 A 403 with `{"error":{"code":"forbidden"}}` means `EDGE_SHARED_SECRET` is set on the origin but Cloudflare is not adding the header; fix the transform rule (§5) rather than unsetting the secret.
 A 502 or a Cloudflare error page means the origin is down - check `fly logs` for a startup refusal, which names what is missing.
+
+### First deploy only: the operator checklist *(added 2026-08-15)*
+
+Three things code cannot do for itself, each with what to verify.
+The ordered account-and-secret setup is `docs/gates/wave-6.md` §3; these are the confirmations that belong to the person running it.
+
+**1. Confirm the R2 token can actually read from its bucket.**
+The server refuses to boot unless the storage probe passes, and the probe reads: one `GetObject` on `.startup-probe/reachability`, a key that cannot exist, with `NoSuchKey` treated as success (§0).
+No call of any kind has ever been made from this repository to R2, so the first deploy is the first time that assumption meets the real token.
+What to observe, in `fly logs`:
+
+- Pass: `Object storage: checking https://... for bucket "kept"` followed by the boot continuing to `Kept API listening on port 3000`. That sequence *is* the confirmation - a token that cannot read would have stopped it.
+- Fail: `Object storage did not answer at ...` with a cause naming `SignatureDoesNotMatch` or `AccessDenied`, and the machine restarting. Fix the token in Cloudflare (bucket-scoped, read and write); do not soften the probe.
+
+Then run `npm run storage:probe-keys` against R2 (wave-6 §3 step 12), which exercises real `GetObject` and `PutObject` calls and settles the key-normalization question §6 records as measured-on-MinIO-only.
+Delete the `probe-victim-*` and `probe-attacker-*` objects it leaves.
+
+**2. Choose the scheduled `pg_dump` destination, schedule it, and verify the first dump.**
+§4's dump command exists; nothing schedules it and nowhere is named, and both are account decisions code cannot make.
+Pick a destination that is **not Neon and not this laptop alone**, schedule the §4 `pg_dump` (weekly is proportionate at this size; before every migration regardless), and write the destination down here once chosen.
+What to verify: the first scheduled run actually produced a file at the destination, and that file restores - run the §4 drill (scratch database, `npm run db:verify-restore`) against **the scheduled dump's file**, not against a hand-run one.
+
+**3. Decide the Neon plan, knowing what the history window is not.**
+Neon's point-in-time restore is a **history window measured in hours** (6 on Free, 7 days on Launch, 30 on Scale) - a good answer to "I ran the wrong thing twenty minutes ago" and **not any part of the six-year retention story** (§4).
+PITR is never the backup plan; the scheduled dump from step 2 is.
+Decide: stay on Free and rest retention entirely on the dump, or pay for a longer oops-window on top of it.
+Either is sound; record the choice so the next reader knows it was made rather than defaulted.
 
 ### Change a secret
 
@@ -257,7 +289,9 @@ In order:
 1. `curl -i https://api.keptapp.net/api/me` - 401 means the server is fine and the problem is the phone's network.
 2. `fly status` and `fly logs` - a startup refusal names either the environment variable that is missing or wrong, or the backing service that did not answer (§0).
    A machine that keeps restarting with `Database at ... did not answer` or `Object storage did not answer at ...` is telling you the secret is wrong or the service is down, not that the app is broken.
-   `fly logs` also carries **one JSON line per request**: `{"msg":"request","method":...,"route":...,"status":...,"durationMs":...,"authenticated":...}`.
+   `fly logs` also carries **one JSON line per request**: `{"msg":"request","method":...,"route":...,"status":...,"durationMs":...,"sessionPresented":...,"authenticated":...}`.
+   `sessionPresented` is whether a bearer credential arrived at all; `authenticated` is whether it was accepted - "the client stopped sending a token" and "we are rejecting every token" separate on the first, not the second.
+   Expect a steady `route: "/health"` line every 30 seconds: that is Fly's liveness check (§1), not traffic.
    That is how you tell "the phone is not reaching us at all" (no lines) from "we are refusing it" (401s) from "we are answering and the phone is unhappy" (200s).
    `route` is the matched pattern, never the requested path, and the line carries no receipt id, no search term, no user id and no token - so a request cannot be traced to a person from the log alone, deliberately.
    ⚠ A request refused **before** routing - the edge-secret 403 and the 1 MiB body limit's 413 - reports `route: "unmatched"`, the same as a 404. The status code is what separates them.
