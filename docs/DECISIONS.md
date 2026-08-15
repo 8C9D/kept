@@ -4,6 +4,29 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-15 - The export CSV is not mutated to defend a spreadsheet
+
+**Decided: R2-2's remedy is no remedy - a free-text field beginning `=`, `+`, `-` or `@` is exported byte-for-byte, in both files, and the decision is pinned by tests rather than left as an omission.**
+This closes the ruling rounds 2 and 3 both surfaced (RULING 5): whether the export should mutate values to stop a spreadsheet reading them as formulas.
+
+**The trade, stated in full.**
+The CSV is an accountant-facing tax artifact whose spec-stated purpose is import into accounting software, and import parsers do not evaluate formulas.
+Every available defence mutates the data: the standard `'` prefix would arrive in the books as part of the vendor's name, silently, permanently, and in the artifact whose whole job is to be the same data.
+The artifact a human opens is the XLSX (spec §8, "XLSX is primary"), and ExcelJS stores a formula-shaped string as a string cell, never a formula - measured in round 2 and now pinned by a test that fails if an ExcelJS upgrade changes it.
+So the choice was between a wrong cell for a human who opens the CSV against its stated purpose, and a wrong string for the software the file is actually for - and a corrupted tax record is the project's top-of-scale harm, while a `#NAME?` cell is recoverable by opening the XLSX sitting beside it in the same zip.
+
+**Why the injection vector is thinner here than the CWE-1236 default.**
+Constraint 2 means no OCR value saves without a human confirming it, so a hostile vendor name crafted onto a receipt must survive the confirm screen's editable form before it can reach an export - the exported strings are not attacker-controlled pass-through, they are human-reviewed fields.
+And per-user isolation means the only data in a person's export is their own.
+
+**Rejected: defending the CSV only.**
+It is the only artifact at risk, but the prefix lands exactly in the import path, which is the one consumer the mutation harms.
+
+**Rejected: a second, defended CSV beside the faithful one.**
+Two files claiming to be the same data is how the wrong one gets imported.
+
+**Pinned by tests** (`tests/unit/writeFiles.test.ts`): the CSV preserves leading `=`, `+`, `-` and `@` unchanged, and the XLSX stores the same value as a string cell - each verified by mutating the writer and watching the test die.
+
 ## 2026-08-15 - The health check is liveness only, and it deliberately does not ask about the database
 
 **Decided: `GET /health` exists, it answers a constant `200 {"status":"ok"}` from the process itself, it touches neither backing service, and `fly.toml` points an HTTP check at it every 30 seconds.**

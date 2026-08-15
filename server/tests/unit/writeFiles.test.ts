@@ -1,7 +1,8 @@
+import ExcelJS from "exceljs";
 import { describe, expect, it } from "vitest";
 import { cents } from "../../src/domain/money.js";
 import type { ExportRow } from "../../src/export/exportRows.js";
-import { writeCsv } from "../../src/export/writeFiles.js";
+import { writeCsv, writeXlsx } from "../../src/export/writeFiles.js";
 
 function row(overrides: Partial<ExportRow> = {}): ExportRow {
   return {
@@ -51,5 +52,49 @@ describe("writeCsv", () => {
     const dataLine = csv.trimEnd().split("\r\n")[1];
     // subtotal, hst, other_tax empty; total present.
     expect(dataLine).toContain(",,,,113.00,");
+  });
+});
+
+/**
+ * R2-2, decided 2026-08-15 (docs/DECISIONS.md): the export does NOT mutate
+ * fields a spreadsheet would read as formulas. The CSV is the import
+ * artifact and a defensive prefix would become the vendor's name in the
+ * accountant's books, silently and permanently; the artifact spec §8
+ * designates for humans is the XLSX, which stores such a field as a string
+ * cell. These tests make the decision executable in both directions:
+ * anyone adding a quiet `'` prefix later fails the first, and an ExcelJS
+ * upgrade that starts parsing leading `=` as a formula fails the second.
+ */
+describe("formula-shaped fields stay byte-faithful", () => {
+  it("writes a leading =, +, - or @ into the CSV unchanged", () => {
+    const csv = writeCsv([
+      row({
+        vendor: "=1+1",
+        category: "+1+1",
+        paymentMethod: "-Rogers Communications",
+        notes: "@SUM(A1:A2)",
+      }),
+    ]);
+    const fields = (csv.trimEnd().split("\r\n")[1] ?? "").split(",");
+    expect(fields[2]).toBe("=1+1");
+    expect(fields[9]).toBe("+1+1");
+    expect(fields[10]).toBe("-Rogers Communications");
+    expect(fields[14]).toBe("@SUM(A1:A2)");
+  });
+
+  it("stores the same field in the XLSX as a string cell, never a formula", async () => {
+    const bytes = await writeXlsx([row({ vendor: "=1+1" })]);
+    const workbook = new ExcelJS.Workbook();
+    // exceljs's own typings predate @types/node's generic Buffer, so the
+    // structurally-identical value needs its word taken for it.
+    type LoadInput = Parameters<typeof workbook.xlsx.load>[0];
+    await workbook.xlsx.load(Buffer.from(bytes) as unknown as LoadInput);
+    const sheet = workbook.getWorksheet("Receipts");
+    if (sheet === undefined) {
+      throw new Error("Receipts worksheet missing from the written XLSX");
+    }
+    const vendorCell = sheet.getRow(2).getCell(3);
+    expect(vendorCell.type).toBe(ExcelJS.ValueType.String);
+    expect(vendorCell.value).toBe("=1+1");
   });
 });
