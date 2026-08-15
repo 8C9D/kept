@@ -4,6 +4,28 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-15 - The health check is liveness only, and it deliberately does not ask about the database
+
+**Decided: `GET /health` exists, it answers a constant `200 {"status":"ok"}` from the process itself, it touches neither backing service, and `fly.toml` points an HTTP check at it every 30 seconds.**
+This settles PR-8, which round 3 struck on scope (RULING 8): a health check worth having needed a new endpoint, and the deploy-prep pass is the first one allowed to add it.
+The endpoint is registered ahead of the edge-secret middleware, because Fly's checker probes the machine directly and cannot carry the Cloudflare header - `fly.toml` is committed, so putting `EDGE_SHARED_SECRET` in a check header would commit a secret.
+
+**Rejected: a check that re-asks R2-1's question at runtime** - pinging the database or storage on every probe.
+Three reasons, weighed in the open rather than left as an accident.
+First, Neon autosuspends after minutes of idleness and a probe every 30 seconds would keep the compute awake permanently, converting a health check into a standing bill - the same reasoning that set the LLM sweep's interval at six hours; probing rarely instead just wakes the compute on every probe and buys constant churn for no suspend savings.
+Second, a restart is the only remedy a failed check can trigger, and a restart cannot fix a dead backing service: the machine comes back up into the boot probes, which refuse to bind the port until both services answer, so the crash-loop those probes produce is already the visible signal for that failure - a runtime re-ask would add cost without adding a remedy.
+Third, an unauthenticated route must not tell an outside observer which backing service is up; a liveness answer is a constant, so there is structurally nothing to disclose and no failure shape to differentiate.
+
+**Rejected: pointing a check at an existing route.**
+`GET /api/me` answers 401 unauthenticated, which Fly reads as failure, and nothing else answers 2xx without a session - this is why PR-8 sat unresolved for three rounds.
+
+**What the check therefore detects and what it forgoes, stated.**
+It detects a dead or wedged process, an unbound port, and an event loop that cannot produce a response - the failures a restart actually fixes.
+It forgoes detecting a backing service that dies after a successful boot; that gap is covered by the request log's 500s and the client's honest-failure UI, and re-asking it at boot is what R2-1 already does.
+The check's `grace_period` of 60 seconds covers the boot probes' worst case (five 5-second database attempts a second apart, then a 10-second storage cap).
+
+**The wiring is pinned by tests**: the route answers without the edge secret, consults neither backing service (an app whose `db` and `storage` throw on any use still answers), and `fly.toml`'s check block names the same path - each verified by mutating the code and watching the test die.
+
 ## 2026-08-11 - Production-readiness round 3: the backlog nobody was allowed to fix, and five sentences that outlived the code they described
 
 **A third staged, adversarially reviewed hardening pass over `server/` only**, on branch `prod-readiness/round-3`, cut from round 2's branch rather than from `main`.

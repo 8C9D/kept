@@ -20,6 +20,21 @@ primary_region = "yyz"
   auto_start_machines = true
   min_machines_running = 1
 
+  # Liveness only, deliberately (docs/DECISIONS.md, 2026-08-15): GET /health
+  # answers a constant 200 from the process itself and touches neither Neon
+  # nor R2. A database-pinging check at this cadence would keep Neon's
+  # autosuspending compute awake permanently, and a restart - the only
+  # remedy a failed check can buy - cannot fix a dead backing service; the
+  # boot probes already refuse to bind the port until both services answer.
+  # The grace period covers those probes' worst case (five 5 s database
+  # attempts a second apart, then a 10 s storage cap) with room to spare.
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "60s"
+
 [[vm]]
   size = "shared-cpu-1x"
   # 2 GB, measured rather than guessed: a 250 MiB export peaks at 891 MiB

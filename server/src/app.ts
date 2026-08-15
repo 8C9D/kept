@@ -89,6 +89,26 @@ export function createApp(deps: AppDependencies): Hono {
     c.header("Cache-Control", "no-store");
   });
 
+  // The liveness check Fly's HTTP health check probes (fly.toml points at
+  // it; decision recorded 2026-08-15 in docs/DECISIONS.md). Three properties
+  // are load-bearing, and each is pinned by a test:
+  //
+  //   - It answers WITHOUT the edge secret, so it is registered above that
+  //     middleware. Fly's checker probes the machine directly and cannot
+  //     carry the Cloudflare header: fly.toml is committed, so putting
+  //     EDGE_SHARED_SECRET in a check header would commit a secret.
+  //   - It touches NO backing service. Boot already refuses to bind the port
+  //     until both answered (the 2026-08-11 startup probes), and a probe
+  //     that pinged the database every 30 seconds would never let Neon's
+  //     autosuspend fire - the same reason the LLM sweep's interval is six
+  //     hours. A restart is also not a remedy a failed database ping could
+  //     buy: the machine would just refuse at boot until the database is
+  //     back, which the boot probe already makes visible.
+  //   - The body is a constant. An unauthenticated route must not tell an
+  //     outside observer which backing service is up, so there is nothing
+  //     here that could vary.
+  app.get("/health", (c) => c.json({ status: "ok" }));
+
   // Between the cache header (which must cover this middleware's own 403)
   // and the body limit (a request refused here must be refused before its
   // body is buffered). Comparison is constant-time over digests so neither
