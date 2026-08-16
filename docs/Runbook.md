@@ -96,6 +96,7 @@ A 502 or a Cloudflare error page means the origin is down - check `fly logs` for
 
 Three things code cannot do for itself, each with what to verify.
 The ordered account-and-secret setup is `docs/gates/wave-6.md` §3; these are the confirmations that belong to the person running it.
+The first deploy happened 2026-08-16, completing wave-6 §3 steps 1-13; items 1 and 3 below are done, and item 2's scheduling and restore verification are the one piece still open.
 
 **1. Confirm the R2 token can actually read from its bucket.**
 The server refuses to boot unless the storage probe passes, and the probe reads: one `GetObject` on `.startup-probe/reachability`, a key that cannot exist, with `NoSuchKey` treated as success (§0).
@@ -107,6 +108,7 @@ What to observe, in `fly logs`:
 
 Then run `npm run storage:probe-keys` against R2 (wave-6 §3 step 12), which exercises real `GetObject` and `PutObject` calls and settles the key-normalization question §6 records as measured-on-MinIO-only.
 Delete the `probe-victim-*` and `probe-attacker-*` objects it leaves.
+Done 2026-08-16: the boot probe passed on the first deploy, and `storage:probe-keys` against R2 served the control read and refused all eight traversal spellings; the probe objects were deleted the same day.
 
 **2. Choose the scheduled `pg_dump` destination, schedule it, and verify the first dump.**
 §4's dump command exists; nothing schedules it and nowhere is named, and both are account decisions code cannot make.
@@ -114,6 +116,7 @@ Pick a destination that is **not Neon and not this laptop alone**, schedule the 
 What to verify: the first scheduled run actually produced a file at the destination, and that file restores - run the §4 drill (scratch database, `npm run db:verify-restore`) against **the scheduled dump's file**, not against a hand-run one.
 Chosen 2026-08-16: a second R2 bucket, `kept-backups`, in the same Cloudflare account as the images, under no lifecycle rule.
 The accepted caveat is that a Cloudflare account compromise reaches both the receipt images and the dumps; a destination at a separate provider was the stricter alternative, and it was rejected.
+Still open as of 2026-08-16: the `kept-backups` bucket exists, but nothing schedules the dump yet and no dump file has been verified - this is the one first-deploy item left.
 
 **3. Decide the Neon plan, knowing what the history window is not.**
 Neon's point-in-time restore is a **history window measured in hours** (6 on Free, 7 days on Launch, 30 on Scale) - a good answer to "I ran the wrong thing twenty minutes ago" and **not any part of the six-year retention story** (§4).
@@ -122,6 +125,7 @@ Decide: stay on Free and rest retention entirely on the dump, or pay for a longe
 Either is sound; record the choice so the next reader knows it was made rather than defaulted.
 Chosen 2026-08-16: the Free plan.
 Retention rests entirely on the scheduled dump from step 2, and the 6-hour PITR window is an oops-window only.
+Executed 2026-08-16: the Neon project `kept` was created on Free, on Postgres 16 to match dev's `postgres:16` so the §4 restore drill stays valid.
 
 ### Change a secret
 
