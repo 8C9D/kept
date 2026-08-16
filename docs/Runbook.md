@@ -112,12 +112,16 @@ Delete the `probe-victim-*` and `probe-attacker-*` objects it leaves.
 §4's dump command exists; nothing schedules it and nowhere is named, and both are account decisions code cannot make.
 Pick a destination that is **not Neon and not this laptop alone**, schedule the §4 `pg_dump` (weekly is proportionate at this size; before every migration regardless), and write the destination down here once chosen.
 What to verify: the first scheduled run actually produced a file at the destination, and that file restores - run the §4 drill (scratch database, `npm run db:verify-restore`) against **the scheduled dump's file**, not against a hand-run one.
+Chosen 2026-08-16: a second R2 bucket, `kept-backups`, in the same Cloudflare account as the images, under no lifecycle rule.
+The accepted caveat is that a Cloudflare account compromise reaches both the receipt images and the dumps; a destination at a separate provider was the stricter alternative, and it was rejected.
 
 **3. Decide the Neon plan, knowing what the history window is not.**
 Neon's point-in-time restore is a **history window measured in hours** (6 on Free, 7 days on Launch, 30 on Scale) - a good answer to "I ran the wrong thing twenty minutes ago" and **not any part of the six-year retention story** (§4).
 PITR is never the backup plan; the scheduled dump from step 2 is.
 Decide: stay on Free and rest retention entirely on the dump, or pay for a longer oops-window on top of it.
 Either is sound; record the choice so the next reader knows it was made rather than defaulted.
+Chosen 2026-08-16: the Free plan.
+Retention rests entirely on the scheduled dump from step 2, and the 6-hour PITR window is an oops-window only.
 
 ### Change a secret
 
@@ -244,7 +248,7 @@ Cloudflare is in front of the origin for two things: **the rate limiter** §10B 
 
 - **DNS.** `api.keptapp.net` is a proxied (orange-cloud) CNAME to the Fly app hostname. Proxied is the whole point; grey-cloud sends traffic straight to the origin and none of the below applies.
 - **Rate limiting rule.** One rule, on `api.keptapp.net`, counting by IP. The Free plan allows exactly one rate limiting rule with a 10-second window, which is enough: the endpoint worth limiting is `POST /api/auth/apple`, the only route reachable without a session.
-- **The origin lock.** A Transform Rule adds a request header `x-kept-edge-secret` with the value of `EDGE_SHARED_SECRET`. Without this, `kept-api.fly.dev` remains reachable directly and the rate limiter guards one door of a two-door building. Set the Fly secret and the transform rule together, in that order (origin first tolerates the header before it requires it; the reverse locks you out for the seconds in between).
+- **The origin lock.** A Transform Rule adds a request header `x-kept-edge-secret` with the value of `EDGE_SHARED_SECRET`. Without this, `keptapp-api.fly.dev` remains reachable directly and the rate limiter guards one door of a two-door building. Set the Fly secret and the transform rule together, in that order (origin first tolerates the header before it requires it; the reverse locks you out for the seconds in between).
 
 Rotating the edge secret: set the new value in the Cloudflare transform rule first, then `fly secrets set EDGE_SHARED_SECRET=...`. Requests carrying an old value are refused with 403, not 500.
 

@@ -7,7 +7,7 @@
 # STORAGE_ACCESS_KEY_ID, STORAGE_SECRET_ACCESS_KEY, and later
 # EDGE_SHARED_SECRET.
 
-app = "kept-api"
+app = "keptapp-api"
 primary_region = "yyz"
 
 [http_service]

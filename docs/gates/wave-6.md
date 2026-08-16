@@ -125,6 +125,9 @@ Nothing here can be done by an agent: each needs an account, a payment method, a
 
 **The origin**
 
+*Correction, 2026-08-16: the name `kept-api` turned out to be taken by an unrelated app on the Fly platform, so the app is `keptapp-api` and `fly.toml` was updated. Read `kept-api` as `keptapp-api` in steps 7 and 10 below; the instructions are otherwise unchanged.
+Also decided 2026-08-16: `ANTHROPIC_API_KEY="..."` joins the step 8 `fly secrets set` command, which omitted it - LLM parsing is on from the first deploy.*
+
 7. **`fly auth login`, then from `server/`: `fly launch --no-deploy`** (it will pick up the committed `fly.toml`; keep the app name `kept-api` or update `fly.toml` if Fly assigns another).
 8. **Set the secrets** - the values from steps 3 and 5, plus a fresh session secret. Generate it with `openssl rand -base64 48`; nobody needs to read it, including you:
    ```
