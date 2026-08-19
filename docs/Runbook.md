@@ -117,6 +117,8 @@ What to verify: the first scheduled run actually produced a file at the destinat
 Chosen 2026-08-16: a second R2 bucket, `kept-backups`, in the same Cloudflare account as the images, under no lifecycle rule.
 The accepted caveat is that a Cloudflare account compromise reaches both the receipt images and the dumps; a destination at a separate provider was the stricter alternative, and it was rejected.
 Still open as of 2026-08-16: the `kept-backups` bucket exists, but nothing schedules the dump yet and no dump file has been verified - this is the one first-deploy item left.
+Progress 2026-08-18: the tooling now exists - `npm run db:backup` (dump, upload, size-check, sha256) and the launchd template `server/ops/net.keptapp.backup.plist` (§4, "The scheduled dump").
+Still the owner's: an R2 token scoped to `kept-backups`, `~/.kept/backup.env`, installing the agent, and the §4 drill against the first scheduled dump's file.
 
 **3. Decide the Neon plan, knowing what the history window is not.**
 Neon's point-in-time restore is a **history window measured in hours** (6 on Free, 7 days on Launch, 30 on Scale) - a good answer to "I ran the wrong thing twenty minutes ago" and **not any part of the six-year retention story** (§4).
@@ -206,6 +208,40 @@ docker run --rm -v "$PWD:/out" postgres:16 \
 ```
 
 Keep the file. It is a tax record.
+
+### The scheduled dump *(tooling added 2026-08-18; not yet scheduled)*
+
+`npm run db:backup` is the scriptable form of the dump above: `pg_dump -Fc`
+of `DATABASE_URL`, uploaded to a dedicated backup bucket with a
+UTC-timestamped key (`pg/kept-YYYYMMDD-HHMMSS.dump`), the upload re-read and
+size-checked, the file's sha256 printed. It requires all five of
+
+```
+DATABASE_URL
+BACKUP_STORAGE_ENDPOINT      # https://<account-id>.r2.cloudflarestorage.com
+BACKUP_STORAGE_BUCKET        # kept-backups - NEVER the image bucket
+BACKUP_STORAGE_ACCESS_KEY_ID
+BACKUP_STORAGE_SECRET_ACCESS_KEY
+```
+
+and refuses on any missing value, on the image bucket as the target (the
+`exports/` lifecycle rule must never live near backups), and on a local
+`pg_dump` older than 16 (`src/db/backupConfig.ts` carries the refusals and
+their unit tests).
+
+**Scheduling** is a launchd agent on the Mac:
+`server/ops/net.keptapp.backup.plist` is the template, with its
+installation steps in its own header comment - replace the repo path, put
+the five variables in `~/.kept/backup.env` (chmod 600), copy to
+`~/Library/LaunchAgents`, load, run once by hand, read the log. Daily 02:00;
+launchd runs a missed slot at next wake.
+
+Still needed before this counts as done (wave-6 §3 step 17): an R2 token
+scoped to `kept-backups` (the bucket itself exists, chosen 2026-08-16 - §1
+first-deploy checklist item 2), the `~/.kept/backup.env` file, the agent
+actually installed, and **one scheduled dump restore-verified end to end** -
+the script itself prints the reminder, because an untested backup is an
+assumption.
 
 ### Restore it, and verify the restore
 

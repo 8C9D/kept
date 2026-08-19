@@ -8,6 +8,7 @@
     "db:seed": "tsx src/db/seed.ts",
     "db:claim": "tsx src/db/claim.ts",
     "db:verify-restore": "tsx src/db/verifyRestore.ts",
+    "db:backup": "tsx src/db/backup.ts",
     "parse-accuracy": "tsx src/db/parseAccuracyReport.ts",
     "preparse-llm-backfill": "touch .env.local",
     "parse-llm-backfill": "node --env-file=.env.local --import tsx src/db/llmBackfill.ts",
