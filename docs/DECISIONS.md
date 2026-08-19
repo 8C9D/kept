@@ -4,6 +4,27 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-18 - Distribution day: the App Store record is "Kept Receipts", and wave-6 steps 14-16 are done
+
+**Decided: the App Store record is named "Kept Receipts", because "Kept" is already taken as an App Store name.**
+App id 6802835941, SKU `com.arthurzhang.kept`, primary language English (Canada).
+The home-screen name is unchanged - `CFBundleDisplayName` stays "Kept" - and the bundle identifier was never in question.
+Rejected: filing a name claim (no trademark exists to claim on) and renaming the product (the name belongs to the product, not the store listing; almost nobody sees an unlisted listing).
+
+**Decided: the app icon is a generated placeholder, shipped rather than blocked on.**
+Apple's upload validator rejected the first archive: the asset catalog's `AppIcon` slot was empty and `CFBundleIconName` unset - a gap no gate had caught, because nothing before distribution ever needed an icon.
+A 1024px icon (white zigzag-edged receipt, green check, deep green ground) was generated in code and wired in, and `CFBundleIconName` joined both plists; the plist-parity tests hold.
+Replaceable whenever real branding is wanted.
+
+**Decided: `ITSAppUsesNonExemptEncryption` is declared `false` in both plists.**
+The app implements no encryption of its own - TLS belongs to the OS - so every future build skips the export-compliance question.
+Build 1's question was answered in the portal instead ("none of the algorithms"), since it was uploaded before the key existed.
+
+**Done, recorded rather than decided:** the privacy label was filed and published matching `PrivacyInfo.xcprivacy` word for word (six types, all linked to identity, none used for tracking, purpose App Functionality); build 1.0 (1) was uploaded via `xcodebuild -exportArchive` with automatic signing; a TestFlight internal group with automatic distribution delivers it; and step 16's end-to-end proof ran on 2026-08-18 - the TestFlight build on the owner's phone signed into production through Cloudflare → Fly → Neon, and the production database read back `users 1, receipts 0`.
+Before the install, the owner ruled the dev data disposable: the dev database and MinIO bucket were wiped to zero, the dev app uninstalled from the phone, and its one unsynced receipt deliberately discarded - both environments now start from zero, which makes "production starts empty, nothing migrates" true in the strongest sense.
+
+**Still open:** step 17 (the scheduled `pg_dump` to `kept-backups`, restore-verified) and step 18 (the unlisted submission), with 18 additionally gated on the Account Holder accepting the updated Apple Developer Program License Agreement and on a privacy policy URL that does not yet exist.
+
 ## 2026-08-15 - Production-readiness round 4 is deferred: the remaining backlog waits for production evidence
 
 **Decided: there is no fourth desk-review round before the first deploy.**
