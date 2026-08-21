@@ -6,7 +6,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import type { ObjectStorage } from "./objectStorage.js";
+import { ObjectNotFoundError, type ObjectStorage } from "./objectStorage.js";
 
 /**
  * The real ObjectStorage implementation, S3-compatible (spec §4.2). One
@@ -127,9 +127,21 @@ export function createS3ObjectStorage(config: S3StorageConfig): ObjectStorage {
     },
 
     async download(objectKey) {
-      const response = await client.send(
-        new GetObjectCommand({ Bucket: bucket, Key: objectKey }),
-      );
+      let response;
+      try {
+        response = await client.send(
+          new GetObjectCommand({ Bucket: bucket, Key: objectKey }),
+        );
+      } catch (error) {
+        // The one place S3's spelling of "not there" becomes this project's
+        // (see ObjectNotFoundError). Only absence is translated; everything
+        // else - a timeout, a signature failure, NoSuchBucket - rethrows
+        // untouched and reports as what it was.
+        if (isMissingObject(error)) {
+          throw new ObjectNotFoundError(objectKey, { cause: error });
+        }
+        throw error;
+      }
       if (response.Body === undefined) {
         // A 200 with no body is not a state S3 defines; refuse loudly
         // rather than hand back empty bytes.
@@ -154,7 +166,7 @@ export async function createBucketIfMissing(
     await client.send(new HeadBucketCommand({ Bucket: config.bucket }));
     return;
   } catch (error) {
-    if (!isNotFound(error)) {
+    if (!isMissingBucket(error)) {
       throw error;
     }
   }
@@ -235,8 +247,19 @@ export async function assertStorageReachable(
   try {
     await Promise.race([
       client
-        .send(new GetObjectCommand({ Bucket: config.bucket, Key: PROBE_KEY }))
+        .send(
+          new GetObjectCommand({
+            Bucket: config.bucket,
+            Key: STARTUP_PROBE_KEY,
+          }),
+        )
         .catch((error: unknown) => {
+          // The same predicate `download` translates with, so the probe's
+          // success condition and the export path's "the photo is gone"
+          // condition cannot drift apart. The probe holds its own client and
+          // never goes through ObjectStorage (last paragraph of the docstring
+          // above), so it reads the S3 answer directly rather than the
+          // translated one.
           if (isMissingObject(error)) {
             return; // storage answered: bucket present, credential may read
           }
@@ -269,20 +292,56 @@ export async function assertStorageReachable(
  * neither `receiptImageObjectKey` ({userId}/yyyy/mm/{uuid}.{ext}) nor
  * `exportObjectKey` (exports/{userId}/{jobId}/{filename}) can ever produce, so
  * it cannot collide with a real object no matter who is signed in.
+ *
+ * Exported so that the claim can be checked against the key validators
+ * themselves rather than asserted in this comment: it was prose and nothing
+ * else until
+ * `tests/unit/probeKey.test.ts`, which reads this constant and puts it through
+ * `isIssuedObjectKey` / `isIssuedExportKey` for every user id and job id that
+ * could conceivably match it.
  */
-const PROBE_KEY = ".startup-probe/reachability";
+export const STARTUP_PROBE_KEY = ".startup-probe/reachability";
 
 /**
- * "That object is not there", as distinct from `isNotFound` below, which
- * answers "that BUCKET is not there". The probe needs them separated: an
- * absent object is the answer it wants, and an absent bucket is a failure.
+ * The `name` an S3 error carries, or undefined for anything that is not one.
+ *
+ * S3 and R2 put the distinguishing word on the error rather than in its text,
+ * so every question below is a question about this field. One reader for all
+ * of them: the three copies of this shape check that used to exist drifted
+ * into a literal byte-for-byte duplication, which is what this round removes.
  */
-function isMissingObject(error: unknown): boolean {
+function s3ErrorName(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("name" in error)) {
-    return false;
+    return undefined;
   }
   const name = (error as { name: unknown }).name;
+  return typeof name === "string" ? name : undefined;
+}
+
+/**
+ * "That OBJECT is not there" - S3's two spellings of it, named here in the
+ * S3 adapter and nowhere else. Callers outside this module ask the question
+ * through `ObjectNotFoundError`, which `download` above throws in its place.
+ *
+ * The real spellings are pinned against a real client by
+ * `tests/integration/objectStorage.test.ts`; the fake could only assert them
+ * by fiat.
+ */
+function isMissingObject(error: unknown): boolean {
+  const name = s3ErrorName(error);
   return name === "NoSuchKey" || name === "NotFound";
+}
+
+/**
+ * "That BUCKET is not there", which is a different question with a different
+ * answer: an absent object is what the probe wants to hear, an absent bucket
+ * is a failure. `NotFound` is on both lists because that is the name a
+ * `HeadBucket` miss carries - Head responses have no body for the SDK to read
+ * a specific code from.
+ */
+function isMissingBucket(error: unknown): boolean {
+  const name = s3ErrorName(error);
+  return name === "NoSuchBucket" || name === "NotFound";
 }
 
 function makeClient(config: S3StorageConfig): S3Client {
@@ -295,14 +354,4 @@ function makeClient(config: S3StorageConfig): S3Client {
     },
     forcePathStyle: config.forcePathStyle,
   });
-}
-
-function isNotFound(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "name" in error &&
-    ((error as { name: string }).name === "NotFound" ||
-      (error as { name: string }).name === "NoSuchBucket")
-  );
 }

@@ -10,7 +10,10 @@ import {
   assertIssuedObjectKey,
   exportObjectKey,
 } from "../storage/objectKeys.js";
-import type { ObjectStorage } from "../storage/objectStorage.js";
+import {
+  ObjectNotFoundError,
+  type ObjectStorage,
+} from "../storage/objectStorage.js";
 import type { ExportRow } from "./exportRows.js";
 import { writeCsv, writeXlsx } from "./writeFiles.js";
 
@@ -185,7 +188,12 @@ export async function generateExport(
         // act destructively on a receipt over a network blip - the worst
         // available trade on a project whose top severity is a lost receipt.
         // Everything else rethrows unchanged and reports as what it was.
-        if (!isMissingObject(error)) {
+        //
+        // The question is asked of the ObjectStorage contract, not of an S3
+        // error's `name`: this layer must not know which store is underneath,
+        // and an adapter that answered absence some other way would silently
+        // turn every missing photo into an unexplained failure here.
+        if (!(error instanceof ObjectNotFoundError)) {
           throw error;
         }
         throw new Error(
@@ -243,24 +251,6 @@ function periodLabel(period: ExportPeriod): string {
     return calendarYear;
   }
   return `${period.start}_to_${period.end}`;
-}
-
-/**
- * "The object is not there", as opposed to "storage did not answer". S3 and
- * R2 name this on the error rather than in its text, and the distinction is
- * pinned by a test against a real client (`objectStorage.test.ts`) rather
- * than by the fake, which could only assert it by fiat.
- *
- * Everything else a misconfigured or unreachable store produces has a
- * different name - `NoSuchBucket`, `SignatureDoesNotMatch`, a connection
- * error - so none of them is mistaken for a lost photo.
- */
-function isMissingObject(error: unknown): boolean {
-  if (typeof error !== "object" || error === null || !("name" in error)) {
-    return false;
-  }
-  const name = (error as { name: unknown }).name;
-  return name === "NoSuchKey" || name === "NotFound";
 }
 
 function extensionOf(objectKey: string): string {

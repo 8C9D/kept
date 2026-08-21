@@ -1,5 +1,6 @@
 import { createServer, type Socket } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { ObjectNotFoundError } from "../../src/storage/objectStorage.js";
 import {
   LOCAL_DEV_STORAGE_CONFIG,
   assertStorageReachable,
@@ -72,20 +73,50 @@ describe("s3ObjectStorage against MinIO", () => {
     expect(await storage.download(objectKey)).toEqual(bytes);
   });
 
-  it("download of a missing key fails loudly, and names itself NoSuchKey", async () => {
-    // The name is load-bearing, not incidental. `generateExport` decides
-    // whether a failed download means "this receipt's photo is gone" or
-    // "storage did not answer" by `error.name === "NoSuchKey"`, and the two
-    // lead to opposite advice - one of them tells a person to delete a
-    // receipt. Only this test runs against a real S3 client; the fake
-    // asserts the name by fiat, so if the real name ever drifts, that check
-    // silently becomes a no-op with every other test still green.
+  it("download of a missing key answers the ObjectStorage contract, not S3's dialect", async () => {
+    // Load-bearing, not incidental. `generateExport` decides whether a failed
+    // download means "this receipt's photo is gone" or "storage did not
+    // answer", and the two lead to opposite advice - one of them tells a
+    // person to delete a receipt. That decision is now made on
+    // ObjectNotFoundError rather than on `error.name === "NoSuchKey"`, and
+    // this is the only test that drives the translation with a real S3
+    // client: the fake honours the contract by fiat, so if the real store's
+    // spelling ever drifts, nothing else in the suite would notice - the
+    // adapter would stop translating and every absence would surface as an
+    // unexplained failure.
     await expect(
       storage.download(`${runPrefix}/does-not-exist.jpg`),
-    ).rejects.toThrow();
-    await expect(
-      storage.download(`${runPrefix}/does-not-exist.jpg`),
-    ).rejects.toMatchObject({ name: "NoSuchKey" });
+    ).rejects.toBeInstanceOf(ObjectNotFoundError);
+    // The store's own word is kept rather than swallowed, so a log line can
+    // still say which answer produced this - and so the spelling the adapter
+    // matches on is pinned to what MinIO/R2 really send.
+    const error = await storage
+      .download(`${runPrefix}/does-not-exist.jpg`)
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      );
+    expect((error as Error).cause).toMatchObject({ name: "NoSuchKey" });
+  });
+
+  it("does not report a refused credential as an absent object", async () => {
+    // The other half of the same distinction, and the half a fake cannot
+    // test: a real client, a real failure that is not absence. Nothing but a
+    // genuinely missing object may come back as ObjectNotFoundError, or the
+    // export path would tell someone to delete a receipt over a bad key.
+    const objectKey = `${runPrefix}/2026/08/credential-check.jpg`;
+    await storage.upload(objectKey, new Uint8Array([1, 2, 3]), "image/jpeg");
+    const wrongCredential = createS3ObjectStorage({
+      ...LOCAL_DEV_STORAGE_CONFIG,
+      secretAccessKey: "not-the-secret",
+    });
+
+    const error = await wrongCredential.download(objectKey).then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ObjectNotFoundError);
   });
 });
 

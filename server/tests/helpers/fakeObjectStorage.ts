@@ -1,4 +1,7 @@
-import type { ObjectStorage } from "../../src/storage/objectStorage.js";
+import {
+  ObjectNotFoundError,
+  type ObjectStorage,
+} from "../../src/storage/objectStorage.js";
 
 /**
  * In-memory object storage. Presigned URLs are recognizable fakes that
@@ -26,14 +29,16 @@ export function fakeObjectStorage(): FakeObjectStorage {
     async download(objectKey: string) {
       const data = objects.get(objectKey);
       if (data === undefined) {
-        // The real R2 client errors on a missing key; the fake must too,
-        // or tests could never see the failure path - and it must carry the
-        // same `name`, because callers distinguish "the object is not there"
-        // from "storage did not answer" by that field. A fake that threw a
-        // nameless Error would let a caller conflate the two and still pass.
-        const error = new Error(`No such object: ${objectKey}`);
-        error.name = "NoSuchKey";
-        throw error;
+        // The real adapter errors on a missing key; the fake must too, or
+        // tests could never see the failure path - and it must answer with
+        // the same thing, because callers distinguish "the object is not
+        // there" from "storage did not answer" and the two lead to opposite
+        // advice. This used to be an Error with `name = "NoSuchKey"`, which
+        // was this fake spelling S3's dialect: the contract is now
+        // ObjectNotFoundError (see ObjectStorage.download), and this fake is
+        // the non-S3 adapter that proves the contract does not depend on
+        // which store is underneath.
+        throw new ObjectNotFoundError(objectKey);
       }
       return data;
     },
