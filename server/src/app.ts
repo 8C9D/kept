@@ -5,7 +5,11 @@ import type { AppleIdentityVerifier } from "./auth/appleVerifier.js";
 import type { SessionTokens } from "./auth/session.js";
 import type { Db } from "./db/client.js";
 import { renderError } from "./http/errors.js";
-import { requestLog } from "./observability/requestLog.js";
+import {
+  markRefused,
+  REFUSAL_LABELS,
+  requestLog,
+} from "./observability/requestLog.js";
 import { authRoutes } from "./routes/auth.js";
 import { exportRoutes } from "./routes/exports.js";
 import { meRoutes } from "./routes/me.js";
@@ -118,6 +122,11 @@ export function createApp(deps: AppDependencies): Hono {
     app.use("*", async (c, next) => {
       const presented = c.req.header("x-kept-edge-secret") ?? "";
       if (!digestsMatch(presented, edgeSecret)) {
+        // Answers before routing, so the log would otherwise call this
+        // "unmatched" - indistinguishable from a 404 in exactly the failure
+        // this refusal exists to make visible (a Transform Rule that stopped
+        // adding the header).
+        markRefused(c, REFUSAL_LABELS.edgeSecret);
         return c.json(
           {
             error: {
@@ -138,8 +147,11 @@ export function createApp(deps: AppDependencies): Hono {
     "*",
     bodyLimit({
       maxSize: MAX_REQUEST_BODY_BYTES,
-      onError: (c) =>
-        c.json(
+      onError: (c) => {
+        // Same reason as the 403 above: refused before any route matched, so
+        // it names itself rather than borrowing a 404's label.
+        markRefused(c, REFUSAL_LABELS.bodyLimit);
+        return c.json(
           {
             error: {
               code: "request_too_large",
@@ -147,7 +159,8 @@ export function createApp(deps: AppDependencies): Hono {
             },
           },
           413,
-        ),
+        );
+      },
     }),
   );
 

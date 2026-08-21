@@ -1,4 +1,35 @@
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
+import { routePath } from "hono/route";
+
+/**
+ * How a refusal that answers BEFORE Hono routes names itself in the log's
+ * `route` field.
+ *
+ * These strings are an operator interface, not prose: `fly logs` is grepped
+ * and grouped by this exact value, so they stay stable and machine-groupable
+ * and are written down in Runbook §7. Neither one carries any part of the
+ * request the client sent.
+ */
+export const REFUSAL_LABELS = {
+  edgeSecret: "refused:edge-secret",
+  bodyLimit: "refused:body-limit",
+} as const;
+
+export type RefusalLabel = (typeof REFUSAL_LABELS)[keyof typeof REFUSAL_LABELS];
+
+/** The context variable the refusing middlewares set and the log line reads. */
+const REFUSED_BY = "refusedBy";
+
+/**
+ * Called by a middleware that is about to answer without calling `next()`,
+ * so the log can say WHICH refusal it was rather than that some request
+ * matched no route. Both sides go through one typed function because the
+ * label is the only thing separating these from 404 noise; a string literal
+ * typed out at each call site would reintroduce the ambiguity silently.
+ */
+export function markRefused(c: Context, label: RefusalLabel): void {
+  c.set(REFUSED_BY, label);
+}
 
 /**
  * One structured line per request, and the only thing the deployed process
@@ -58,21 +89,30 @@ export function requestLog(): MiddlewareHandler {
       // as a success, which is worse than not logging it at all. `finalized`
       // is the question actually being asked: did a response happen.
       const answered = c.finalized;
+
+      // The matched route pattern, never the requested path: a 404's path is
+      // client-supplied, so it is reported as unmatched rather than echoed
+      // into the log.
+      //
+      // ⚠ Two refusals answer BEFORE Hono routes - the edge-secret 403 and
+      // the body-limit 413 - and both are registered at the catch-all `/*`,
+      // so both used to read "unmatched", byte-identical to a 404. In
+      // production that ambiguity is not hypothetical: the edge secret IS
+      // set, so a Cloudflare Transform Rule that stops adding the header
+      // turns every request into a 403 whose line differs from ordinary
+      // 404 noise in the status code alone - and the status code is what
+      // someone reads AFTER deciding a group of lines is worth opening.
+      // Each refusing middleware now labels itself (`markRefused`) and the
+      // label wins over the pattern; a genuine 404 still reads "unmatched".
+      // The labels are fixed strings, so this still never echoes the path.
+      const refusedBy = c.get(REFUSED_BY) as RefusalLabel | undefined;
+      const pattern = routePath(c);
+
       console.log(
         JSON.stringify({
           msg: "request",
           method: c.req.method,
-          // The matched route pattern, never the requested path: a 404's path
-          // is client-supplied, so it is reported as unmatched rather than
-          // echoed into the log.
-          //
-          // ⚠ "unmatched" also covers refusals that answered BEFORE routing -
-          // the edge-secret 403 and the body-limit 413 - which are not 404s.
-          // The alternative is echoing the client's path, which is the one
-          // thing this field exists to avoid, so the ambiguity is kept and
-          // the status code is what separates the cases: 404 means no such
-          // route, 403 and 413 mean refused before we looked for one.
-          route: c.req.routePath === "/*" ? "unmatched" : c.req.routePath,
+          route: refusedBy ?? (pattern === "/*" ? "unmatched" : pattern),
           status: answered ? c.res.status : null,
           ...(answered ? {} : { threw: true }),
           durationMs,

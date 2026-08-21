@@ -1,8 +1,17 @@
+import { randomUUID } from "node:crypto";
+import type Anthropic from "@anthropic-ai/sdk";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { receipts } from "../../src/db/schema.js";
 import type { OcrFieldSuggestions } from "../../src/domain/ocrSuggestions.js";
 import { requestLog } from "../../src/observability/requestLog.js";
-import { createLlmParseSweep } from "../../src/parse/llmParseSweep.js";
+import { parseReceiptText } from "../../src/parse/claudeReceiptParser.js";
+import {
+  MAX_PARSE_ATTEMPTS,
+  createLlmParseSweep,
+  runLlmParseSweep,
+} from "../../src/parse/llmParseSweep.js";
 import {
   createTestHarness,
   imageFor,
@@ -34,8 +43,29 @@ const OCR_TEXT = "PATIENT COPY - Dr Smith Psychiatry - session fee 123.45";
 /** Postgres refuses this inside jsonb, which is how a real query is made to fail. */
 const NUL = String.fromCharCode(0);
 
+/**
+ * The sentinel for the LLM branch below. V8 quotes about ten characters of
+ * `JSON.parse`'s input inside the SyntaxError it throws, so a whole vendor
+ * name is the wrong thing to assert absent - only its first characters ever
+ * fit in that window, and `not.toContain(VENDOR)` would pass over a real
+ * leak of exactly this much of it.
+ */
+const VENDOR_HEAD = VENDOR.slice(0, 8);
+
+/** Only the fronted harness below uses it; its value never reaches a log. */
+const EDGE_SECRET = "edge-secret-value-for-log-tests-0123456789";
+
 const harness = createTestHarness();
-afterAll(() => harness.close());
+/**
+ * A second app with the edge check configured, which is the only way to
+ * drive the 403 that answers before Hono routes. Production always has this
+ * set, so the refusal it labels is a production-only shape.
+ */
+const fronted = createTestHarness({ edgeSharedSecret: EDGE_SECRET });
+afterAll(async () => {
+  await harness.close();
+  await fronted.close();
+});
 
 let token: string;
 let userId: string;
@@ -82,6 +112,37 @@ async function createSensitiveReceipt(): Promise<string> {
   );
   expect(response.status).toBe(201);
   return ((await response.json()) as { id: string }).id;
+}
+
+/**
+ * A model client whose single reply is `reply`, so the REAL `parseReceiptText`
+ * runs against it. The SyntaxError under test has to be V8's own - the whole
+ * question is what `JSON.parse` writes into its message - so nothing here
+ * hand-builds an error.
+ */
+function modelReplying(reply: string): Anthropic {
+  return {
+    messages: {
+      create: () =>
+        Promise.resolve({
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: reply }],
+        }),
+    },
+  } as unknown as Anthropic;
+}
+
+/**
+ * V8's own message for a reply that is not JSON, so the tests below assert
+ * against what this Node actually says rather than a remembered wording.
+ */
+function jsonParseMessage(reply: string): string {
+  try {
+    JSON.parse(reply);
+  } catch (error) {
+    return (error as Error).message;
+  }
+  throw new Error("This fixture must not be parseable JSON");
 }
 
 describe("the LLM parse sweep's failure log", () => {
@@ -154,20 +215,102 @@ describe("the LLM parse sweep's failure log", () => {
     // reverted - a plain Error printed raw exposes nothing - so it is not
     // evidence for PR-2's fix; the test above is, and it was falsified.
     //
-    // ⚠ And it deliberately no longer asserts that this branch is free of
-    // receipt content, because **it is not**. `errorSummary` redacts
-    // *database* errors; every other message and its whole cause chain pass
-    // through verbatim, and the parser's real failure carries a `SyntaxError`
-    // cause quoting the first characters of the model's output, which is
-    // derived from the receipt's own OCR text. Asserting cleanliness here
-    // with a synthetic error that could never have carried a vendor would be
-    // a green light over a real leak. Recorded as N-2 in PROD-READINESS.md.
+    // ⚠ And it deliberately does not assert that this branch is free of
+    // receipt content, because a synthetic error that could never have
+    // carried a vendor cannot be evidence of that either way. The two cases
+    // below do assert it, through the real parser against a real
+    // `JSON.parse` failure - which is where N-2 actually lived.
     const logs = await runSweep(async (text) => {
       throw new Error(`upstream refused after reading ${text.length} chars`);
     });
 
     expect(logs).toContain(receiptId);
     expect(logs).toContain("upstream refused");
+  });
+
+  it("withholds the model's own words when its reply is not JSON at all", async () => {
+    // N-2. The realistic failure: instead of the JSON schema the model
+    // answers in prose about the receipt it was shown - so its reply IS
+    // receipt content, and `JSON.parse` quotes the front of it.
+    const reply = `${VENDOR} - session fee 123.45, no JSON here`;
+    // The leak asserted at its source before its absence is asserted
+    // anywhere: this is the message the parser's catch block receives, and
+    // it carries the vendor. Without this leg the test could pass because
+    // the SyntaxError never said anything interesting.
+    const v8Message = jsonParseMessage(reply);
+    expect(v8Message).toContain(VENDOR_HEAD);
+
+    const receiptId = await createSensitiveReceipt();
+    const logs = await runSweep((text) =>
+      parseReceiptText(modelReplying(reply), text),
+    );
+
+    expect(logs).toContain(receiptId);
+    // Still diagnosable: our own message names the failure mode, and the
+    // sanitized cause still names the class that produced it.
+    expect(logs).toContain("Model response was not parseable JSON");
+    expect(logs).toContain("SyntaxError");
+    // And the model's output does not reach the log, in whole or in part.
+    expect(logs).not.toContain(v8Message);
+    expect(logs).not.toContain(VENDOR_HEAD);
+    expect(logs).not.toContain(VENDOR);
+  });
+
+  it("keeps the offset a malformed reply stopped at, the one fact worth reading", async () => {
+    // The other JSON failure family. V8 splits them: a reply it cannot
+    // tokenize gets a quoted snippet and no offset (the case above), while a
+    // structurally broken one gets `at position N` and quotes nothing. This
+    // leg guards the diagnosability half of the fix - the offset must
+    // survive the sanitizing - and it is one-directional: it would pass with
+    // the raw cause restored, because this message never had a snippet in it
+    // to leak. The case above is the one that falsifies.
+    const reply = `{"vendor": "${VENDOR}", "totalCents": 12345,}`;
+    const position = /at position (\d+)/.exec(jsonParseMessage(reply))?.[1];
+    expect(position).toBeDefined();
+
+    await createSensitiveReceipt();
+    const logs = await runSweep((text) =>
+      parseReceiptText(modelReplying(reply), text),
+    );
+
+    expect(logs).toContain(`at position ${position}`);
+    expect(logs).not.toContain(VENDOR_HEAD);
+  });
+
+  it("stores the redacted message in the durable failure record, never the cause", async () => {
+    // The failure record is the other place this error becomes text, and it
+    // outlives every log line. `runLlmParseSweep` is driven directly because
+    // the record is only written on the last of MAX_PARSE_ATTEMPTS failures,
+    // and the count is the caller's.
+    //
+    // ⚠ One-directional, like the offset case: `redactedMessage` reads
+    // `error.message` and never walks the cause chain, so this passed before
+    // the parser was fixed too. It is here to pin that the record carries
+    // the outer message alone - not as evidence for the fix.
+    const receiptId = await createSensitiveReceipt();
+    const reply = `${VENDOR} - session fee 123.45, no JSON here`;
+
+    const result = await runLlmParseSweep({
+      db: harness.db,
+      parse: (text) => parseReceiptText(modelReplying(reply), text),
+      failureCounts: new Map([[receiptId, MAX_PARSE_ATTEMPTS - 1]]),
+    });
+    expect(result.failed).toEqual([
+      { id: receiptId, error: expect.any(Error), abandoned: true },
+    ]);
+
+    const rows = await harness.db
+      .select({ llmSuggestions: receipts.llmSuggestions })
+      .from(receipts)
+      .where(eq(receipts.id, receiptId));
+    const record = rows[0]?.llmSuggestions;
+    expect(record).toMatchObject({
+      error: "Model response was not parseable JSON",
+      attempts: MAX_PARSE_ATTEMPTS,
+      suggestions: null,
+    });
+    // The whole stored row, not just the field we expected to be clean.
+    expect(JSON.stringify(record)).not.toContain(VENDOR_HEAD);
   });
 
   it("redacts a failure that stops the whole sweep, not only a single row's", async () => {
@@ -387,7 +530,7 @@ describe("the request log", () => {
     expect(line?.threw).toBe(true);
   });
 
-  it("records a body refused before any route ran", async () => {
+  it("records a body refused before any route ran, under its own label", async () => {
     const oversize = "x".repeat(2 * 1024 * 1024);
     const logs = await captureRequest(async () => {
       const response = await harness.request(token, "POST", "/api/receipts", {
@@ -401,10 +544,60 @@ describe("the request log", () => {
     const line = requestLine(logs);
     expect(line?.status).toBe(413);
     expect(logs).not.toContain(oversize);
-    // Pinned rather than left to chance: a refusal that answered before
-    // routing has no route to report, so it reads "unmatched" like a 404
-    // does. The status is what tells the two apart, and the alternative -
-    // echoing the client's path - is the thing this field exists to avoid.
+    // N-5. This used to read "unmatched", the same string a 404 gets, and
+    // the exact label is what an operator greps for, so it is pinned exactly.
+    expect(line?.route).toBe("refused:body-limit");
+    // The requested path is still withheld: the label is a constant, not a
+    // dressed-up echo of what the client asked for.
+    expect(logs).not.toContain("/api/receipts");
+  });
+
+  it("records an edge-secret refusal under its own label, not as an unmatched route", async () => {
+    // N-5. Production runs with the edge secret set, so a Cloudflare
+    // Transform Rule that stopped adding the header would turn every request
+    // into this 403 - and every line would have said "unmatched", which is
+    // also what genuine 404 noise says. The label is the only thing that
+    // separates "the edge stopped fronting us" from "someone is probing
+    // paths that do not exist".
+    const receiptId = randomUUID();
+    const logs = await captureRequest(async () => {
+      const response = await fronted.request(
+        null,
+        "GET",
+        `/api/receipts/${receiptId}`,
+      );
+      expect(response.status).toBe(403);
+    });
+
+    const line = requestLine(logs);
+    expect(line?.status).toBe(403);
+    expect(line?.route).toBe("refused:edge-secret");
+    // Refused or not, the path the client asked for stays out of the log -
+    // including the receipt id in it, which is a handle to a tax record.
+    expect(logs).not.toContain(receiptId);
+    expect(logs).not.toContain("/api/receipts");
+    // And the secret the middleware compared against is not log material either.
+    expect(logs).not.toContain(EDGE_SECRET);
+  });
+
+  it("still reports a genuine 404 as unmatched, so the refusals above are distinguishable from it", async () => {
+    // The third leg, and the one that makes the other two mean anything: if
+    // 404s were labelled too, or if the refusals fell back to this string,
+    // the field would be back to answering one question with three cases.
+    const nonce = randomUUID();
+    const logs = await captureRequest(async () => {
+      const response = await harness.request(
+        token,
+        "GET",
+        `/api/no-such-route/${nonce}`,
+      );
+      expect(response.status).toBe(404);
+    });
+
+    const line = requestLine(logs);
+    expect(line?.status).toBe(404);
     expect(line?.route).toBe("unmatched");
+    expect(logs).not.toContain(nonce);
+    expect(logs).not.toContain("no-such-route");
   });
 });

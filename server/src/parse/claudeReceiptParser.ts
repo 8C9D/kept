@@ -82,7 +82,7 @@ export async function parseReceiptText(
     parsed = JSON.parse(textBlock.text);
   } catch (error) {
     throw new LlmParseError("Model response was not parseable JSON", {
-      cause: error,
+      cause: sanitizedJsonParseCause(error),
     });
   }
 
@@ -94,4 +94,35 @@ export async function parseReceiptText(
       { cause: error },
     );
   }
+}
+
+/** The `at position 41` V8 appends when it knows where it stopped. */
+const JSON_PARSE_POSITION = /\bat position (\d+)\b/;
+
+/**
+ * A `JSON.parse` failure's cause, rebuilt so it carries no model output.
+ *
+ * V8 writes the input it choked on *into the message*: `Unexpected token
+ * 'D', "Dr Smith P"... is not valid JSON`. Here that input is the model's
+ * reply to the receipt's own OCR text, so those ten characters are receipt
+ * contents - and `errorSummary` reproduces a non-database error's whole
+ * cause chain verbatim, which is how a vendor name reached the sweep's log
+ * (spec §10B, N-2). The narrow fix is here rather than in `errorSummary`:
+ * that module redacts every log path in the project, and this is the one
+ * throw site that hands it a message it did not write.
+ *
+ * Kept: the error's name, and the offset it stopped at when V8 reports one.
+ * Dropped: the quoted snippet, and V8's prose reason - the reasons that
+ * name a cause ("Expected double-quoted property name") are exactly the
+ * ones that also carry a position, so the offset stands in for them.
+ */
+function sanitizedJsonParseCause(error: unknown): Error {
+  if (!(error instanceof Error)) {
+    // JSON.parse throws SyntaxError and nothing else, so this is unreachable
+    // - and the thrown value could be anything, so name its type only.
+    return new Error(`non-Error value thrown (${typeof error}) [message withheld]`);
+  }
+  const position = JSON_PARSE_POSITION.exec(error.message)?.[1];
+  const suffix = position === undefined ? "" : ` at position ${position}`;
+  return new Error(`${error.name} [message withheld]${suffix}`);
 }
