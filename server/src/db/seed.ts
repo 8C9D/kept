@@ -1,6 +1,4 @@
-import { Pool } from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
-import { LOCAL_DEV_DATABASE_URL } from "./client.js";
+import { LOCAL_DEV_DATABASE_URL, createDb } from "./client.js";
 import { assertLocalDatabase } from "./databaseUrl.js";
 import { receiptImages, receipts, users } from "./schema.js";
 
@@ -17,8 +15,7 @@ assertLocalDatabase(
   "db:seed deletes every user, receipt and image row",
 );
 
-const pool = new Pool({ connectionString: databaseUrl });
-const db = drizzle(pool);
+const { db, pool } = createDb(databaseUrl);
 
 async function seed() {
   // Dev-only seed: reset in FK order, then insert synthetic rows.

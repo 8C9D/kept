@@ -1,6 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { Pool } from "pg";
-import { LOCAL_DEV_DATABASE_URL } from "./client.js";
+import { LOCAL_DEV_DATABASE_URL, createDb } from "./client.js";
 import { assertLocalDatabase } from "./databaseUrl.js";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
 import {
@@ -53,7 +52,9 @@ const FIELDS = [
   "vendorTaxNumber",
 ] as const;
 
-const pool = new Pool({ connectionString: databaseUrl });
+// Only the pool: every query here is raw SQL, so the drizzle handle
+// `createDb` also returns has no caller.
+const { pool } = createDb(databaseUrl);
 const client = new Anthropic({ apiKey });
 
 async function probe() {

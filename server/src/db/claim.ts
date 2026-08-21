@@ -1,7 +1,5 @@
 import { inArray, notLike, like, sql } from "drizzle-orm";
-import { Pool } from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
-import { LOCAL_DEV_DATABASE_URL } from "./client.js";
+import { LOCAL_DEV_DATABASE_URL, createDb } from "./client.js";
 import { assertLocalDatabase } from "./databaseUrl.js";
 import { receiptImages, receipts, users } from "./schema.js";
 
@@ -22,8 +20,7 @@ assertLocalDatabase(
   "db:claim rewrites the owner of every synthetic receipt",
 );
 
-const pool = new Pool({ connectionString: databaseUrl });
-const db = drizzle(pool);
+const { db, pool } = createDb(databaseUrl);
 
 async function claim() {
   const realUsers = await db

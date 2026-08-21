@@ -1,7 +1,5 @@
 import { and, eq, isNotNull, isNull, notLike } from "drizzle-orm";
-import { Pool } from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
-import { LOCAL_DEV_DATABASE_URL } from "./client.js";
+import { LOCAL_DEV_DATABASE_URL, createDb } from "./client.js";
 import { receipts, users } from "./schema.js";
 import { cents, centsToDecimalString } from "../domain/money.js";
 import {
@@ -23,10 +21,9 @@ import { isLlmParseFailure } from "../domain/llmSuggestions.js";
  * back. Dev tooling in the db:claim mould: it refuses to guess when the
  * real user is missing or ambiguous.
  */
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL ?? LOCAL_DEV_DATABASE_URL,
-});
-const db = drizzle(pool);
+const { db, pool } = createDb(
+  process.env.DATABASE_URL ?? LOCAL_DEV_DATABASE_URL,
+);
 
 const FIELD_LABELS: Record<keyof OcrFieldSuggestions, string> = {
   totalCents: "total",

@@ -1,6 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { Pool } from "pg";
-import { LOCAL_DEV_DATABASE_URL } from "./client.js";
+import { LOCAL_DEV_DATABASE_URL, createDb } from "./client.js";
 import { assertLocalDatabase } from "./databaseUrl.js";
 import {
   RECEIPT_PARSE_PROMPT_VERSION,
@@ -50,7 +49,9 @@ if (!Number.isInteger(runs) || runs < 1 || runs > 10) {
   process.exit(1);
 }
 
-const pool = new Pool({ connectionString: databaseUrl });
+// Only the pool: every query here is raw SQL, so the drizzle handle
+// `createDb` also returns has no caller.
+const { pool } = createDb(databaseUrl);
 const client = new Anthropic({ apiKey });
 
 function show(value: string | number | null): string {
