@@ -1,8 +1,7 @@
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 import { afterEach, describe, expect, it } from "vitest";
 import { assertDatabaseReachable } from "../../src/db/client.js";
+import { spawnEntrypoint } from "../helpers/entrypointChild.js";
 import { resolveTestDatabaseUrl } from "../helpers/testDatabase.js";
 
 const TEST_DATABASE_URL = resolveTestDatabaseUrl(process.env);
@@ -11,7 +10,8 @@ const UNREACHABLE_DATABASE_URL = TEST_DATABASE_URL.replace(
   "postgres://$1:wrong-password@",
 );
 
-const ENTRYPOINT = fileURLToPath(new URL("../../src/index.ts", import.meta.url));
+/** A port nothing else in this suite uses. */
+const PORT = 3097;
 
 describe("assertDatabaseReachable", () => {
   const pools: Pool[] = [];
@@ -228,6 +228,20 @@ describe("the entrypoint's startup probe", () => {
     expect(result.output).toContain("Object storage did not answer");
     // The credential is in this child's environment; it must not be in its log.
     expect(result.output).not.toContain("kept-local-dev");
+
+    // Round 3 §8 observation 1. This branch used to `throw`, and a thrown error
+    // is printed by node's DEFAULT handler, which dumps the whole object -
+    // including whatever the AWS SDK hung on it. Measured before the change:
+    // the dump carried `'$metadata': { attempts: 3, totalRetryDelay: 73 }`.
+    // Nothing secret today; what an SDK attaches to its errors is the SDK's
+    // decision and not one this project gets to audit once per upgrade, which
+    // is the same argument the message's own comment above makes about "it
+    // happens to be safe". The cause now goes through errorSummary, which
+    // decides what an error may say.
+    expect(result.output).not.toContain("$metadata");
+    // ...and it is still there to read, so this is a choice about the format,
+    // not a decision to say less.
+    expect(result.output).toMatch(/ECONNREFUSED/);
   }, 40_000);
 
   it("tells the operator which permission the probe actually needs, and names no file the image does not carry", async () => {
@@ -285,54 +299,14 @@ interface EntrypointResult {
  * said. Resolves when the child exits, or when it announces it is listening -
  * a healthy start never exits on its own, so that case is killed deliberately.
  *
- * ANTHROPIC_API_KEY is stripped from the child's environment: src/index.ts
- * kicks the LLM parse sweep at startup whenever it is set, which bills a real
- * API. NODE_ENV is forced away from production so assertProductionEnv (which
- * would demand https storage and that key) stays out of what this measures.
+ * The child's environment is built by tests/helpers/entrypointChild.ts, shared
+ * with the shutdown suite; every entry in it is load-bearing and the reasons
+ * are recorded there.
  */
 async function runEntrypoint(
   env: Record<string, string>,
 ): Promise<EntrypointResult> {
-  const {
-    ANTHROPIC_API_KEY: _anthropic,
-    NODE_ENV: _nodeEnv,
-    PORT: _port,
-    ...inherited
-  } = process.env;
-
-  const child = spawn(
-    process.execPath,
-    ["--import", "tsx", ENTRYPOINT],
-    {
-      env: {
-        ...inherited,
-        SESSION_JWT_SECRET: "startup-probe-secret-0123456789abcdef",
-        APPLE_CLIENT_ID: "net.keptapp.test",
-        // Defaulted to a database that answers so each case below overrides
-        // only the thing it is actually exercising. Without this a test that
-        // varies STORAGE_* alone gets the missing-variable refusal instead,
-        // which looks like a pass for the wrong reason.
-        DATABASE_URL: TEST_DATABASE_URL,
-        // A port nothing else in this suite uses, and never 3000 - a stale dev
-        // server has held that port on this machine for six recorded runs.
-        PORT: "3097",
-        // ⚠ STORAGE_* is set explicitly, and that is not tidiness. These are
-        // the branch selector at src/index.ts: unset, the entrypoint takes the
-        // local-MinIO path and the configured-storage probe never runs. The
-        // first version of these tests inherited the shell, which on this
-        // machine has no STORAGE_*, so every child took the MinIO branch and
-        // the entire `else` block could be deleted with the suite still green
-        // (REVIEW-FINAL F-3). Setting them here also stops the suite depending
-        // on whatever a developer happens to have exported.
-        STORAGE_ENDPOINT: "http://localhost:9000",
-        STORAGE_BUCKET: "kept",
-        STORAGE_ACCESS_KEY_ID: "kept",
-        STORAGE_SECRET_ACCESS_KEY: "kept-local-dev",
-        ...env,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
+  const child = spawnEntrypoint(PORT, env);
 
   let output = "";
   return new Promise<EntrypointResult>((resolve, reject) => {
