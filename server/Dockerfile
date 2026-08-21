@@ -13,10 +13,14 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 COPY package.json package-lock.json ./
-# --include=dev deliberately: tsx runs the TypeScript directly, and
-# drizzle-kit must be present so `fly ssh console -C "npm run db:migrate"`
-# can run migrations deliberately from inside the machine (never on boot).
-RUN npm ci --include=dev
+# --omit=dev: tsx and drizzle-kit are dependencies, not devDependencies,
+# because the deployed machine genuinely runs both - tsx runs the
+# TypeScript directly, and drizzle-kit must be present so
+# `fly ssh console -C "npm run db:migrate"` can run migrations deliberately
+# from inside the machine (never on boot). Everything that is only for
+# development - vitest and its chain, the type packages - stays out of the
+# image (PR-13, round 4; the image shipped all of it until 2026-08-20).
+RUN npm ci --omit=dev
 
 COPY tsconfig.json drizzle.config.ts ./
 COPY drizzle ./drizzle

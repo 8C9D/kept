@@ -29,11 +29,13 @@
     "@aws-sdk/s3-request-presigner": "^3.1104.0",
     "@hono/node-server": "^2.1.0",
     "archiver": "^8.0.0",
+    "drizzle-kit": "^0.31.4",
     "drizzle-orm": "^0.45.2",
     "exceljs": "^4.4.0",
     "hono": "^4.13.0",
     "jose": "^6.2.8",
     "pg": "^8.16.0",
+    "tsx": "^4.20.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -42,9 +44,12 @@
     "@types/node": "^24.0.0",
     "@types/pg": "^8.15.4",
     "adm-zip": "^0.6.0",
-    "drizzle-kit": "^0.31.4",
-    "tsx": "^4.20.3",
     "typescript": "^5.8.3",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
   }
 }
