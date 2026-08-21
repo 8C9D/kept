@@ -10,6 +10,12 @@
 	  2. Create ~/.kept/backup.env (chmod 600) holding the five variables
 	     db:backup requires: DATABASE_URL and the four BACKUP_STORAGE_*.
 	     Secrets live in that file, never in this plist.
+	     Quote every value (the file is sourced by zsh, and a Neon URL
+	     carries & in its query string), use the DIRECT non-pooler Neon
+	     endpoint (pg_dump needs session semantics PgBouncer does not
+	     give), and add a PATH line covering pg_dump 16 and npm - launchd
+	     inherits almost no PATH, keg-only Homebrew and nvm are on none
+	     of it. Runbook §4 records all three, learned 2026-08-20.
 	  3. cp server/ops/net.keptapp.backup.plist ~/Library/LaunchAgents/
 	     launchctl load ~/Library/LaunchAgents/net.keptapp.backup.plist
 	  4. Run it once by hand and read the log:

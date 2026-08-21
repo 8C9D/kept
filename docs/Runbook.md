@@ -118,7 +118,8 @@ Chosen 2026-08-16: a second R2 bucket, `kept-backups`, in the same Cloudflare ac
 The accepted caveat is that a Cloudflare account compromise reaches both the receipt images and the dumps; a destination at a separate provider was the stricter alternative, and it was rejected.
 Still open as of 2026-08-16: the `kept-backups` bucket exists, but nothing schedules the dump yet and no dump file has been verified - this is the one first-deploy item left.
 Progress 2026-08-18: the tooling now exists - `npm run db:backup` (dump, upload, size-check, sha256) and the launchd template `server/ops/net.keptapp.backup.plist` (§4, "The scheduled dump").
-Still the owner's: an R2 token scoped to `kept-backups`, `~/.kept/backup.env`, installing the agent, and the §4 drill against the first scheduled dump's file.
+Executed 2026-08-20 to the token boundary: `~/.kept/backup.env` written (production direct-endpoint `DATABASE_URL`; quoting and `PATH` facts in §4), the agent installed and loaded (nightly 02:00, refusing loudly to its log until the token exists), the full dump→upload→size-check→sha256 path rehearsed end to end against the dev database and a local `kept-backups` MinIO bucket, and the §4 drill run against a manual production dump - row counts verified 1/0/0/0, the image leg refused as vacuous because production holds no images yet, which is the verifier working as designed.
+Still the owner's, the one piece code cannot mint: the R2 API token scoped to `kept-backups` (§4 has the dashboard path), pasted into `~/.kept/backup.env`; then `launchctl start net.keptapp.backup` and the §4 drill against that scheduled dump's file - and the drill's image leg re-runs after the first receipt with an image lands in production.
 
 **3. Decide the Neon plan, knowing what the history window is not.**
 Neon's point-in-time restore is a **history window measured in hours** (6 on Free, 7 days on Launch, 30 on Scale) - a good answer to "I ran the wrong thing twenty minutes ago" and **not any part of the six-year retention story** (§4).
@@ -209,7 +210,7 @@ docker run --rm -v "$PWD:/out" postgres:16 \
 
 Keep the file. It is a tax record.
 
-### The scheduled dump *(tooling added 2026-08-18; not yet scheduled)*
+### The scheduled dump *(tooling added 2026-08-18; installed and running to the token boundary 2026-08-20)*
 
 `npm run db:backup` is the scriptable form of the dump above: `pg_dump -Fc`
 of `DATABASE_URL`, uploaded to a dedicated backup bucket with a
@@ -236,12 +237,34 @@ the five variables in `~/.kept/backup.env` (chmod 600), copy to
 `~/Library/LaunchAgents`, load, run once by hand, read the log. Daily 02:00;
 launchd runs a missed slot at next wake.
 
-Still needed before this counts as done (wave-6 §3 step 17): an R2 token
-scoped to `kept-backups` (the bucket itself exists, chosen 2026-08-16 - §1
-first-deploy checklist item 2), the `~/.kept/backup.env` file, the agent
-actually installed, and **one scheduled dump restore-verified end to end** -
-the script itself prints the reminder, because an untested backup is an
-assumption.
+**Installed 2026-08-20**, and three facts the first run taught, recorded so
+the next install does not relearn them:
+
+- **`~/.kept/backup.env` values must be quoted.** The file is `source`d by
+  zsh and the Neon `DATABASE_URL` carries `&` in its query string; unquoted,
+  the shell reads it as a background operator and the whole file fails to
+  parse.
+- **The file also has to carry `PATH`.** launchd's shell inherits almost
+  none: Homebrew's `postgresql@16` is keg-only (`pg_dump` lives in
+  `/opt/homebrew/opt/postgresql@16/bin`) and `npm` is nvm-managed, so a node
+  version change must update the nvm segment of that line.
+- **`DATABASE_URL` in `backup.env` is the direct (non-`-pooler`) Neon
+  endpoint**, not the pooled one the app uses: `pg_dump` needs session
+  semantics the PgBouncer pooled endpoint does not provide.
+
+The installed agent runs nightly and **refuses loudly into
+`~/Library/Logs/kept-backup.log`** (the refusal names the missing variables)
+until the last piece is in place. Still needed before wave-6 §3 step 17
+counts as done, and it is one dashboard task plus one re-run: **the R2 API
+token scoped to `kept-backups`** (Cloudflare dashboard → R2 → Manage R2 API
+Tokens → Create → Object Read & Write → specify bucket `kept-backups` -
+neither the connected Cloudflare MCP token nor wrangler's OAuth token is
+allowed to mint API tokens, so this is a by-hand step), pasted into
+`~/.kept/backup.env`, then `launchctl start net.keptapp.backup`,
+read the log, and run the drill below **against that scheduled dump's
+file**. The drill procedure itself was executed 2026-08-20 against a manual
+production dump - row counts verified; the image leg is vacuous until
+production holds an image (see below).
 
 ### Restore it, and verify the restore
 
@@ -252,9 +275,14 @@ assumption.
 #    locally, this is one command against the dev container:
 docker exec kept-db psql -U kept -d postgres -c "create database kept_restore_drill;"
 
-# 2. Restore into it.
+# 2. Restore into it. --no-owner --no-privileges because the dump carries
+#    Neon's roles (neondb_owner, neon_superuser), which do not exist in a
+#    local scratch database - without the flags a production dump restores
+#    its data but exits 1 under 12 ownership/privilege errors (measured
+#    2026-08-20; the wave-6 drill never saw this because it restored
+#    same-role, kept to kept).
 docker run --rm -v "$PWD:/in" postgres:16 \
-  pg_restore -d "<scratch database url>" /in/kept-20260807.dump
+  pg_restore --no-owner --no-privileges -d "<scratch database url>" /in/kept-20260807.dump
 
 # 3. Verify - this is the step that makes it a tested backup rather than a completed command.
 cd server
@@ -318,6 +346,8 @@ UPDATE users SET token_version = token_version + 1 WHERE id = '<user id>';
 npm run parse-accuracy
 ```
 
+**Re-capturing the identical file: delete first, then capture** *(N-3, recorded 2026-08-20)*. The duplicate-image constraint is scoped to live rows, so uploading **byte-identical** bytes a second time - the re-dragged PDF case, or retrying a receipt whose presigned PUT failed while the bytes are still on the device - answers 409 until the old receipt is deleted. The working order is **delete the old receipt, then capture again**; capture-then-delete is the order that fails. This matters only for identical bytes: re-photographing a paper receipt produces different bytes and collides with nothing. The export-failure message teaches the same order; this paragraph exists so the rule is findable before an export fails.
+
 ⚠ **`npm run db:seed` and `npm run db:claim` refuse to run against anything that is not a loopback database**, deliberately and unarguably. They rewrite tax records. Neon hostnames are remote by construction, so neither can ever touch production. Do not add an escape hatch.
 
 **The key-normalization probe.** `npm run storage:probe-keys` measures whether an object store resolves keys that walk out of a user's prefix. Against MinIO the answer is "dot segments no, a leading slash yes" - the same class of input, opposite outcomes, which is why the API matches issued keys as whole strings rather than trusting the layer beneath. Run it once against R2 so that answer is measured rather than assumed. It leaves two small objects behind under `probe-victim-*` and `probe-attacker-*` prefixes; delete them from the bucket afterwards.
@@ -338,7 +368,7 @@ In order:
    Expect a steady `route: "/health"` line every 30 seconds: that is Fly's liveness check (§1), not traffic.
    That is how you tell "the phone is not reaching us at all" (no lines) from "we are refusing it" (401s) from "we are answering and the phone is unhappy" (200s).
    `route` is the matched pattern, never the requested path, and the line carries no receipt id, no search term, no user id and no token - so a request cannot be traced to a person from the log alone, deliberately.
-   ⚠ A request refused **before** routing - the edge-secret 403 and the 1 MiB body limit's 413 - reports `route: "unmatched"`, the same as a 404. The status code is what separates them.
+   ⚠ A request refused **before** routing carries its own label since 2026-08-20: the edge-secret 403 logs `route: "refused:edge-secret"` and the 1 MiB body limit's 413 logs `route: "refused:body-limit"`, so a Cloudflare transform rule that stops adding the header shows up as a run of `refused:edge-secret` lines rather than blending into 404 noise. `route: "unmatched"` now means a genuine 404 and nothing else. *(Before this date all three shared `"unmatched"` and only the status code separated them.)*
 3. Cloudflare dashboard - a 5xx page with a Cloudflare ray id means the edge is up and the origin is not.
 4. Neon console - the app cannot start without a reachable database. (That sentence was aspirational until 2026-08-11 and is now literally true: see §0's startup probes.)
 

@@ -4,6 +4,59 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-20 - Production-readiness round 4: the post-deploy pass runs on the owner's instruction, and nine of the eleven close
+
+**Decided: the 2026-08-15 deferral's "waits for production evidence or a new P1" gains its third trigger retroactively - The owner asking.**
+This session's instruction was to close the remaining gaps, production-touching steps included, so the round ran now rather than waiting for an incident.
+Ledger: `PROD-READINESS-ROUND-4.md`. Scope grew twice over any prior round: `ios/` was read for the first time (PR-6's remedy lives there), and the fixes deploy to production at the end of the pass rather than waiting on a separate ask.
+
+**Nine of the eleven carried findings are closed; the two that need production-scale evidence stay open with their triggers intact.**
+Fixed: PR-5 (graceful SIGTERM/SIGINT drain, exit 0, capped inside Fly's 5 s `kill_timeout`), PR-10 (a production `db:migrate` with no `DATABASE_URL` now refuses naming the variable instead of dialling a localhost that is not there - and the pre-fix behaviour measured worse than the ledger said: drizzle-kit printed no cause at all), N-1 (all five direct-`Pool` dev scripts through `createDb`, plus a routing test so a sixth script cannot regress it), N-2 (the `JSON.parse` failure's cause is rebuilt at the throw site - name and byte offset kept, V8's quoted snippet of model output dropped - leaving `errorSummary`'s blast radius untouched, which was round 3's whole objection), N-5 (pre-routing refusals log `route:"refused:edge-secret"` / `"refused:body-limit"`; `"unmatched"` now means a 404 and nothing else), N-4 all three (the deprecated `routePath` getter replaced by the `hono/route` helper; object absence expressed as the `ObjectStorage` contract - a single exported `ObjectNotFoundError` the adapter translates once, deleting the byte-identical predicate twins; the round-1 hand-wrapped artifact block annotated as a rendering), and N-3 (the delete-first-then-recapture ordering documented in Runbook §6 and spec §5).
+
+**Decided: PR-6 is closed by verification, not by change - and the server keeps its 409.**
+The open half was always "check `OutboxController`'s classification of 409 before PR-5/PR-6 are called closed," and no round was allowed to read `ios/`.
+Read now: the outbox catches `duplicate_image` on the create step and only there, counts the receipt server-confirmed, and removes the item - RULING 4's "reconcile, don't re-send," implemented since wave 5 and pinned by `testRelaunchAfterKillBetweenCreateAndCleanupLandsOn409AndCountsSaved`.
+Rejected: RULING 4's alternative of answering the existing receipt instead of 409 - it would change a documented response code to solve a problem the client demonstrably does not have.
+⚠ Carried forward to wave 7: the web client's multi-file upload must not inherit 409-as-saved - there a duplicate is a user-facing fact, not a lost 201.
+
+**Decided: PR-13's "the fix is a forbidden major downgrade" was true of npm's offered fix and not of the finding.**
+`tsx` and `drizzle-kit` are things the deployed machine genuinely runs, so they are `dependencies`, and the image installs `--omit=dev`: vitest, vite, adm-zip and the type packages leave the production image with nothing downgraded.
+Verified against the built artifact: the new image carries `tsx` and `drizzle-kit`, no `vitest`/`vite`, and boots to a 401-with-`no-store` `/api/me` the wave-6 §1.2 way.
+
+**Decided: the dependency advisories with non-breaking fixes are taken; the rest is accepted with its reachability stated.**
+`npm audit fix` clears the `nanoid` high (vitest chain).
+`uuid` is overridden to ^11.1.1 under exceljs - exceljs calls only `uuid.v4`, the advisory is v3/v5/v6 with a caller-supplied buffer, and the export suite is green on the override.
+The four remaining moderates are the esbuild dev-server chain under drizzle-kit: nothing in any environment starts that server, npm's only fix is a drizzle-kit major downgrade, and after PR-13 the chain no longer ships in the production image.
+
+**Still deferred, trigger re-verified rather than re-argued: R2-3 and PR-9(b).**
+Both wait on a realistic fiscal-year export to measure, and production holds zero receipts (read this round).
+The 2026-08-15 triggers stand verbatim.
+
+**Spec §10B amended in this commit** (post-deploy status, request-log labels); the per-finding evidence, mutation tables, residuals recorded by this round's own work (among them: zod's `unrecognized_keys` echoes a model-invented key name; `verifyRestore` conflates absence with unreachability the way the export path no longer does), and the gate are in the ledger.
+
+## 2026-08-20 - Step 17 executed to the token boundary: the scheduled backup is installed, rehearsed, and drilled against production
+
+**Decided: the scheduled backup runs from the owner's Mac against the direct (non-`-pooler`) Neon endpoint.**
+The app keeps the pooled endpoint; `pg_dump` gets the direct one, because PgBouncer's transaction pooling does not provide the session semantics `pg_dump` needs.
+The production `DATABASE_URL` was read from the Fly machine's environment and piped into `~/.kept/backup.env` without ever being printed - the pooled hostname's `-pooler` segment stripped in the shell.
+Rejected: putting the pooled URL in `backup.env` for consistency with the Runbook's table (it describes the app's variable, not the backup's needs).
+
+**Decided: the launchd agent is loaded now, before its R2 token exists, so its nightly failure is loud rather than its absence silent.**
+Until the token is pasted, every 02:00 run writes the refusal - naming exactly the two empty variables - to `~/Library/Logs/kept-backup.log`.
+A live `launchctl start` verified the whole chain (plist → zsh → env file → PATH → npm → tsx → refusal); the alternative, leaving the agent unloaded until the token exists, makes forgetting the token indistinguishable from never having installed anything.
+
+**Decided: the R2 token scoped to `kept-backups` stays the owner's, measured rather than assumed.**
+Creating it from this machine was attempted and is not possible: the connected Cloudflare MCP credential is refused on the token APIs (error 9109), wrangler's OAuth scopes do not cover token management, and R2 temporary credentials require a parent token scoped to the target bucket, which is the thing that does not exist.
+It is one dashboard task (R2 → Manage R2 API Tokens → Object Read & Write → bucket `kept-backups`), then two paste operations, `launchctl start`, and the §4 drill against the scheduled dump's file.
+
+**Executed, and what the execution taught.**
+PG16 client tools installed (`pg_dump`/`pg_restore` 16.15, matching the database).
+The full `db:backup` path - dump, upload, re-read size check, sha256 - ran end to end against the dev database and a local MinIO `kept-backups` bucket, and the uploaded bytes were re-downloaded and re-hashed to the same digest.
+The §4 restore drill ran against a manual production dump: all four row counts verified (`users 1, receipts 0, receipt_images 0, export_jobs 0`), and the verifier then refused overall success because production holds zero images - the vacuity guard doing its job, not a failure; the drill's image leg re-runs after the first receipt with an image lands in production.
+Three operational facts were learned by real failure and are recorded in Runbook §4: `backup.env` values must be quoted (the Neon URL carries `&` and the file is sourced by zsh), the file must carry `PATH` (launchd inherits almost none; keg-only Homebrew `postgresql@16` and nvm-managed `npm` are on none of it), and a cross-role restore needs `pg_restore --no-owner --no-privileges` (a Neon dump carries `neondb_owner`/`neon_superuser`, which a scratch database lacks - the wave-6 drill restored same-role and never saw the 12 ownership errors this one measured).
+
+**Spec §10B amended in this commit** (the scheduled-dump status line); `docs/Runbook.md` §1 and §4, `docs/gates/wave-6.md` §3, and the plist template's header carry the same state.
+
 ## 2026-08-18 - Distribution day: the App Store record is "Kept Receipts", and wave-6 steps 14-16 are done
 
 **Decided: the App Store record is named "Kept Receipts", because "Kept" is already taken as an App Store name.**

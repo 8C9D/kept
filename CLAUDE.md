@@ -35,15 +35,14 @@ HST arithmetic, export generation, filename derivation, fiscal-period slicing, a
 - Images never transit the API: the client PUTs straight to object storage through a presigned URL.
 - `docs/Runbook.md` is the operations authority - deploy, migrate, roll back, back up, restore.
 
-## Status, as of 2026-08-18 (evening)
+## Status, as of 2026-08-20 (night)
 
-- The first production deploy happened 2026-08-16 (`docs/gates/wave-6.md` §3 steps 1-13), and steps 14-16 completed 2026-08-18: privacy label published, build 1.0 (1) uploaded, TestFlight delivering it.
+- The first production deploy happened 2026-08-16 (`docs/gates/wave-6.md` §3 steps 1-13); steps 14-16 completed 2026-08-18: privacy label published, build 1.0 (1) on TestFlight, the owner's phone signed into production and verified end to end (`users 1, receipts 0` - re-read 2026-08-20, unchanged).
 - The App Store record is "Kept Receipts" (app id 6802835941) because "Kept" was taken as a store name; the home-screen name stays Kept via `CFBundleDisplayName`. The Fly app is `keptapp-api`, not `kept-api`, for the same reason on that platform.
-- The owner's phone runs the TestFlight build and is signed into production; verified end to end on 2026-08-18 (`users 1, receipts 0`).
 - The dev database, the dev MinIO bucket, and the phone's dev install were deliberately wiped to zero on 2026-08-18. Both environments started from empty; nothing migrated anywhere.
-- Step 17 is still open: the scheduled `pg_dump` to the `kept-backups` R2 bucket is not scheduled and no dump has been restore-verified. It is more urgent now that production holds real data.
-- Step 18, the irreversible unlisted submission, is open and gated on two things outside the repo: the Account Holder accepting the updated Apple Developer Program License Agreement, and a privacy policy URL for the record.
-- Eleven post-deploy findings are carried, deferred deliberately rather than forgotten; the list and the triggers that reopen each are in `DEPLOY-PREP.md` §1 and the 2026-08-15 entry of `docs/DECISIONS.md`.
+- **Production-readiness round 4 (the post-deploy pass) ran 2026-08-20** on the owner's instruction: nine of the eleven carried findings closed and deployed - ledger `PROD-READINESS-ROUND-4.md`, decisions in `docs/DECISIONS.md` 2026-08-20. R2-3 and PR-9(b) stay deferred on their 2026-08-15 triggers (both need a realistic production export to measure; production holds zero receipts).
+- **Step 17 is executed to the token boundary** (2026-08-20): the nightly launchd backup agent is installed and loaded on the owner's Mac, the pipeline and drill are rehearsed and run (Runbook §4). One piece is the owner's: mint the R2 token scoped to `kept-backups` in the Cloudflare dashboard, paste it into `~/.kept/backup.env`, `launchctl start net.keptapp.backup`, then the §4 drill against that scheduled dump's file. The drill's image leg re-runs after the first receipt with an image lands.
+- Step 18, the irreversible unlisted submission, is open and gated on things only the owner can do: accept the updated Apple Developer Program License Agreement as Account Holder, fill the contact address in `web/privacy/index.html` and deploy `web/` per its README (the privacy policy URL becomes `https://keptapp.net/privacy`), paste that URL into App Store Connect, then submit per wave-6 §3 step 18.
 
 ## Build and test
 

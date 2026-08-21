@@ -238,6 +238,8 @@ Two things stated rather than smoothed over. **`route` is not stable per endpoin
 
 *Status: RESOLVED (diagnosability half; the existence check stays DEFERRED). **REJECTED ONCE by REVIEW-3, remediated.*** Artifact - the reviewer's own scenario replayed against the real entrypoint with real MinIO behind it. The create still returns 201, which is unchanged and deliberate; what changed is what the export screen is handed:
 
+*(Annotation, 2026-08-20 - N-4(c): the block below is a hand-wrapped rendering of that response, re-flowed for column width with the job id elided - not the bytes the server emitted. The values are unaltered, but a ledger whose method is "verify artifacts, not reports" should have pasted verbatim; the original response is unrecoverable, so this note is the honest close available.)*
+
 ```
 create a receipt naming an object never uploaded  -> HTTP 201
 
