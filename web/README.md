@@ -67,6 +67,13 @@ the page goes live.
    project `keptapp-web`. Add the custom domain `keptapp.net` (and `www` if
    wanted). ⚠ Leave the `api` DNS record alone; only the apex/`www` belong
    to Pages.
+   ✅ *Done 2026-08-22 via wrangler + the API: project `keptapp-web`
+   deployed, apex CNAME → `keptapp-web.pages.dev` (proxied; the `api`
+   records untouched), and verified live - the app and `/privacy` both
+   serve from `https://keptapp.net` with the `_headers` CSP, the Apple
+   sign-in script loads under it, and the contact address renders through
+   Cloudflare's email obfuscation. Redeploys:
+   `npx wrangler pages deploy dist --project-name=keptapp-web --branch=main`.*
 5. The privacy policy URL for App Store Connect is then
    `https://keptapp.net/privacy` (wave-6 §3 step 18) - fill the contact
    address in `public/privacy/index.html` and rebuild before the upload

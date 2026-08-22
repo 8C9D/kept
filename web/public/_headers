@@ -1,0 +1,14 @@
+# Cloudflare Pages response headers (security pass, 2026-08-22).
+#
+# CSP: script-src is strict - the app's own bundle plus Apple's sign-in JS
+# and nothing else, which is what makes the localStorage token defensible
+# (DECISIONS 2026-08-21). style-src carries 'unsafe-inline' deliberately:
+# the privacy page is a standalone <style> block, and inline CSS is not a
+# script-injection surface. connect/img/frame name the API and the R2
+# endpoint the presigned URLs point at; a zip download is a navigation and
+# needs no grant. frame-ancestors 'none': nothing embeds this app.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://appleid.cdn-apple.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.keptapp.net https://cf54199aef7e9425e000486ce1fda8bb.r2.cloudflarestorage.com; img-src 'self' data: https://cf54199aef7e9425e000486ce1fda8bb.r2.cloudflarestorage.com; frame-src https://cf54199aef7e9425e000486ce1fda8bb.r2.cloudflarestorage.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=()

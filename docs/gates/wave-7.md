@@ -200,6 +200,19 @@ verified accepted (Agreements card: "Issued August 18, 2026. Accepted
 August 21, 2026"), which clears wave-6 step 18's first gate. Remaining:
 steps 4 and 5 - both behind the privacy page's contact address.*
 
+*Correction, 2026-08-22 (ship day): step 4 is done. The owner ruled the
+identity linkage acceptable, so the contact address is his own email; the
+build gained `_headers` (a strict-script CSP - the pre-ship security pass,
+`docs/security/pass-2026-08-22.md`, has the policy and its one deliberate
+weakening) and went to Cloudflare Pages as project `keptapp-web` with the
+apex CNAME (the `api` records untouched, listed before writing). Verified
+live: the app and `/privacy` both serve from `https://keptapp.net`, the
+Apple sign-in button loads Apple's JS under the CSP and opens the real
+popup carrying `client_id=com.arthurzhang.kept.web`, and the contact
+address renders through Cloudflare's email obfuscation. Step 5 - a person
+signing in from the deployed page and running an export - is the one leg
+left, and it needs Apple credentials nothing automated may enter.*
+
 ## 5 · What I could not verify, and what it would take
 
 - **Sign in with Apple against real Apple, from a browser.** The Services
