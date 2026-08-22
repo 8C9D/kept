@@ -7,3 +7,9 @@ xcuserdata/
 *.xcresult
 # Local agent tooling (project-scoped MCP config), not project source.
 .mcp.json
+
+# Playwright MCP session artifacts (local browser-gate evidence, not source)
+.playwright-mcp/
+
+# Web client build output
+web/dist/

@@ -43,6 +43,8 @@ A missing one stops the process at startup with the name in the message, rather 
 | `STORAGE_SECRET_ACCESS_KEY` | yes in production | R2 API token secret |
 | `STORAGE_REGION` | no | Defaults to `auto`, which is right for R2 |
 | `EDGE_SHARED_SECRET` | no, but see below | Any random string. When set, the origin serves only requests carrying it in `x-kept-edge-secret`, which Cloudflare adds. Unset, the origin answers anyone who finds its `fly.dev` hostname |
+| `APPLE_WEB_CLIENT_ID` | no; required for web sign-in | The Apple Services ID the web client's Sign in with Apple mints tokens against (`com.arthurzhang.kept.web`). Unset, the verifier accepts exactly the iOS audience - the pre-wave-7 behaviour |
+| `WEB_ORIGIN` | no; required for the web client | Comma-separated browser origins granted CORS (`https://keptapp.net` once web/ is deployed). Unset in production nothing is granted; unset in development the Vite origin `http://localhost:5173` is the default |
 | `PORT` | no | Defaults to 3000 |
 | `NODE_ENV` | set by the Dockerfile | `production` turns on the deployed-shape checks in `src/productionEnv.ts` |
 

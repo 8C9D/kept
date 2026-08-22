@@ -4,6 +4,37 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-21 - Wave 7 built and gated locally: the web client exists, and the API opened exactly two seams for it
+
+Full record: `docs/gates/wave-7.md`. The decisions, so they outlive the report:
+
+**Decided: the web client is Vite + React + TypeScript (strict), two runtime dependencies, no router, no component or state library.**
+§7A's "static build to Cloudflare Pages" and "density over friendliness" want the boring default with the fewest moving parts; five views switched by plain state need no router, and everything the client knows is one fetch away because the server owns every rule (§4.1a).
+Rejected: anything that would tempt a second implementation of domain logic - the client renders the served merge, the served statuses, the served refusal sentences.
+
+**Decided: the web session is the same bearer JWT iOS carries, held in localStorage - not a cookie.**
+The trade, stated: a script-readable token on a page that loads no third-party script anywhere a token exists (Apple's sign-in JS is confined to the signed-out screen), against an httpOnly cookie that would hand the API a second authentication path - CSRF defences, SameSite semantics, a divergence between clients - to carry forever.
+30-day expiry; every 401 degrades to the sign-in screen.
+Rejected: a runtime-configurable API address. The bundle bakes `https://api.keptapp.net` for the same reason the iOS Release build does (wave 6): a client that can be pointed elsewhere is a control with one dangerous use.
+
+**Decided: the verifier accepts a set of Apple audiences, and CORS grants exact configured origins or nothing.**
+`APPLE_WEB_CLIENT_ID` and `WEB_ORIGIN` are optional: unset - today's production - the deployed behaviour is byte-for-byte pre-wave-7 (iOS audience only, no CORS surface at all). The audience logic is proven against locally-generated keys; origin reflection dies by mutation. CORS sits below the edge secret (a preflight arrives through Cloudflare like any request) and grants no credentials.
+
+**Decided: local web dev signs in with a pasted token from `npm run dev:session-token`, and the affordance is compiled out of production builds.**
+Sign in with Apple for web needs a Services ID with a verified domain - a production artifact no localhost has. The script signs with the `SESSION_JWT_SECRET` the dev server itself reads from `.env.local`, so it wields only the authority the operator already holds; it refuses `NODE_ENV=production` and non-local databases, and the production bundle carries zero instances of the dev entry (asserted against the built artifact, with positive controls, wave-6 style).
+Rejected: any server-side flag that weakens the verifier - the "no bypass reachable from configuration" property stands untouched.
+
+**Decided: the backlog upload sets business-or-personal per batch before anything uploads, dates each receipt to the upload day, and reports a duplicate as a duplicate.**
+The drop is §6A's capture moment, so constraint 3 puts the choice there, unpreselected (§5.2: no default at any layer - the dropzone is disabled until a person chooses).
+The upload-day date is the same capture-day fallback the iOS confirm screen prefills, guarded the same way (constraint 2: pending until a person confirms every field against the image).
+The 409 `duplicate_image` renders "already uploaded - an identical file is attached to one of your receipts" - round 4 §2.2's forward constraint honoured: on this path a duplicate is a user-facing fact, never a lost 201.
+No OCR runs on web uploads, deliberately: they carry no suggestions, the sweep never sees them (no stored OCR text), and their fields get typed in the confirm queue. §6A's "narrower than it sounds", kept narrow.
+
+**Found by predicting before measuring: R2 needs a bucket CORS rule for the browser's presigned PUT.**
+Flagged as the likeliest gate failure before any browser started; MinIO's permissive default let the gate pass, and the R2 difference became `web/README.md` deploy step 3 instead of a production incident. iOS never sees this (URLSession sends no Origin), which is exactly why it would have been found in production otherwise.
+
+**Spec amended in this commit:** §7A (built-and-gated status), §4.2 (web stack line), the update log. Production enablement - Services ID, the two Fly secrets, the R2 CORS rule, the Pages deploy - is the owner's, listed in `web/README.md` and wave-7 §4.
+
 ## 2026-08-21 - CI exists: the backend suite on push, run against the same compose file dev runs
 
 **Decided: §10B's "GitHub Actions running the backend suite on push" is built as one workflow that starts `server/docker-compose.yml` and runs `npm ci`, `npm run typecheck`, `npm test` on an Ubuntu runner, Node 24 to match dev.**

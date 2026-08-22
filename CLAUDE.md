@@ -12,7 +12,7 @@ There is no README; this file and `docs/` are the entry points.
 
 - `server/` - the API and all domain logic.
 - `ios/` - the SwiftUI client, a capture-and-confirm surface only.
-- `web/` - the static privacy-policy page and its deploy note; the web client itself (wave 7) is not started.
+- `web/` - the web client (wave 7, built 2026-08-21): Vite + React + TypeScript SPA - table, detail, confirm queue, backlog upload, export - plus the static privacy page under `public/privacy/`. Gated locally; production enablement is the owner's (`web/README.md`).
 - `docs/` - spec, decisions, runbook, per-wave gate reports.
 - `reviews/`, `PROD-READINESS*.md`, `DEPLOY-PREP.md` - the hardening rounds and their ledgers.
 
@@ -23,6 +23,7 @@ HST arithmetic, export generation, filename derivation, fiscal-period slicing, a
 
 - Server: Node with TypeScript run through `tsx`, Hono, Drizzle ORM over Postgres, zod, jose for session JWTs, `@aws-sdk/client-s3` for object storage, exceljs plus archiver for the export zip, `@anthropic-ai/sdk` for the server-side LLM parse sweep.
 - iOS: SwiftUI, VisionKit scanning with on-device Vision OCR, XCTest, deployment target 17.0, bundle id `com.arthurzhang.kept`.
+- Web: Vite + React + TypeScript (strict), react/react-dom as the only runtime dependencies, vitest for the client's logic; static build for Cloudflare Pages; API origin baked per build (dev localhost:3000, production `https://api.keptapp.net`), session as the same bearer JWT iOS uses.
 - Deployed: one Fly.io machine (`keptapp-api`, region `yyz`, `shared-cpu-1x` at 2 GB), Neon Postgres, Cloudflare R2 bucket `kept`, Cloudflare proxying the zone `keptapp.net` and carrying the rate limiter, origin at `https://api.keptapp.net`.
 - Local development: `server/docker-compose.yml` brings up Postgres 16 on 5432 and MinIO on 9000/9001.
 
@@ -35,14 +36,16 @@ HST arithmetic, export generation, filename derivation, fiscal-period slicing, a
 - Images never transit the API: the client PUTs straight to object storage through a presigned URL.
 - `docs/Runbook.md` is the operations authority - deploy, migrate, roll back, back up, restore.
 
-## Status, as of 2026-08-20 (night)
+## Status, as of 2026-08-21 (night)
 
 - The first production deploy happened 2026-08-16 (`docs/gates/wave-6.md` §3 steps 1-13); steps 14-16 completed 2026-08-18: privacy label published, build 1.0 (1) on TestFlight, the owner's phone signed into production and verified end to end (`users 1, receipts 0` - re-read 2026-08-20, unchanged).
 - The App Store record is "Kept Receipts" (app id 6802835941) because "Kept" was taken as a store name; the home-screen name stays Kept via `CFBundleDisplayName`. The Fly app is `keptapp-api`, not `kept-api`, for the same reason on that platform.
-- The dev database, the dev MinIO bucket, and the phone's dev install were deliberately wiped to zero on 2026-08-18. Both environments started from empty; nothing migrated anywhere.
-- **Production-readiness round 4 (the post-deploy pass) ran 2026-08-20** on the owner's instruction: nine of the eleven carried findings closed and deployed - ledger `PROD-READINESS-ROUND-4.md`, decisions in `docs/DECISIONS.md` 2026-08-20. R2-3 and PR-9(b) stay deferred on their 2026-08-15 triggers (both need a realistic production export to measure; production holds zero receipts).
+- **Production-readiness round 4 (the post-deploy pass) ran 2026-08-20**: nine of the eleven carried findings closed and deployed - ledger `PROD-READINESS-ROUND-4.md`. R2-3 and PR-9(b) stay deferred on their 2026-08-15 triggers (both need a realistic production export to measure; production holds zero receipts). Round 4's §4a residuals were closed 2026-08-21 except the pg-9 note, which waits on the pg major bump.
+- **Wave 7, the web client, is built and gated against local dev (2026-08-21)** - all §7A screens plus the §6A upload and confirm queue; the §9 gate scenario ran in a real browser (`docs/gates/wave-7.md`). The API gained two inert-until-configured seams: `APPLE_WEB_CLIENT_ID` (second Apple audience) and `WEB_ORIGIN` (exact-origin CORS). **Production enablement is the owner's**, ordered in `web/README.md`: the Apple Services ID `com.arthurzhang.kept.web`, the two Fly secrets, the R2 bucket CORS rule for browser PUTs, and the Cloudflare Pages deploy of `web/dist` - which is also what makes the privacy URL exist.
+- **CI exists (2026-08-21)**: `.github/workflows/server.yml` runs the backend suite on push against the committed compose file. Its first real run happens on the next push to GitHub.
 - **Step 17 is executed to the token boundary** (2026-08-20): the nightly launchd backup agent is installed and loaded on the owner's Mac, the pipeline and drill are rehearsed and run (Runbook §4). One piece is the owner's: mint the R2 token scoped to `kept-backups` in the Cloudflare dashboard, paste it into `~/.kept/backup.env`, `launchctl start net.keptapp.backup`, then the §4 drill against that scheduled dump's file. The drill's image leg re-runs after the first receipt with an image lands.
-- Step 18, the irreversible unlisted submission, is open and gated on things only the owner can do: accept the updated Apple Developer Program License Agreement as Account Holder, fill the contact address in `web/privacy/index.html` and deploy `web/` per its README (the privacy policy URL becomes `https://keptapp.net/privacy`), paste that URL into App Store Connect, then submit per wave-6 §3 step 18.
+- Step 18, the irreversible unlisted submission, is open and gated on things only the owner can do: accept the updated Apple Developer Program License Agreement as Account Holder, fill the contact address in `web/public/privacy/index.html` and deploy per `web/README.md` (the privacy policy URL becomes `https://keptapp.net/privacy`), paste that URL into App Store Connect, then submit per wave-6 §3 step 18.
+- The dev database and MinIO bucket were wiped to zero 2026-08-18 and now hold only the wave-7 gate's fixtures (user `dev:gate`, three confirmed receipts) - disposable, like all dev data.
 
 ## Build and test
 
@@ -57,6 +60,12 @@ From `ios/`:
 
 - `xcodebuild test -project Kept.xcodeproj -scheme Kept -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:KeptTests`
 - The same command with `-only-testing:KeptUITests` for the UI tests, which need a booted simulator and take about a minute.
+
+From `web/` (after `npm install`):
+
+- `npm test` - vitest over the client's logic (money, query assembly, upload outcomes, prefill/patch rules).
+- `npm run build` - typecheck plus the production bundle into `dist/`.
+- `npm run dev` - Vite on 5173, the origin the API's dev CORS default grants; sign in with a token from `npm run dev:session-token` (server/).
 
 On a fresh clone run `git config core.hooksPath .githooks` once to enable the gitleaks pre-commit secret scan.
 
