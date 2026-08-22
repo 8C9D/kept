@@ -4,6 +4,22 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-21 - CI exists: the backend suite on push, run against the same compose file dev runs
+
+**Decided: §10B's "GitHub Actions running the backend suite on push" is built as one workflow that starts `server/docker-compose.yml` and runs `npm ci`, `npm run typecheck`, `npm test` on an Ubuntu runner, Node 24 to match dev.**
+The suite needs no secrets in CI: `ANTHROPIC_API_KEY` is absent by construction (the LLM tests run against fakes, the same posture deploy-prep enforced on its own processes), the integration tests create their own test database, and the storage tests create their own bucket - all verified by rehearsing the workflow's exact steps locally from a clean `npm ci` (354 green).
+
+**Rejected: GitHub service containers.**
+They would be a second spelling of the services the compose file already commits - different images or different flags drifting independently of what dev runs - and the `services:` syntax cannot carry MinIO's `server /data` command line without switching to a differently-packaged image, which is exactly the divergence. The framework's rule 5 (no second environment shape) decides this.
+
+**Rejected: a unit-only CI.**
+The integration half is where the isolation gate and the log-hygiene invariant live; a CI that skips them certifies style, not behaviour.
+
+**Rejected: iOS in CI.**
+It needs a macOS runner and signing surface for a suite every gate runs anyway; the spec scoped CI to the backend deliberately, and that scoping stands.
+
+**Stated rather than smoothed over:** a workflow cannot be executed from this machine. It is verified by YAML parse and by the local rehearsal of its exact steps; its first real run happens on the next push to GitHub, and that run is the artifact that closes this entry's loop.
+
 ## 2026-08-20 - Production-readiness round 4: the post-deploy pass runs on the owner's instruction, and nine of the eleven close
 
 **Decided: the 2026-08-15 deferral's "waits for production evidence or a new P1" gains its third trigger retroactively - The owner asking.**

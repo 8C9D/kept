@@ -1,0 +1,34 @@
+# §10B's whole CI story: the backend suite on push, nothing else.
+#
+# The backing services come from server/docker-compose.yml - the same file,
+# the same images, the same healthchecks dev runs - rather than from GitHub
+# service containers, which would be a second spelling of the same services
+# (and cannot carry MinIO's command line without switching images, which is
+# exactly the divergence). The suite needs no secrets: ANTHROPIC_API_KEY is
+# absent here by construction and the LLM tests run against fakes, the
+# integration tests create their own test database, and the storage tests
+# create their own bucket.
+name: server
+
+on:
+  push:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start Postgres and MinIO from the committed compose file
+        run: docker compose up -d --wait
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
