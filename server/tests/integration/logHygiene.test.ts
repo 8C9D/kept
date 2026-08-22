@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { receipts } from "../../src/db/schema.js";
+import { llmParseResponseSchema } from "../../src/domain/llmSuggestions.js";
 import type { OcrFieldSuggestions } from "../../src/domain/ocrSuggestions.js";
 import { requestLog } from "../../src/observability/requestLog.js";
 import { parseReceiptText } from "../../src/parse/claudeReceiptParser.js";
@@ -275,6 +276,51 @@ describe("the LLM parse sweep's failure log", () => {
 
     expect(logs).toContain(`at position ${position}`);
     expect(logs).not.toContain(VENDOR_HEAD);
+  });
+
+  it("withholds the keys the model invented when its reply fails validation", async () => {
+    // Round 4 §4a's residual, closed. The reply parses as JSON but fails
+    // the strict schema on a key the model made up - and zod writes the
+    // offending keys into its message verbatim, so a key that quotes the
+    // receipt would ride the cause chain into the log the way the
+    // JSON.parse snippet did (N-2). The invented key here carries exactly
+    // that shape of content.
+    const inventedKey = "Dr Smith session fee";
+    const reply = JSON.stringify({
+      vendor: VENDOR,
+      purchasedAt: "2026-03-15",
+      totalCents: "11300", // wrong type, so a field-level path is exercised too
+      hstCents: 1300,
+      subtotalCents: 10000,
+      vendorTaxNumber: null,
+      [inventedKey]: 11300,
+    });
+    // The leak asserted at its source first: this is the ZodError the
+    // parser's catch receives, and its message carries the invented key.
+    // Without this leg, a zod that stopped echoing keys would make the
+    // absence assertions below vacuous.
+    const zodResult = llmParseResponseSchema.safeParse(JSON.parse(reply));
+    expect(zodResult.success).toBe(false);
+    if (!zodResult.success) {
+      expect(zodResult.error.message).toContain(inventedKey);
+    }
+
+    const receiptId = await createSensitiveReceipt();
+    const logs = await runSweep((text) =>
+      parseReceiptText(modelReplying(reply), text),
+    );
+
+    expect(logs).toContain(receiptId);
+    // Still diagnosable: the failure mode, the issue codes, and the paths -
+    // which are our own schema's key names - all survive.
+    expect(logs).toContain("Model response did not validate as receipt suggestions");
+    expect(logs).toContain("ZodError");
+    expect(logs).toContain("unrecognized_keys");
+    expect(logs).toContain("invalid_type at totalCents");
+    // And nothing the model wrote reaches the log: not the invented key
+    // (which is also the vendor's name here), not any zod message text.
+    expect(logs).not.toContain("Dr Smith");
+    expect(logs).not.toContain("Unrecognized keys");
   });
 
   it("stores the redacted message in the durable failure record, never the cause", async () => {

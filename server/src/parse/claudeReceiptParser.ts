@@ -1,7 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
 import {
   RECEIPT_PARSE_JSON_SCHEMA,
   RECEIPT_PARSE_SYSTEM_PROMPT,
+  llmParseResponseSchema,
   validateLlmParseResponse,
 } from "../domain/llmSuggestions.js";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
@@ -91,7 +93,7 @@ export async function parseReceiptText(
   } catch (error) {
     throw new LlmParseError(
       "Model response did not validate as receipt suggestions",
-      { cause: error },
+      { cause: sanitizedValidationCause(error) },
     );
   }
 }
@@ -125,4 +127,55 @@ function sanitizedJsonParseCause(error: unknown): Error {
   const position = JSON_PARSE_POSITION.exec(error.message)?.[1];
   const suffix = position === undefined ? "" : ` at position ${position}`;
   return new Error(`${error.name} [message withheld]${suffix}`);
+}
+
+/**
+ * A validation failure's cause, rebuilt the same way (round 4 §4a's
+ * residual). Zod writes the offending object's own keys *into the message*:
+ * a `strictObject` refusing `{"Dr Smith session fee": 11300}` says
+ * `Unrecognized keys: "Dr Smith session fee"` - and those keys are the
+ * model's invention over the receipt's OCR text, so they can carry receipt
+ * content the same way the JSON.parse snippet did.
+ *
+ * Kept: each issue's `code`, and its `path` - guarded structurally rather
+ * than trusted: a string segment survives only if it names a key of our own
+ * schema (paths into a flat strictObject always do; the guard is what makes
+ * that a property instead of an observation about today's zod), numeric
+ * segments are array indices, anything else renders withheld. For
+ * `unrecognized_keys`, the count survives and the names never do.
+ * Dropped: every message zod wrote, including our own refine wording -
+ * `custom at purchasedAt` says the same thing without an allowlist to rot.
+ */
+function sanitizedValidationCause(error: unknown): Error {
+  if (!(error instanceof z.ZodError)) {
+    // `parsedDate` rethrows non-InvalidDateError failures, so a genuine
+    // internal error can land here: keep its class, withhold its message,
+    // exactly as the JSON.parse branch does.
+    if (error instanceof Error) {
+      return new Error(`${error.name} [message withheld]`);
+    }
+    return new Error(`non-Error value thrown (${typeof error}) [message withheld]`);
+  }
+  const schemaKeys = new Set(Object.keys(llmParseResponseSchema.shape));
+  const issues = error.issues.map((issue) => {
+    const path =
+      issue.path.length === 0
+        ? "(root)"
+        : issue.path
+            .map((segment) => {
+              if (typeof segment === "number") {
+                return String(segment);
+              }
+              return typeof segment === "string" && schemaKeys.has(segment)
+                ? segment
+                : "(withheld)";
+            })
+            .join(".");
+    const count =
+      issue.code === "unrecognized_keys"
+        ? ` (${issue.keys.length} key name(s) withheld)`
+        : "";
+    return `${issue.code} at ${path}${count}`;
+  });
+  return new Error(`ZodError [messages withheld]: ${issues.join(", ")}`);
 }
