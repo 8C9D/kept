@@ -12,7 +12,7 @@ There is no README; this file and `docs/` are the entry points.
 
 - `server/` - the API and all domain logic.
 - `ios/` - the SwiftUI client, a capture-and-confirm surface only.
-- `web/` - an empty placeholder, not started.
+- `web/` - the static privacy-policy page and its deploy note; the web client itself (wave 7) is not started.
 - `docs/` - spec, decisions, runbook, per-wave gate reports.
 - `reviews/`, `PROD-READINESS*.md`, `DEPLOY-PREP.md` - the hardening rounds and their ledgers.
 

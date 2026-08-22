@@ -78,6 +78,29 @@ Before the install, the owner ruled the dev data disposable: the dev database an
 
 **Still open:** step 17 (the scheduled `pg_dump` to `kept-backups`, restore-verified) and step 18 (the unlisted submission), with 18 additionally gated on the Account Holder accepting the updated Apple Developer Program License Agreement and on a privacy policy URL that does not yet exist.
 
+## 2026-08-16 - First deploy day: the four decisions made at the console, reconstructed 2026-08-21
+
+*Reconstructed from `docs/Runbook.md` §1's dated markers and `docs/gates/wave-6.md` §3's dated corrections, five days late: on deploy day the current-state docs were amended and this log was not - the doc-ownership rule's failure mode running in the opposite direction from the Aug 7-8 case it was written for. Filed under the date the decisions were made, per the ordering rule above.*
+
+**Decided: the Fly app is `keptapp-api`, because `kept-api` was taken by an unrelated app on that platform.**
+`fly.toml` updated; the client is unaffected because it reaches `https://api.keptapp.net`, never the Fly hostname - the platform-internal name is invisible to everything but the operator.
+Rejected: contesting or waiting on the name. Same shape as the App Store's "Kept Receipts" ruling two days later: a registrar's namespace is not worth blocking a ship date over when the product's own name is untouched.
+
+**Decided: `ANTHROPIC_API_KEY` joins the first `fly secrets set` - LLM parsing is on from the first deploy.**
+The wave-6 step 8 command had omitted it.
+Rejected: enabling the sweep later as a separate step. Production refusing to start without the key (Runbook §0) was already the recorded posture - "unset in production the server refuses, because the alternative is silent feature loss" - and a first deploy that carved out an exception to it would have made dev and production diverge on day one.
+
+**Decided: Neon stays on the Free plan, and retention rests entirely on the scheduled dump.**
+The 6-hour PITR history window is an oops-window, no part of the six-year retention story (wave-6 §1.4) - a fact that holds on every plan, so paying for a longer window buys convenience, not retention.
+The project was created on Postgres 16 to match dev's `postgres:16`, keeping the §4 restore drill valid across environments.
+Rejected: a paid plan as a substitute for the dump; wave-6 §3 step 6 said "do the dump either way", and the dump is step 17.
+
+**Decided: backups land in a second R2 bucket, `kept-backups`, in the same Cloudflare account as the images, under no lifecycle rule.**
+Accepted caveat, stated at the time: a Cloudflare account compromise reaches both the receipt images and the dumps.
+Rejected: a destination at a separate provider - stricter against that one failure, at the price of a second account, a second credential, and a second set of billing and lifecycle behaviour to operate; at three users the operational surface costs more than the marginal isolation buys.
+
+**Done, recorded rather than decided:** wave-6 §3 steps 1-13 executed in order - accounts, zone, R2 bucket and token, Neon, `fly launch`/secrets/deploy/migrate, proxied DNS with the one rate-limiting rule and the edge-secret Transform Rule, and the confirmations: `https://api.keptapp.net/api/me` → 401 with `no-store` through Cloudflare, and `storage:probe-keys` against real R2 serving the control read while refusing all eight traversal spellings (probe objects deleted the same day). The R2 answer closed the one question wave 6 recorded as measured-on-MinIO-only.
+
 ## 2026-08-15 - Production-readiness round 4 is deferred: the remaining backlog waits for production evidence
 
 **Decided: there is no fourth desk-review round before the first deploy.**
