@@ -294,6 +294,7 @@ npm run db:verify-restore
 
 Step 3 compares row counts per table between the two databases, then takes every live receipt image row in the **restored** database, downloads the object behind it, and checks that the bytes hash to the digest that row carries.
 The digest is the part that matters: a key that resolves proves an object is there, and only the hash proves it is the right object.
+Read the labels precisely: `MISSING` means storage answered and the object is not there - the backup really is short an image - while `UNREACHABLE` means storage did not answer, the object may be fine, and the run proves nothing about it either way. *(The script labelled both `MISSING` until 2026-08-21 - round 4 §4a.)*
 It exits non-zero and names every problem if anything fails, and it refuses to report success if the restored database holds no images at all - a restore verified against zero images has verified nothing.
 
 It is read-only on both databases and on storage, so it is safe to point at production.

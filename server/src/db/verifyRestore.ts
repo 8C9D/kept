@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 import { isNull } from "drizzle-orm";
 import { createDb } from "./client.js";
+import { checkRestoredImage } from "./restoreImageCheck.js";
 import { exportJobs, receiptImages, receipts, users } from "./schema.js";
 import {
   LOCAL_DEV_STORAGE_CONFIG,
@@ -87,20 +87,13 @@ async function main(): Promise<void> {
 
     console.log(`\nImage objects behind the ${images.length} live restored row(s):`);
     for (const image of images) {
-      try {
-        const bytes = await storage.download(image.objectKey);
-        const digest = createHash("sha256").update(bytes).digest("hex");
-        if (digest === image.sha256) {
-          console.log(`  ok        ${image.objectKey}`);
-        } else {
-          console.log(`  DIGEST    ${image.objectKey}`);
-          failures.push(
-            `${image.objectKey}: stored bytes hash to ${digest}, row says ${image.sha256}`,
-          );
-        }
-      } catch (error) {
-        console.log(`  MISSING   ${image.objectKey}`);
-        failures.push(`${image.objectKey}: ${describe(error)}`);
+      // MISSING means storage answered "not there"; UNREACHABLE means it did
+      // not answer, and the object may be fine. The classification and the
+      // reason it must not be collapsed live in restoreImageCheck.ts.
+      const verdict = await checkRestoredImage(storage, image);
+      console.log(`  ${verdict.label.padEnd(11)} ${image.objectKey}`);
+      if (verdict.failure !== undefined) {
+        failures.push(verdict.failure);
       }
     }
 
@@ -134,13 +127,6 @@ function required(name: string): string {
     throw new Error(`${name} is required`);
   }
   return value;
-}
-
-function describe(error: unknown): string {
-  if (typeof error === "object" && error !== null && "name" in error) {
-    return (error as { name: string }).name;
-  }
-  return String(error);
 }
 
 await main();
