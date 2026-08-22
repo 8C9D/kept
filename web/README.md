@@ -44,12 +44,18 @@ the page goes live.
    without these the API neither accepts web sign-ins nor answers the
    browser at all (exact-origin CORS, no origin configured means none
    granted).
+   ✅ *Done 2026-08-21, with the wave-7 server deployed as machine
+   version 4: both secrets set, the boot log names the origin, and a live
+   preflight through Cloudflare answers 204 with exactly that origin.*
 3. **R2 bucket CORS on `kept`** (dashboard → R2 → kept → Settings → CORS):
    allow origin `https://keptapp.net`, methods `PUT` and `GET`, header
    `Content-Type`. The browser PUTs images to presigned URLs directly, and
    unlike MinIO's permissive default, R2 answers a cross-origin PUT only if
    the bucket says so. Without this rule every web upload fails its
    preflight while iOS keeps working (URLSession sends no Origin).
+   ✅ *Done 2026-08-21 via the API (rule id `web-client-keptapp-net`,
+   read back and then falsified live: R2 answers the keptapp.net preflight
+   204 with the exact grant and gives any other origin nothing).*
 4. **Build and deploy:** `npm run build`, then Cloudflare dashboard →
    Workers & Pages → Create → Pages → Direct upload → upload `web/dist`,
    project `keptapp-web`. Add the custom domain `keptapp.net` (and `www` if

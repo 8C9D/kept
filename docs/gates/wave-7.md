@@ -171,6 +171,22 @@ The full commands live in `web/README.md`; the list:
 5. Sign in from the deployed page and run one real export - the production
    half of this gate, impossible before 1-4.
 
+*Correction, 2026-08-21 (same evening, on the owner's instruction): steps 2
+and 3 are done, and step 2 grew the deploy it implied. The wave-7 server
+shipped to production as machine version 4 - image verified locally the
+§1.2 way first (boot against dev services, 401 + `no-store`, health,
+exact-origin CORS with a hostile-origin control), then `fly deploy`, then
+both secrets set. Verified against production: `fly status` version 4 with
+its check passing, the boot log printing `Web client CORS: allowing origin
+https://keptapp.net`, a preflight through Cloudflare answering 204 with
+exactly that origin, a hostile origin receiving no CORS headers, `/api/me`
+still 401 + `no-store`, and the naked fly.dev origin still 403. The R2 rule
+(`web-client-keptapp-net`) was written through the API, read back, and
+falsified live: R2 answers the keptapp.net preflight 204 with the exact
+grant and gives any other origin nothing. Steps 1, 4 and 5 remain the owner's;
+step 1's domain-verification leg may additionally wait on step 4 if Apple
+asks for a hosted verification file.*
+
 ## 5 · What I could not verify, and what it would take
 
 - **Sign in with Apple against real Apple, from a browser.** The Services
