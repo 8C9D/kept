@@ -36,7 +36,10 @@ HST arithmetic, export generation, filename derivation, fiscal-period slicing, a
 - Images never transit the API: the client PUTs straight to object storage through a presigned URL.
 - `docs/Runbook.md` is the operations authority - deploy, migrate, roll back, back up, restore.
 
-## Status, as of 2026-08-21 (night)
+## Status, as of 2026-08-22 (ship day)
+
+- **Build 1.0 (1) is submitted: Waiting for Review**, and the **unlisted app distribution request is filed** and acknowledged (2026-08-22, `docs/DECISIONS.md`). Availability is **Canada only**, price Free, release **manual** - after Apple approves both the review and the unlisted request, the owner presses Release and shares the App Store link with the second user. The owner's visibility ruling: unlisted, not paid. Pre-ship security pass: `docs/security/pass-2026-08-22.md` - nothing found that blocks.
+- **The web client and privacy page are live at `https://keptapp.net`** (Pages project `keptapp-web`, `_headers` CSP; contact is the owner's email by his identity ruling). Production web sign-in end-to-end is still unexercised - it needs a person's Apple credentials.
 
 - The first production deploy happened 2026-08-16 (`docs/gates/wave-6.md` §3 steps 1-13); steps 14-16 completed 2026-08-18: privacy label published, build 1.0 (1) on TestFlight, the owner's phone signed into production and verified end to end (`users 1, receipts 0` - re-read 2026-08-20, unchanged).
 - The App Store record is "Kept Receipts" (app id 6802835941) because "Kept" was taken as a store name; the home-screen name stays Kept via `CFBundleDisplayName`. The Fly app is `keptapp-api`, not `kept-api`, for the same reason on that platform.

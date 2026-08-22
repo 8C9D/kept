@@ -157,6 +157,8 @@ Also decided 2026-08-16: `ANTHROPIC_API_KEY="..."` joins the step 8 `fly secrets
 17. **Set up the scheduled `pg_dump`** (Runbook §4) before real receipts accumulate, and keep the files off Neon and off the one laptop.
 18. **Only then:** submit to App Review as though public, with a Review Notes line stating unlisted intent, and afterwards file the unlisted app request as Account Holder.
 
+*Correction, 2026-08-22: step 18 is executed. The privacy policy URL went live at `https://keptapp.net/privacy` and into App Store Connect, the listing's remaining gaps were filled (Content Rights, Copyright, Canada-only availability, manual release), build 1.0 (1) was submitted - "1 Item Submitted", status Waiting for Review - and the unlisted app distribution request was filed from the owner's Account Holder session and acknowledged with "Thank you for your submission." What remains is Apple's: the review verdict and the unlisted request's approval, then the owner presses Release and shares the link. Full record: `docs/DECISIONS.md` 2026-08-22.*
+
 ⚠ **Step 18 is the irreversible one. The unlisted conversion is permanent for that app record** - if a consumer version is ever wanted it needs its own record from the start. Do not file it until steps 10, 13 and 16 have all actually answered correctly.
 
 ---

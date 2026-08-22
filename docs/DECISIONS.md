@@ -4,6 +4,29 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-22 - Ship day: build 1.0 (1) is submitted for review and the unlisted request is filed
+
+On the owner's instruction ("ship as soon as possible; identity linkage must not block it"), after the pre-ship security pass (`docs/security/pass-2026-08-22.md`) found nothing blocking. Every action below ran in the owner's signed-in sessions and was read back from the page after saving, not trusted from the flow's own confirmations.
+
+**Decided: the visibility question resolves to unlisted, not paid.**
+The owner asked whether App Store visibility could be limited to the family, and to make the app paid if not.
+The option exists and was the plan of record all along: unlisted distribution - approved through normal review, then reachable only by direct link, absent from search, browse, charts, and listings.
+Rejected: a paid app, on both of the question's own axes - a price does not hide an app (it stays fully searchable, it only charges strangers who find it), and going paid requires the Paid Applications Agreement plus banking and tax setup, the opposite of "as soon as possible".
+The standing caveats stand: unlisted is not private (in-app auth and per-user isolation are the real protection, as they always were), and the conversion is permanent for this record.
+
+**Decided: the privacy contact is the owner's own email, published on the live page.**
+His ruling: the app may be linked to his identity for now, and changing the associated identity later must not block shipping today. Swapping it later is one page edit and one Pages re-upload.
+
+**Decided: availability is Canada only.**
+Factual (the business is Canadian, both users are in Canada), it shrinks exposure in the same direction as unlisted, and it sidesteps the EU Digital Services Act trader-status declaration - a legal attestation that is the owner's to make, not an agent's, and that a Canada-only app does not need. If EU availability is ever wanted, the DSA declaration comes first.
+
+**Decided: manual release.**
+The app must never sit publicly searchable between review approval and the unlisted conversion; release is pressed after the conversion is in place.
+
+**Done, recorded rather than decided** - the App Store Connect completion this required: Content Rights declared (no third-party content), Copyright "2026 8C9D", price confirmed Free ($0.00 read from the price table), the privacy policy URL `https://keptapp.net/privacy` saved into App Privacy, and the listing the distribution-day session had already prepared (screenshots, description, keywords, support URL, review notes stating unlisted intent, sign-in-required correctly off for a Sign in with Apple-only app) verified in place. Submitted: **1.0 Waiting for Review** ("1 Item Submitted", up to 48 hours). The unlisted request was filed from the owner's Account Holder session with honest answers (1 organization, 2 people, 2 unmanaged devices, Canada, internal full-time staff) and answered "Thank you for your submission."
+
+**What remains before the second user installs:** Apple approves the review; Apple approves the unlisted request (the record then converts automatically); the owner presses Release; the App Store link goes to the second user. If Apple declines the unlisted request, the fallback decision - release publicly-but-obscure in Canada, or hold - is the owner's, on the facts of Apple's answer.
+
 ## 2026-08-21 - Wave 7 built and gated locally: the web client exists, and the API opened exactly two seams for it
 
 Full record: `docs/gates/wave-7.md`. The decisions, so they outlive the report:
