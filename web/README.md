@@ -40,6 +40,12 @@ the page goes live.
    with Apple grouped with the app id, register domain `keptapp.net` and
    return URL `https://keptapp.net/` , and complete Apple's domain
    verification.
+   ✅ *Done 2026-08-21 (browser session in the owner's signed-in portal):
+   Services ID `com.arthurzhang.kept.web` registered, Sign in with Apple
+   enabled and grouped with `<team-id>.com.arthurzhang.kept`, domain
+   `keptapp.net` and return URL `https://keptapp.net/` saved - re-read from
+   the portal on a fresh page load after the save. Apple demanded no
+   domain-verification file.*
 2. **Fly secrets:** `fly secrets set APPLE_WEB_CLIENT_ID="com.arthurzhang.kept.web" WEB_ORIGIN="https://keptapp.net"` -
    without these the API neither accepts web sign-ins nor answers the
    browser at all (exact-origin CORS, no origin configured means none

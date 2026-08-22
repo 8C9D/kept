@@ -187,6 +187,19 @@ grant and gives any other origin nothing. Steps 1, 4 and 5 remain the owner's;
 step 1's domain-verification leg may additionally wait on step 4 if Apple
 asks for a hosted verification file.*
 
+*Correction, 2026-08-21 (later the same evening, via a browser session in
+The owner's signed-in Apple portal): step 1 is done. The Services ID
+`com.arthurzhang.kept.web` ("Kept web") exists with Sign in with Apple
+enabled, grouped with primary App ID `<team-id>.com.arthurzhang.kept`,
+domain `keptapp.net` and return URL `https://keptapp.net/` - verified by
+re-opening the identifier fresh after the save and reading the stored
+configuration back, not by trusting the flow's own confirmation screen.
+Apple asked for no domain-verification file, so step 1 does not wait on
+step 4. In the same session the updated Program License Agreement was
+verified accepted (Agreements card: "Issued August 18, 2026. Accepted
+August 21, 2026"), which clears wave-6 step 18's first gate. Remaining:
+steps 4 and 5 - both behind the privacy page's contact address.*
+
 ## 5 · What I could not verify, and what it would take
 
 - **Sign in with Apple against real Apple, from a browser.** The Services
