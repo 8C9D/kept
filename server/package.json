@@ -20,6 +20,8 @@
     "storage:probe-keys": "tsx src/storage/keyNormalizationProbe.ts",
     "predev": "touch .env.local",
     "dev": "node --env-file=.env.local --import tsx src/index.ts",
+    "predev:session-token": "touch .env.local",
+    "dev:session-token": "node --env-file=.env.local --import tsx src/db/devSessionToken.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

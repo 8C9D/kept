@@ -57,6 +57,7 @@ export function createTestHarness(
   options: {
     edgeSharedSecret?: string;
     llmParseSweep?: LlmParseSweepHandle;
+    webOrigins?: readonly string[];
   } = {},
 ): TestHarness {
   const { db, pool } = createDb(TEST_DATABASE_URL);
@@ -71,6 +72,9 @@ export function createTestHarness(
     }),
     ...(options.llmParseSweep !== undefined && {
       llmParseSweep: options.llmParseSweep,
+    }),
+    ...(options.webOrigins !== undefined && {
+      webOrigins: options.webOrigins,
     }),
   });
 

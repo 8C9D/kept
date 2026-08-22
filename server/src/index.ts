@@ -45,6 +45,30 @@ const databaseUrl = process.env.DATABASE_URL as string;
 const sessionSecret = process.env.SESSION_JWT_SECRET as string;
 const appleClientId = process.env.APPLE_CLIENT_ID as string;
 
+// The web client's Sign in with Apple audience (wave 7): Apple mints web
+// identity tokens against a Services ID, not the app's bundle id, so the
+// verifier accepts either when this is set. Unset - today's production,
+// where the Services ID does not exist yet - the verifier accepts exactly
+// the iOS audience, unchanged.
+const appleWebClientId = process.env.APPLE_WEB_CLIENT_ID;
+const appleClientIds =
+  appleWebClientId !== undefined && appleWebClientId !== ""
+    ? [appleClientId, appleWebClientId]
+    : [appleClientId];
+
+// Browser origins the web client is served from, comma-separated. In
+// development the Vite dev server's origin is the default so a clean
+// checkout works (same reasoning as the MinIO default below); production
+// grants nothing until WEB_ORIGIN is deliberately set to the deployed
+// web client's origin.
+const configuredWebOrigin = process.env.WEB_ORIGIN;
+const webOrigins =
+  configuredWebOrigin !== undefined && configuredWebOrigin !== ""
+    ? configuredWebOrigin.split(",").map((origin) => origin.trim())
+    : process.env.NODE_ENV === "production"
+      ? []
+      : ["http://localhost:5173"];
+
 // Under NODE_ENV=production (the Dockerfile sets it) the deployed shape is
 // checked too: real storage configured over https, a non-loopback database,
 // a full-strength session secret. A no-op in local development.
@@ -219,16 +243,24 @@ if (llmParseSweep === undefined) {
   sweepTimer.unref();
 }
 
+if (webOrigins.length > 0) {
+  // Stated at boot like the storage default: which origins may call from a
+  // browser is part of the deployed shape, and a silent grant is how a
+  // stale WEB_ORIGIN outlives the web client it was set for.
+  console.log(`Web client CORS: allowing origin ${webOrigins.join(", ")}`);
+}
+
 const app = createApp({
   db,
   // Always the real verifier. Local development and tests inject fakes by
   // constructing their own app; this file offers no way to do so.
-  appleVerifier: createAppleIdentityVerifier(appleClientId),
+  appleVerifier: createAppleIdentityVerifier(appleClientIds),
   sessionTokens: createSessionTokens(sessionSecret),
   storage: createS3ObjectStorage(storageConfig),
   // Set once Cloudflare fronts the origin (see docs/Runbook.md); unset,
   // the origin answers anyone - correct for dev and for the first deploy.
   edgeSharedSecret: process.env.EDGE_SHARED_SECRET,
+  webOrigins,
   ...(llmParseSweep !== undefined && { llmParseSweep }),
 });
 

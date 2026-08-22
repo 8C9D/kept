@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { cors } from "hono/cors";
 import type { AppleIdentityVerifier } from "./auth/appleVerifier.js";
 import type { SessionTokens } from "./auth/session.js";
 import type { Db } from "./db/client.js";
@@ -46,6 +47,14 @@ export interface AppDependencies {
    * (productionEnv.ts refuses to start without the key).
    */
   llmParseSweep?: LlmParseSweepHandle;
+  /**
+   * Browser origins the web client (spec §7A) is served from - exactly
+   * these and no others are answered with CORS headers. Empty or absent
+   * means no CORS at all: the iOS client sends no Origin and needs none,
+   * so a deployment without a web client grants nothing. The list is
+   * configuration the entrypoint read (WEB_ORIGIN), never request data.
+   */
+  webOrigins?: readonly string[];
 }
 
 /**
@@ -139,6 +148,26 @@ export function createApp(deps: AppDependencies): Hono {
       }
       await next();
     });
+  }
+
+  // CORS for the web client (wave 7), and only when origins are configured:
+  // exact-match against the injected list, no wildcard, no reflection of an
+  // unknown Origin. Below the edge secret deliberately - a preflight is a
+  // request like any other and must arrive through Cloudflare, whose
+  // Transform Rule stamps the header on OPTIONS too. No `credentials`: the
+  // web client authenticates with the same bearer header the iOS client
+  // uses, so cookies never enter it.
+  const webOrigins = deps.webOrigins ?? [];
+  if (webOrigins.length > 0) {
+    app.use(
+      "*",
+      cors({
+        origin: (origin) => (webOrigins.includes(origin) ? origin : null),
+        allowMethods: ["GET", "POST", "PATCH", "DELETE"],
+        allowHeaders: ["Authorization", "Content-Type"],
+        maxAge: 600,
+      }),
+    );
   }
 
   // Ahead of every route, so an oversized body is refused before any
