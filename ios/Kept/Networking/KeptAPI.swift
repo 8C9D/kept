@@ -14,6 +14,7 @@ protocol KeptAPI: Sendable {
     func uploadImage(to target: UploadTarget, data: Data, contentType: ImageUploadContentType) async throws
     func createReceipt(_ request: CreateReceiptRequest) async throws -> Receipt
     func confirmReceipt(id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt
+    func deleteAccount(appleAuthorizationCode: String?) async throws
 }
 
 extension APIClient: KeptAPI {
@@ -70,5 +71,20 @@ extension APIClient: KeptAPI {
 
     func confirmReceipt(id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt {
         try await patch("/api/receipts/\(id.uuidString.lowercased())", body: request)
+    }
+
+    /// Destroys the account and every receipt in it. The code is a fresh,
+    /// single-use one from a Sign in with Apple re-authorization run moments
+    /// earlier, which the server exchanges to revoke the person's Apple
+    /// tokens; nil when that re-authorization did not produce one, and the
+    /// server deletes the account regardless (Apple's own guidance).
+    func deleteAccount(appleAuthorizationCode: String?) async throws {
+        struct Body: Encodable {
+            // Encoded with encodeIfPresent, so a nil code omits the key
+            // entirely - the server's strict schema allows an absent
+            // appleAuthorizationCode but rejects an explicit null.
+            let appleAuthorizationCode: String?
+        }
+        try await delete("/api/me", body: Body(appleAuthorizationCode: appleAuthorizationCode))
     }
 }

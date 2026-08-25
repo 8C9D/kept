@@ -26,11 +26,21 @@ export function App() {
   const [view, setView] = useState<View>({ name: "table" });
   // Bumped whenever another view changed data the table should re-fetch.
   const [dataVersion, setDataVersion] = useState(0);
+  // Account deletion, in the topbar: idle → confirming → deleting, with the
+  // same inline confirm the receipt detail's Delete uses rather than a
+  // modal. A separate value for the failure, because a refused deletion
+  // returns to idle with something to say.
+  const [deletion, setDeletion] = useState<
+    "idle" | "confirming" | "deleting"
+  >("idle");
+  const [deletionError, setDeletionError] = useState<string | null>(null);
 
   const signOut = useCallback(() => {
     clearToken();
     setToken(null);
     setView({ name: "table" });
+    setDeletion("idle");
+    setDeletionError(null);
   }, []);
 
   const api = useMemo(
@@ -50,6 +60,27 @@ export function App() {
   }
 
   const changed = () => setDataVersion((version) => version + 1);
+
+  // Bound here, where the early return above has already established there
+  // is one: narrowing on `api` does not follow into a closure.
+  const signedInApi = api;
+
+  async function deleteAccount() {
+    setDeletion("deleting");
+    setDeletionError(null);
+    try {
+      await signedInApi.deleteAccount();
+    } catch (error) {
+      setDeletion("idle");
+      setDeletionError(
+        error instanceof Error ? error.message : "The account was not deleted.",
+      );
+      return;
+    }
+    // The session token is dead the moment the user row is - every route
+    // 401s on it now - so the local copy goes with it.
+    signOut();
+  }
 
   return (
     <div className="app">
@@ -78,7 +109,29 @@ export function App() {
         <button className="signout" onClick={signOut}>
           Sign out
         </button>
+        {deletion === "idle" ? (
+          <button className="danger" onClick={() => setDeletion("confirming")}>
+            Delete account…
+          </button>
+        ) : deletion === "confirming" ? (
+          <span className="delete-confirm">
+            Permanently delete your account and every receipt in it, images
+            included? This cannot be undone - export first if you need the
+            records.
+            <button className="danger" onClick={() => void deleteAccount()}>
+              Delete account
+            </button>
+            <button onClick={() => setDeletion("idle")}>Keep my account</button>
+          </span>
+        ) : (
+          <span className="muted">Deleting your account…</span>
+        )}
       </header>
+      {deletionError !== null && (
+        <p className="error" role="alert">
+          Your account was not deleted: {deletionError}
+        </p>
+      )}
       <main>
         {view.name === "table" && (
           <ReceiptsTable

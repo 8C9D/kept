@@ -45,8 +45,25 @@ A missing one stops the process at startup with the name in the message, rather 
 | `EDGE_SHARED_SECRET` | no, but see below | Any random string. When set, the origin serves only requests carrying it in `x-kept-edge-secret`, which Cloudflare adds. Unset, the origin answers anyone who finds its `fly.dev` hostname |
 | `APPLE_WEB_CLIENT_ID` | no; required for web sign-in | The Apple Services ID the web client's Sign in with Apple mints tokens against (`com.arthurzhang.kept.web`). Unset, the verifier accepts exactly the iOS audience - the pre-wave-7 behaviour |
 | `WEB_ORIGIN` | no; required for the web client | Comma-separated browser origins granted CORS (`https://keptapp.net` once web/ is deployed). Unset in production nothing is granted; unset in development the Vite origin `http://localhost:5173` is the default |
+| `APPLE_TEAM_ID` | no; **all three or none**, and see below | The 10-character Team ID, the client secret's issuer |
+| `APPLE_SIGN_IN_KEY_ID` | no; all three or none | The 10-character Key ID of a *Sign in with Apple* key in the developer portal |
+| `APPLE_SIGN_IN_PRIVATE_KEY` | no; all three or none | The PKCS#8 PEM contents of that key's `.p8` file (Apple lets you download it once). Literal `\n` sequences are accepted in place of newlines |
 | `PORT` | no | Defaults to 3000 |
 | `NODE_ENV` | set by the Dockerfile | `production` turns on the deployed-shape checks in `src/productionEnv.ts` |
+
+**The three `APPLE_SIGN_IN_*` / `APPLE_TEAM_ID` variables together enable Sign in with Apple token revocation** on account deletion (`DELETE /api/me`, spec §6 and §10B).
+Set **all three or none**: a partial set throws at startup naming what is missing, because "revocation is off" and "revocation is misconfigured" look identical from outside and only one of them is a decision.
+Unset, the process prints `Sign in with Apple token revocation is DISABLED - ...` at boot and every account deletion logs the same fact at error level; **the account is still deleted**, which is Apple's own instruction for the case where nothing revocable is in hand.
+Deliberately **not** boot-blocking in production, unlike `ANTHROPIC_API_KEY`: this key exists only if Apple's portal has issued it, and round 2's lesson is that a boot-blocking requirement on something a third party grants trades a P1 for a P0.
+To set them:
+
+```bash
+fly secrets set APPLE_TEAM_ID=XXXXXXXXXX APPLE_SIGN_IN_KEY_ID=YYYYYYYYYY
+fly secrets set APPLE_SIGN_IN_PRIVATE_KEY="$(cat ~/Downloads/AuthKey_YYYYYYYYYY.p8)"
+```
+
+`client_id` is not among them: the revoker uses `APPLE_CLIENT_ID`, because native iOS authorization uses the **bundle id** as its client identifier and a Services ID there earns `invalid_client` from Apple.
+Confirm it took by watching the boot log for the absence of the DISABLED line - `fly logs` after the restart `fly secrets set` performs on its own.
 
 **Under `NODE_ENV=production` the server additionally refuses to start** if storage is unconfigured (there is no MinIO to fall back to), if `STORAGE_ENDPOINT` is not https (presigned URLs inherit it, so plain http would send receipt images in the clear), if `DATABASE_URL` is a loopback address, if the session secret is under 32 characters, or if `ANTHROPIC_API_KEY` is unset.
 

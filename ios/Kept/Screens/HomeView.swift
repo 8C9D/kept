@@ -19,6 +19,10 @@ struct HomeView: View {
     /// receipts landing server-side must not mean eighty full list
     /// reloads under the user's thumb (reviewer finding).
     @State private var listReloadDebounce: Task<Void, Never>?
+    /// Whether the account-deletion confirmation is up. Deliberately not
+    /// derived from any session state: the dialog is a question, and the
+    /// answer is what starts anything.
+    @State private var confirmingAccountDeletion = false
 
     /// Kept only to hand onward to the capture, confirm, and detail flows.
     private let api: APIClient
@@ -55,6 +59,15 @@ struct HomeView: View {
                     Button("Sign out", role: .destructive) {
                         session.signOut()
                     }
+                    // App Store Guideline 5.1.1(v): an app that creates
+                    // accounts must let a person delete theirs from inside
+                    // it. It sits beside Sign out because that is where
+                    // someone looks for "I am done with this app", and it is
+                    // last so the tap above it is the harmless one.
+                    Button("Delete account", role: .destructive) {
+                        confirmingAccountDeletion = true
+                    }
+                    .disabled(session.accountDeletion == .inProgress)
                 } label: {
                     Label("More", systemImage: "ellipsis.circle")
                 }
@@ -122,6 +135,52 @@ struct HomeView: View {
                 ConfirmQueueCover(api: api) {
                     showConfirmQueue = false
                     Task { await model.loadFirstPage() }
+                }
+            }
+            // Anchored to the List for the same reason the discard dialog
+            // above is: the toolbar Menu that raises it closes on tap, and a
+            // presentation modifier attached to a control that has gone away
+            // is fragile ground.
+            .confirmationDialog(
+                "Delete your account?",
+                isPresented: $confirmingAccountDeletion,
+                titleVisibility: .visible
+            ) {
+                Button("Delete account and all receipts", role: .destructive) {
+                    Task { await session.deleteAccount() }
+                }
+                Button("Keep my account", role: .cancel) {}
+            } message: {
+                // Says what goes, and names the way to keep a copy first.
+                // These are tax records: a dialog that only said "this
+                // cannot be undone" would be true and still not enough.
+                Text("This permanently deletes your Kept account and every receipt in it, including the images. It cannot be undone. If you need the records, run an export from the web app first.")
+            }
+            .alert(
+                "Your account was not deleted",
+                isPresented: Binding(
+                    get: { session.accountDeletion.failureMessage != nil },
+                    set: { if !$0 { session.clearAccountDeletionFailure() } }
+                )
+            ) {
+                Button("OK", role: .cancel) {
+                    session.clearAccountDeletionFailure()
+                }
+            } message: {
+                // The reason in the server's or the transport's own words,
+                // plus the fact that matters most: nothing was destroyed.
+                Text(session.accountDeletion.failureMessage ?? "")
+            }
+            .overlay {
+                if session.accountDeletion == .inProgress {
+                    // A deletion runs an Apple sheet and then a request; the
+                    // list underneath must not look tappable in between.
+                    ZStack {
+                        Color.black.opacity(0.25).ignoresSafeArea()
+                        CenteredProgressRow(label: "Deleting your account")
+                            .padding()
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    }
                 }
             }
         }

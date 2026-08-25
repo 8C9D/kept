@@ -1,5 +1,6 @@
 import {
   CreateBucketCommand,
+  DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
   PutObjectCommand,
@@ -148,6 +149,18 @@ export function createS3ObjectStorage(config: S3StorageConfig): ObjectStorage {
         throw new Error(`Object ${objectKey} returned no body`);
       }
       return response.Body.transformToByteArray();
+    },
+
+    async delete(objectKey) {
+      // No absence translation here, unlike `download` above: S3 and R2
+      // answer DeleteObject with 204 whether or not the key was there, so
+      // the interface's "deleting an absent key succeeds" rule is the
+      // store's own behaviour rather than something this adapter arranges.
+      // Everything that is a real failure - a refused credential, a wrong
+      // bucket, a timeout - rejects as itself, untouched.
+      await client.send(
+        new DeleteObjectCommand({ Bucket: bucket, Key: objectKey }),
+      );
     },
   };
 }

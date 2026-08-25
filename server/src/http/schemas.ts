@@ -241,3 +241,26 @@ export const updateMeSchema = z
   .refine((fields) => Object.keys(fields).length > 0, {
     error: "at least one field must be provided",
   });
+
+/**
+ * Account deletion. Every field is optional and there is deliberately no
+ * "confirm": true flag - a DELETE on your own account IS the confirmation,
+ * and the place a person is asked whether they mean it is the client's
+ * dialog, where they can read what happens.
+ *
+ * `appleAuthorizationCode` is a fresh, single-use code (Apple's own bound:
+ * five minutes, one use) from a Sign in with Apple re-authorization the
+ * client runs at deletion time, so the server can revoke the person's Apple
+ * tokens. Optional because a client that cannot mint one - the web client,
+ * which does not run the native flow - must still be able to delete the
+ * account: Apple's own guidance is that the deletion is fulfilled either
+ * way, and the omission is stated in the log rather than passed over.
+ *
+ * ⚠ Strict, like every schema here, and that is what refuses a user id: an
+ * account deletion is the most attractive place there is to smuggle one in,
+ * and the session token remains the only thing that says whose account this
+ * is (spec §6).
+ */
+export const deleteMeSchema = z.strictObject({
+  appleAuthorizationCode: z.string().min(1).max(2000).optional(),
+});

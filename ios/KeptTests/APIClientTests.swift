@@ -288,6 +288,63 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(items.first { $0.name == "limit" }?.value, "200")
     }
 
+    // MARK: - Account deletion
+
+    func testDeleteAccountSendsTheCodeAndAcceptsAnEmpty204() async throws {
+        // 204 No Content is the server's success shape. A client that ran
+        // the JSON decoder over it would turn the right answer into
+        // .undecodableResponse, which is why `delete` bypasses decoding.
+        let client = try makeClient()
+        transport.enqueue(status: 204, jsonBody: "")
+
+        try await client.deleteAccount(appleAuthorizationCode: "fresh-code")
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.httpMethod, "DELETE")
+        XCTAssertEqual(request.url?.path, "/api/me")
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Authorization"),
+            "Bearer stored-session-token"
+        )
+        let body = try XCTUnwrap(request.httpBody)
+        XCTAssertEqual(
+            String(decoding: body, as: UTF8.self),
+            #"{"appleAuthorizationCode":"fresh-code"}"#
+        )
+    }
+
+    func testDeleteAccountWithoutACodeOmitsTheKeyRatherThanSendingNull() async throws {
+        // The server's schema is strict: it allows an ABSENT
+        // appleAuthorizationCode and rejects an explicit null, so an
+        // encoder that wrote `null` would 400 the one deletion that most
+        // needs to succeed.
+        let client = try makeClient()
+        transport.enqueue(status: 204, jsonBody: "")
+
+        try await client.deleteAccount(appleAuthorizationCode: nil)
+
+        let request = try XCTUnwrap(transport.requests.first)
+        let body = try XCTUnwrap(request.httpBody)
+        XCTAssertEqual(String(decoding: body, as: UTF8.self), "{}")
+    }
+
+    func testDeleteAccountSurfacesTheServersRefusal() async throws {
+        let client = try makeClient()
+        transport.enqueue(
+            status: 400,
+            jsonBody: #"{"error":{"code":"invalid_request","message":"Unrecognized key"}}"#
+        )
+
+        do {
+            try await client.deleteAccount(appleAuthorizationCode: nil)
+            XCTFail("Expected the refusal to be thrown")
+        } catch APIError.requestFailed(let code, let message, let status) {
+            XCTAssertEqual(code, "invalid_request")
+            XCTAssertEqual(message, "Unrecognized key")
+            XCTAssertEqual(status, 400)
+        }
+    }
+
     // MARK: - Helpers
 
     private func assertThrowsSessionRejected(

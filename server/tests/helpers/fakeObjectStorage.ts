@@ -42,5 +42,11 @@ export function fakeObjectStorage(): FakeObjectStorage {
       }
       return data;
     },
+    async delete(objectKey: string) {
+      // Absent is success, per the ObjectStorage contract: the real adapter
+      // gets that from S3's own 204-either-way, and a fake that threw would
+      // let a test pass that production would fail.
+      objects.delete(objectKey);
+    },
   };
 }

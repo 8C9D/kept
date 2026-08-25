@@ -315,6 +315,48 @@ final class OutboxController: ObservableObject {
         rebuildEntries()
     }
 
+    /// Deletes every queued receipt belonging to an account the server has
+    /// just destroyed, images and all.
+    ///
+    /// The other human-initiated deletion above discards one item the person
+    /// looked at; this one is the local half of "delete my account and all
+    /// my receipts", and leaving these behind would break that sentence
+    /// twice over. The images would still be on the phone, and the items
+    /// could never drain: signing in again with the same Apple ID creates a
+    /// NEW user row with a new id, so every one of them would sit in the
+    /// queue forever under "captured under another account".
+    ///
+    /// An item whose file cannot be removed keeps its row and says so, the
+    /// same way discardBlockedItem does - a saved receipt never vanishes
+    /// without a human hearing about it (wave-5 kickoff §3), and that is no
+    /// less true when the vanishing was asked for.
+    func discardAll(ownedBy userId: UUID) async {
+        // Loaded first: a queue that has never been read from disk holds
+        // nothing in memory, and "delete everything" would silently delete
+        // the empty set.
+        do {
+            try await ensureLoaded()
+        } catch {
+            loadFailureNote = "Queued receipts could not be read from this phone: \(error.localizedDescription)"
+            rebuildEntries()
+            return
+        }
+
+        var failures = 0
+        for item in items where item.userId == userId {
+            do {
+                try await store.remove(itemId: item.id)
+                items.removeAll { $0.id == item.id }
+            } catch {
+                failures += 1
+            }
+        }
+        if failures > 0 {
+            drainFailureNote = "\(failures) queued \(failures == 1 ? "receipt" : "receipts") could not be removed from this phone."
+        }
+        rebuildEntries()
+    }
+
     // MARK: - Drain
 
     private func requestDrain() {

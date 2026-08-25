@@ -1,6 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
+import {
+  createAppleTokenRevoker,
+  type AppleSignInCredentials,
+} from "./auth/appleTokenRevoker.js";
 import { createAppleIdentityVerifier } from "./auth/appleVerifier.js";
 import { createSessionTokens } from "./auth/session.js";
 import { assertDatabaseReachable, createDb } from "./db/client.js";
@@ -55,6 +59,73 @@ const appleClientIds =
   appleWebClientId !== undefined && appleWebClientId !== ""
     ? [appleClientId, appleWebClientId]
     : [appleClientId];
+
+// Sign in with Apple token revocation, used by account deletion
+// (DELETE /api/me). Apple asks every app offering Sign in with Apple to
+// revoke the person's tokens when they delete their account, and doing so
+// needs a portal artifact nothing here can mint: a "Sign in with Apple" key
+// created in the developer portal, whose .p8 Apple lets you download once.
+//
+// All three or none. A partially configured key is the failure mode that
+// must not pass silently - the same rule resolveStorageConfig applies to
+// STORAGE_* - because "revocation is off" and "revocation is misconfigured"
+// look identical from the outside and only one of them is a decision.
+//
+// ⚠ Deliberately NOT boot-blocking in production, unlike ANTHROPIC_API_KEY.
+// Round 2 was burned making a boot-blocking requirement out of a permission
+// a third party grants (HeadBucket against R2), trading a P1 for a P0, and
+// this is that exact shape: the key exists only if Apple's portal has issued
+// it. Unconfigured, the server deletes accounts and logs - at error level,
+// per deletion - that the tokens were not revoked. Apple's own guidance is
+// that the deletion is fulfilled either way; a machine that refuses to boot
+// is not.
+const appleSignInKey = resolveAppleSignInKey(process.env, appleClientId);
+if (appleSignInKey === null) {
+  console.log(
+    "Sign in with Apple token revocation is DISABLED - APPLE_TEAM_ID, " +
+      "APPLE_SIGN_IN_KEY_ID and APPLE_SIGN_IN_PRIVATE_KEY are not set. " +
+      "Account deletion still deletes the account; it cannot revoke the " +
+      "person's Apple tokens (App Store Guideline 5.1.1(v)).",
+  );
+}
+
+/** All three key variables, or null for none; throws on a partial set. */
+function resolveAppleSignInKey(
+  env: Record<string, string | undefined>,
+  clientId: string,
+): AppleSignInCredentials | null {
+  const names = [
+    "APPLE_TEAM_ID",
+    "APPLE_SIGN_IN_KEY_ID",
+    "APPLE_SIGN_IN_PRIVATE_KEY",
+  ] as const;
+  const present = names.filter((name) => (env[name] ?? "") !== "");
+  if (present.length === 0) {
+    return null;
+  }
+  if (present.length < names.length) {
+    const missing = names.filter((name) => !present.includes(name));
+    throw new Error(
+      `Sign in with Apple revocation is partially configured; missing: ${missing.join(", ")}`,
+    );
+  }
+  return {
+    // The audience the authorization code was minted for. Native iOS
+    // authorization uses the bundle id as its client identifier, which is
+    // what APPLE_CLIENT_ID already holds; the Services ID would be wrong
+    // here and Apple answers `invalid_client` to it.
+    clientId,
+    teamId: env.APPLE_TEAM_ID as string,
+    keyId: env.APPLE_SIGN_IN_KEY_ID as string,
+    // Newlines survive `fly secrets set` but not every shell that sets an
+    // env var by hand, so an escaped-newline .p8 is accepted as itself
+    // rather than failing later as an unreadable key.
+    privateKey: (env.APPLE_SIGN_IN_PRIVATE_KEY as string).replaceAll(
+      "\\n",
+      "\n",
+    ),
+  };
+}
 
 // Browser origins the web client is served from, comma-separated. In
 // development the Vite dev server's origin is the default so a clean
@@ -262,6 +333,11 @@ const app = createApp({
   edgeSharedSecret: process.env.EDGE_SHARED_SECRET,
   webOrigins,
   ...(llmParseSweep !== undefined && { llmParseSweep }),
+  ...(appleSignInKey !== null && {
+    // Always the real revoker, for the verifier's reason: this file offers
+    // no way to construct a fake one.
+    appleTokenRevoker: createAppleTokenRevoker(appleSignInKey),
+  }),
 });
 
 const server = serve({ fetch: app.fetch, port }, (info) => {

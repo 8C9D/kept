@@ -20,6 +20,7 @@ final class StubKeptAPI: KeptAPI {
     var uploadImageHandler: ((_ target: UploadTarget, _ data: Data, _ contentType: ImageUploadContentType) async throws -> Void)?
     var createReceiptHandler: ((_ request: CreateReceiptRequest) async throws -> Receipt)?
     var confirmReceiptHandler: ((_ id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt)?
+    var deleteAccountHandler: ((_ appleAuthorizationCode: String?) async throws -> Void)?
 
     /// ReceiptListModel fetches its first page and the pending probe with
     /// `async let`, so two tasks call receiptsPage concurrently; the call
@@ -29,6 +30,7 @@ final class StubKeptAPI: KeptAPI {
     private var recordedReceiptsPageCalls: [(cursor: String?, status: ReceiptStatus?, limit: Int?)] = []
     private var recordedCreateReceiptCalls: [CreateReceiptRequest] = []
     private var recordedConfirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] = []
+    private var recordedDeleteAccountCalls: [String?] = []
 
     var receiptsPageCalls: [(cursor: String?, status: ReceiptStatus?, limit: Int?)] {
         callLock.withLock { recordedReceiptsPageCalls }
@@ -40,6 +42,13 @@ final class StubKeptAPI: KeptAPI {
 
     var confirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] {
         callLock.withLock { recordedConfirmReceiptCalls }
+    }
+
+    /// One entry per deleteAccount call, holding the authorization code the
+    /// caller passed - nil included, because "deleted without revoking" is a
+    /// distinct outcome worth asserting rather than an absent call.
+    var deleteAccountCalls: [String?] {
+        callLock.withLock { recordedDeleteAccountCalls }
     }
 
     func signInWithApple(identityToken: String, displayName: String?) async throws -> SignInResponse {
@@ -78,5 +87,11 @@ final class StubKeptAPI: KeptAPI {
         callLock.withLock { recordedConfirmReceiptCalls.append((id, request)) }
         guard let confirmReceiptHandler else { throw UnstubbedCall(endpoint: "confirmReceipt") }
         return try await confirmReceiptHandler(id, request)
+    }
+
+    func deleteAccount(appleAuthorizationCode: String?) async throws {
+        callLock.withLock { recordedDeleteAccountCalls.append(appleAuthorizationCode) }
+        guard let deleteAccountHandler else { throw UnstubbedCall(endpoint: "deleteAccount") }
+        try await deleteAccountHandler(appleAuthorizationCode)
     }
 }

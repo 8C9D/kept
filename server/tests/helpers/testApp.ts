@@ -15,6 +15,10 @@ import {
   users,
 } from "../../src/db/schema.js";
 import type { LlmParseSweepHandle } from "../../src/parse/llmParseSweep.js";
+import {
+  fakeAppleTokenRevoker,
+  type FakeAppleTokenRevoker,
+} from "./fakeAppleTokenRevoker.js";
 import { fakeAppleVerifier } from "./fakeAppleVerifier.js";
 import {
   fakeObjectStorage,
@@ -36,6 +40,12 @@ export interface TestHarness {
   app: Hono;
   db: ReturnType<typeof createDb>["db"];
   storage: FakeObjectStorage;
+  /**
+   * Present unless the harness was built with `appleTokenRevoker: false`,
+   * which is how a test reaches the unconfigured-key branch of account
+   * deletion.
+   */
+  appleTokenRevoker: FakeAppleTokenRevoker | undefined;
   /** Empties all tables; call before each test for a known-blank slate. */
   resetDatabase(): Promise<void>;
   /** Signs in through the real auth route. */
@@ -58,15 +68,20 @@ export function createTestHarness(
     edgeSharedSecret?: string;
     llmParseSweep?: LlmParseSweepHandle;
     webOrigins?: readonly string[];
+    /** False builds an app with no revoker, as an unconfigured key would. */
+    appleTokenRevoker?: false;
   } = {},
 ): TestHarness {
   const { db, pool } = createDb(TEST_DATABASE_URL);
   const storage = fakeObjectStorage();
+  const revoker =
+    options.appleTokenRevoker === false ? undefined : fakeAppleTokenRevoker();
   const app = createApp({
     db,
     appleVerifier: fakeAppleVerifier(),
     sessionTokens: createSessionTokens(TEST_SESSION_SECRET),
     storage,
+    ...(revoker !== undefined && { appleTokenRevoker: revoker }),
     ...(options.edgeSharedSecret !== undefined && {
       edgeSharedSecret: options.edgeSharedSecret,
     }),
@@ -82,6 +97,7 @@ export function createTestHarness(
     app,
     db,
     storage,
+    appleTokenRevoker: revoker,
 
     async resetDatabase() {
       // Child tables first; no CASCADE so an unexpected new table cannot be
@@ -91,6 +107,10 @@ export function createTestHarness(
       await db.delete(exportJobs);
       await db.delete(users);
       storage.objects.clear();
+      if (revoker !== undefined) {
+        revoker.codes.length = 0;
+        revoker.failure = undefined;
+      }
     },
 
     async signIn(appleSub: string, displayName?: string) {

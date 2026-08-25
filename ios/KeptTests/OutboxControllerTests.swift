@@ -387,6 +387,38 @@ final class OutboxControllerTests: XCTestCase {
         XCTAssertTrue(controller.entries.isEmpty)
     }
 
+    func testAccountDeletionDiscardsThatUsersQueueAndNobodyElses() async {
+        // The local half of "delete my account and all my receipts". These
+        // items could never drain anyway - signing in again with the same
+        // Apple ID creates a NEW user row with a new id - so leaving them
+        // would park the images on the phone forever, labelled as another
+        // account's.
+        let mine = seededItem(userId: Self.userA, sequence: 1, progress: .captured)
+        let alsoMine = seededItem(
+            userId: Self.userA,
+            sequence: 2,
+            sha256: "feed0001",
+            progress: .captured,
+            blockedMessage: "The saved image for this receipt could not be read back from this phone."
+        )
+        let theirs = seededItem(
+            userId: Self.userB,
+            sequence: 3,
+            sha256: "feed0002",
+            progress: .captured
+        )
+        store.seed(mine, imageData: Data("mine".utf8))
+        store.seed(alsoMine, imageData: Data("also mine".utf8))
+        store.seed(theirs, imageData: Data("theirs".utf8))
+        let controller = await makeController(started: false)
+
+        await controller.discardAll(ownedBy: Self.userA)
+
+        XCTAssertEqual(Array(store.items.keys), [theirs.id])
+        XCTAssertEqual(store.images.count, 1, "the other account's image is untouched")
+        XCTAssertTrue(controller.entries.isEmpty, "the signed-in user's queue is empty")
+    }
+
     func testDiscardRefusesItemsThatAreNotBlocked() async throws {
         api.createReceiptHandler = { _ in throw APIError.network(URLError(.notConnectedToInternet)) }
         let controller = await makeController()

@@ -44,6 +44,23 @@ export interface ObjectStorage {
    * trade.
    */
   download(objectKey: string): Promise<Uint8Array>;
+  /**
+   * Server-side erase, used by account deletion (spec §6, `DELETE /api/me`)
+   * and by nothing else. Receipt deletion is soft - CRA retention makes a
+   * per-receipt hard delete off the table (§10B) - so this exists for the
+   * one act that is not retention-governed: a person destroying their own
+   * account, which App Store Guideline 5.1.1(v) requires be possible from
+   * inside the app.
+   *
+   * ⚠ Idempotent by contract: deleting a key that is not there SUCCEEDS.
+   * That is the opposite of `download`'s rule above, and deliberately so.
+   * There, absence is a fact a caller must be able to act on - it decides
+   * whether to tell a person to delete a receipt. Here, absence is the
+   * outcome being asked for, and a deleter that threw on it would turn the
+   * ordinary case (an upload that never finished, a re-run after a partial
+   * failure) into a reported failure of the whole deletion.
+   */
+  delete(objectKey: string): Promise<void>;
 }
 
 /**
@@ -87,5 +104,6 @@ export function unconfiguredObjectStorage(): ObjectStorage {
     presignDownload: async () => fail(),
     upload: async () => fail(),
     download: async () => fail(),
+    delete: async () => fail(),
   };
 }

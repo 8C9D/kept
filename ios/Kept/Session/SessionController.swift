@@ -15,11 +15,32 @@ final class SessionController: ObservableObject {
         case signedIn
     }
 
+    /// Where an account deletion is, as one value rather than a pair of
+    /// booleans - same reasoning as State above. Deliberately NOT a fourth
+    /// case of State: "who is signed in" and "is a destructive request in
+    /// flight" are different questions, and folding them would make every
+    /// switch on State answer both.
+    enum AccountDeletion: Equatable {
+        case idle
+        case inProgress
+        /// The deletion did not happen, and this says why. The person is
+        /// still signed in with everything intact.
+        case failed(String)
+
+        /// The reason, when there is one - the shape a SwiftUI alert binding
+        /// needs, so the view does not pattern-match the enum inline.
+        var failureMessage: String? {
+            if case .failed(let message) = self { return message }
+            return nil
+        }
+    }
+
     @Published private(set) var state: State
     /// Why the user is looking at the sign-in screen, when there is a
     /// reason worth stating: a failed sign-in, an expired session. Cleared
     /// when a new attempt starts.
     @Published private(set) var signInMessage: String?
+    @Published private(set) var accountDeletion: AccountDeletion = .idle
 
     /// Fired after a sign-in completes. Wired by the composition root to
     /// wake the outbox: receipts queued when a session expired resume
@@ -31,12 +52,26 @@ final class SessionController: ObservableObject {
     /// displaying the departed user's queue.
     var onSignedOut: (() -> Void)?
 
+    /// Fired after the server has destroyed an account, with the id of the
+    /// user it destroyed, BEFORE the sign-out that follows. The outbox
+    /// discards that user's queued receipts: "delete everything" has to mean
+    /// the images still on this phone too, and an item tagged with a user id
+    /// that no longer exists could never upload - it would sit in the queue
+    /// forever, labelled as another account's.
+    var onAccountDeleted: ((UUID) -> Void)?
+
     private let api: any KeptAPI
     private let tokenStore: SessionTokenStore
+    private let reauthorization: any AppleReauthorizing
 
-    init(api: any KeptAPI, tokenStore: SessionTokenStore) {
+    init(
+        api: any KeptAPI,
+        tokenStore: SessionTokenStore,
+        reauthorization: any AppleReauthorizing
+    ) {
         self.api = api
         self.tokenStore = tokenStore
+        self.reauthorization = reauthorization
         // Cold launch: a stored token is a live session until the server
         // says otherwise - the first 401 will land in handleSessionRejected.
         do {
@@ -118,6 +153,88 @@ final class SessionController: ObservableObject {
     /// User-initiated sign-out from the Home menu.
     func signOut() {
         transitionToSignedOut(message: nil)
+    }
+
+    // MARK: - Deleting the account
+
+    /// Destroys the account and every receipt in it, after Home's
+    /// confirmation dialog has said so in those words. App Store Guideline
+    /// 5.1.1(v) requires this to exist inside the app; the sequence is:
+    ///
+    ///   1. Re-authorize with Apple, for a fresh single-use code the server
+    ///      exchanges to revoke this person's Apple tokens. Dismissing that
+    ///      sheet CANCELS the deletion - it is the last point at which the
+    ///      person can still change their mind, and honouring it costs
+    ///      nothing.
+    ///   2. DELETE /api/me. The server destroys the rows and the images.
+    ///   3. Sign out locally, and tell the outbox to discard this user's
+    ///      queued receipts.
+    ///
+    /// A re-authorization that fails for any OTHER reason does not stop the
+    /// deletion: the request goes without a code and the server records that
+    /// the tokens were not revoked. Apple's own guidance is to fulfil the
+    /// deletion regardless, and a person who cannot delete their account
+    /// because Apple's sheet errored is exactly what the guideline forbids.
+    func deleteAccount() async {
+        guard state == .signedIn, accountDeletion != .inProgress else { return }
+        accountDeletion = .inProgress
+
+        // Read while the token is still there: after the sign-out below
+        // there is nothing left to read the id from, and the outbox needs it
+        // to know whose queued receipts to discard.
+        let deletedUserId = currentUserId()
+
+        let code: String?
+        do {
+            code = try await reauthorization.authorizationCode()
+        } catch AppleReauthorizationError.cancelled {
+            accountDeletion = .idle
+            return
+        } catch {
+            // Not swallowed signal, and not dropped: the deletion goes ahead
+            // without a code, and the SERVER records - at error level, on the
+            // machine where it can be read - that the tokens were not
+            // revoked. Stopping here instead would leave a person unable to
+            // delete their account because Apple's sheet misbehaved.
+            code = nil
+        }
+
+        do {
+            try await api.deleteAccount(appleAuthorizationCode: code)
+        } catch APIError.sessionRejected {
+            // The client has already cleared the session and returned to
+            // signed-out through handleSessionRejected; saying "deletion
+            // failed" on top of "your session expired" would be two
+            // contradictory sentences about one event.
+            accountDeletion = .idle
+            return
+        } catch {
+            accountDeletion = .failed(error.localizedDescription)
+            return
+        }
+
+        accountDeletion = .idle
+        if let deletedUserId {
+            onAccountDeleted?(deletedUserId)
+        }
+        transitionToSignedOut(message: "Your account and all its receipts have been deleted.")
+    }
+
+    /// Dismisses the failure notice; the account is untouched either way.
+    func clearAccountDeletionFailure() {
+        if case .failed = accountDeletion {
+            accountDeletion = .idle
+        }
+    }
+
+    /// Who the stored session says is signed in, or nil if there is no
+    /// readable token. A keychain read that fails is not worth surfacing
+    /// here: the request that follows will fail on its own and say so.
+    private func currentUserId() -> UUID? {
+        // `try?` flattens here: an unreadable keychain and an absent token
+        // both arrive as nil, which is the same answer for this purpose.
+        guard let token = try? tokenStore.load() else { return nil }
+        return SessionTokenClaims.userId(inToken: token)
     }
 
     private func transitionToSignedOut(message: String?) {

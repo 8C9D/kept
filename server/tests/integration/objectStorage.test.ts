@@ -99,6 +99,43 @@ describe("s3ObjectStorage against MinIO", () => {
     expect((error as Error).cause).toMatchObject({ name: "NoSuchKey" });
   });
 
+  it("delete erases the bytes, and deleting an absent key succeeds", async () => {
+    // Both halves against the real store, because the second is the one a
+    // fake can only assert by fiat - and it is a contract this codebase
+    // depends on: account deletion (DELETE /api/me) walks a list of keys
+    // that includes uploads which never finished, and a deleter that threw
+    // on absence would report the ordinary case as a failed deletion.
+    const objectKey = `${runPrefix}/2026/08/to-be-deleted.jpg`;
+    await storage.upload(objectKey, new Uint8Array([7, 7, 7]), "image/jpeg");
+    expect(await storage.download(objectKey)).toEqual(new Uint8Array([7, 7, 7]));
+
+    await storage.delete(objectKey);
+    await expect(storage.download(objectKey)).rejects.toBeInstanceOf(
+      ObjectNotFoundError,
+    );
+    await expect(storage.delete(objectKey)).resolves.toBeUndefined();
+    await expect(
+      storage.delete(`${runPrefix}/2026/08/never-existed.jpg`),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not report a refused credential as a successful delete", async () => {
+    // The other side of the idempotence above. "Absent is success" must not
+    // widen into "any failure is success": a token that may not delete has
+    // to reject, or account deletion would report objects erased that are
+    // still sitting in the bucket.
+    const objectKey = `${runPrefix}/2026/08/delete-credential-check.jpg`;
+    await storage.upload(objectKey, new Uint8Array([1, 2, 3]), "image/jpeg");
+    const wrongCredential = createS3ObjectStorage({
+      ...LOCAL_DEV_STORAGE_CONFIG,
+      secretAccessKey: "not-the-secret",
+    });
+
+    await expect(wrongCredential.delete(objectKey)).rejects.toThrow();
+    // And the object is still there, which is what the rejection claimed.
+    expect(await storage.download(objectKey)).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
   it("does not report a refused credential as an absent object", async () => {
     // The other half of the same distinction, and the half a fake cannot
     // test: a real client, a real failure that is not absence. Nothing but a

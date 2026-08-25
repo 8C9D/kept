@@ -79,6 +79,19 @@ export class KeptApi {
     return this.request<Profile>("GET", "/api/me");
   }
 
+  /**
+   * Destroys the account and every receipt in it (spec §6).
+   *
+   * No Apple authorization code goes with it: this client runs no native
+   * Sign in with Apple re-authorization, so it has nothing revocable to
+   * hand over. The server deletes the account either way - Apple's own
+   * guidance - and records that the tokens were not revoked. The iOS client
+   * is the one that supplies a code.
+   */
+  async deleteAccount(): Promise<void> {
+    await this.request<void>("DELETE", "/api/me");
+  }
+
   listReceipts(
     filters: ListFilters,
     cursor: string | null,

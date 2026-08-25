@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
+import type { AppleTokenRevoker } from "./auth/appleTokenRevoker.js";
 import type { AppleIdentityVerifier } from "./auth/appleVerifier.js";
 import type { SessionTokens } from "./auth/session.js";
 import type { Db } from "./db/client.js";
@@ -55,6 +56,21 @@ export interface AppDependencies {
    * configuration the entrypoint read (WEB_ORIGIN), never request data.
    */
   webOrigins?: readonly string[];
+  /**
+   * Revokes a person's Sign in with Apple tokens when they delete their
+   * account (`DELETE /api/me`), which Apple asks of every app offering
+   * Sign in with Apple. Optional, and injected on exactly the same terms as
+   * the verifier above: tests hand in a fake, the production entrypoint
+   * always builds the real one, and no configuration value swaps them.
+   *
+   * Absent means no portal key is configured - local development, and any
+   * deployment before APPLE_TEAM_ID / APPLE_SIGN_IN_KEY_ID /
+   * APPLE_SIGN_IN_PRIVATE_KEY are set. Deletion then still happens (Apple's
+   * own guidance: fulfil the request either way) and the route says so at
+   * error level, because an app that quietly stops revoking looks exactly
+   * like one that never did.
+   */
+  appleTokenRevoker?: AppleTokenRevoker;
 }
 
 /**

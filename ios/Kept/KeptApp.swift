@@ -30,7 +30,13 @@ final class AppEnvironment: ObservableObject {
             tokenStore: tokenStore,
             rejectionRelay: rejectionRelay
         )
-        let session = SessionController(api: api, tokenStore: tokenStore)
+        let session = SessionController(
+            api: api,
+            tokenStore: tokenStore,
+            // Account deletion re-authorizes with Apple for a code the
+            // server can revoke; nothing else in the app uses this.
+            reauthorization: AppleIDReauthorization()
+        )
         let outbox = OutboxController(
             store: FileOutboxStore(),
             api: api,
@@ -53,6 +59,11 @@ final class AppEnvironment: ObservableObject {
         }
         session.onSignedOut = { [weak outbox] in
             outbox?.sessionDidEnd()
+        }
+        // Fires before the sign-out above: the queue's own copies of the
+        // deleted account's receipts go with the account.
+        session.onAccountDeleted = { [weak outbox] userId in
+            Task { await outbox?.discardAll(ownedBy: userId) }
         }
 
         self.serverConfig = serverConfig

@@ -71,6 +71,15 @@ final class APIClient: Sendable {
         return try await perform(method: "PATCH", path: path, query: [], body: bodyData, requiresSession: true)
     }
 
+    /// DELETE with a JSON body and no response body. Separate from
+    /// `perform` because 204 No Content is the success shape here - there is
+    /// nothing to decode, and a decoder pointed at an empty body would turn
+    /// the server's correct answer into `.undecodableResponse`.
+    func delete<Body: Encodable>(_ path: String, body: Body) async throws {
+        let bodyData = try Self.encoder.encode(body)
+        _ = try await send(method: "DELETE", path: path, query: [], body: bodyData, requiresSession: true)
+    }
+
     /// The one non-API request in the app: uploading image bytes to the
     /// presigned URL the server issued. The URL is absolute (it points at
     /// object storage, not the API), authorization is in its signature -
@@ -102,6 +111,31 @@ final class APIClient: Sendable {
         body: Data?,
         requiresSession: Bool
     ) async throws -> Response {
+        let data = try await send(
+            method: method,
+            path: path,
+            query: query,
+            body: body,
+            requiresSession: requiresSession
+        )
+        do {
+            return try Self.decoder.decode(Response.self, from: data)
+        } catch let decodingError as DecodingError {
+            throw APIError.undecodableResponse(decodingError)
+        }
+    }
+
+    /// Everything up to and including "did the server accept this": auth
+    /// attached, transport failures mapped, a non-2xx turned into the right
+    /// APIError. What the caller does with the bytes is the caller's - which
+    /// is the whole difference between `perform` above and `delete`.
+    private func send(
+        method: String,
+        path: String,
+        query: [URLQueryItem],
+        body: Data?,
+        requiresSession: Bool
+    ) async throws -> Data {
         var request = URLRequest(url: url(path: path, query: query))
         request.httpMethod = method
         if let body {
@@ -131,12 +165,7 @@ final class APIClient: Sendable {
         guard (200..<300).contains(response.statusCode) else {
             throw await mapFailure(status: response.statusCode, data: data, requiresSession: requiresSession)
         }
-
-        do {
-            return try Self.decoder.decode(Response.self, from: data)
-        } catch let decodingError as DecodingError {
-            throw APIError.undecodableResponse(decodingError)
-        }
+        return data
     }
 
     private func url(path: String, query: [URLQueryItem]) -> URL {

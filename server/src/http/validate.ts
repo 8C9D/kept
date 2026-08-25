@@ -30,6 +30,26 @@ export async function readJsonBody(c: Context): Promise<unknown> {
 }
 
 /**
+ * The same, for a route whose body is optional: DELETE /api/me carries one
+ * only when the client has an Apple authorization code to hand over, and
+ * `c.req.json()` treats an absent body as malformed JSON. An EMPTY body
+ * becomes an empty object - which the route's strict schema then validates
+ * like any other - while a non-empty body that is not JSON is still the 400
+ * it is. "No body" and "junk body" stay different answers.
+ */
+export async function readOptionalJsonBody(c: Context): Promise<unknown> {
+  const raw = await c.req.text();
+  if (raw.trim() === "") {
+    return {};
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new ApiError(400, "invalid_request", "Request body must be JSON");
+  }
+}
+
+/**
  * Every request body and query string is parsed through a strict zod schema
  * before it reaches domain code; nothing downstream ever sees unvalidated
  * input (framework §10.2, "untyped boundaries").
