@@ -286,6 +286,9 @@ final class APIClientTests: XCTestCase {
                 search: "  maple  ",
                 status: .pending,
                 category: "Office supplies",
+                paymentMethod: "Visa ending 3735",
+                from: "2026-01-01",
+                to: "2026-03-31",
                 sort: .total,
                 order: .asc
             ),
@@ -303,9 +306,33 @@ final class APIClientTests: XCTestCase {
         // literally, and normalizing here would silently miss a category
         // the person actually typed.
         XCTAssertEqual(items.first { $0.name == "category" }?.value, "Office supplies")
+        XCTAssertEqual(items.first { $0.name == "paymentMethod" }?.value, "Visa ending 3735")
+        // Inclusive purchased_at bounds, in the API's own yyyy-mm-dd.
+        XCTAssertEqual(items.first { $0.name == "from" }?.value, "2026-01-01")
+        XCTAssertEqual(items.first { $0.name == "to" }?.value, "2026-03-31")
         XCTAssertEqual(items.first { $0.name == "sort" }?.value, "total")
         XCTAssertEqual(items.first { $0.name == "order" }?.value, "asc")
         XCTAssertEqual(items.first { $0.name == "limit" }?.value, "200")
+    }
+
+    /// One end of a range on its own is a legitimate question ("everything
+    /// since April"), and the other end must then be absent rather than
+    /// sent empty - the server's schema is strict.
+    func testHalfOpenDateRangesSendOnlyTheBoundThatIsSet() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: emptyPageJSON)
+
+        _ = try await client.receiptsPage(
+            cursor: nil,
+            query: ReceiptQuery(from: "2026-04-01"),
+            limit: nil
+        )
+
+        let url = try XCTUnwrap(transport.requests.first?.url)
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let items = try XCTUnwrap(components.queryItems)
+        XCTAssertEqual(items.map(\.name).sorted(), ["from", "order", "sort"])
+        XCTAssertEqual(items.first { $0.name == "from" }?.value, "2026-04-01")
     }
 
     func testTheDefaultListQuerySendsOnlyTheOrderingItPinsOn() async throws {

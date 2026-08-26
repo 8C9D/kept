@@ -110,13 +110,11 @@ final class ReceiptListModel: ObservableObject {
     /// actually changed, so the view can call it freely - including the
     /// first time the field appears, which is not a search.
     func applySearch() async {
-        let pending = ReceiptQuery(
-            search: searchText,
-            status: query.status,
-            category: query.category,
-            sort: query.sort,
-            order: query.order
-        )
+        // Copied from the current query and amended, never rebuilt field
+        // by field: a rebuild silently resets whatever the next filter to
+        // be added forgets to list.
+        var pending = query
+        pending.search = searchText
         guard pending.searchTerm != query.searchTerm else { return }
         await apply(pending)
     }
@@ -130,6 +128,23 @@ final class ReceiptListModel: ObservableObject {
     func setCategory(_ category: String?) async {
         var pending = query
         pending.category = category
+        await apply(pending)
+    }
+
+    func setPaymentMethod(_ paymentMethod: String?) async {
+        var pending = query
+        pending.paymentMethod = paymentMethod
+        await apply(pending)
+    }
+
+    /// Both bounds in one call: the range sheet applies its two pickers
+    /// together, so a range being narrowed costs one request rather than
+    /// one per end - and never passes through a half-applied range that
+    /// would fetch rows nobody asked for.
+    func setDateRange(from: String?, to: String?) async {
+        var pending = query
+        pending.from = from
+        pending.to = to
         await apply(pending)
     }
 
@@ -152,6 +167,9 @@ final class ReceiptListModel: ObservableObject {
         pending.search = ""
         pending.status = nil
         pending.category = nil
+        pending.paymentMethod = nil
+        pending.from = nil
+        pending.to = nil
         searchText = ""
         await apply(pending)
     }

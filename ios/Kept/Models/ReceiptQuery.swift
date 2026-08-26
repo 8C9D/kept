@@ -57,6 +57,15 @@ struct ReceiptQuery: Equatable {
     /// GET /api/receipts/options serves. Never normalized here - the
     /// person's category is whatever they typed.
     var category: String?
+    /// The same rule as `category`, over the other reusable free-text
+    /// field.
+    var paymentMethod: String?
+    /// Inclusive `purchased_at` bounds as yyyy-mm-dd - the date on the
+    /// receipt, not the day it was scanned, whatever `sort` is set to.
+    /// Each side is independently optional: "everything since April" and
+    /// "everything up to year end" are both real questions.
+    var from: String?
+    var to: String?
     var sort: Sort = .purchasedAt
     var order: Order = .desc
 
@@ -73,13 +82,49 @@ struct ReceiptQuery: Equatable {
     /// what the toolbar badge keys off, so the person can see that rows
     /// are missing on purpose.
     var isFiltering: Bool {
-        searchTerm != nil || status != nil || category != nil
+        searchTerm != nil
+            || status != nil
+            || category != nil
+            || paymentMethod != nil
+            || from != nil
+            || to != nil
+    }
+
+    /// A range whose start is after its end. The server answers it
+    /// honestly with nothing, which on screen is indistinguishable from
+    /// "you have no receipts in April" - so the screen says which.
+    var hasImpossibleDateRange: Bool {
+        guard let from, let to else { return false }
+        // Both are yyyy-mm-dd, so lexical order is calendar order.
+        return from > to
+    }
+
+    /// How the applied range reads on the control that opens it. The
+    /// locale parameter exists for tests, which pin one; the app always
+    /// uses the person's.
+    func dateRangeLabel(locale: Locale = .autoupdatingCurrent) -> String {
+        switch (from, to) {
+        case (nil, nil):
+            return "Any date"
+        case (let from?, nil):
+            return "From \(ReceiptFormat.purchaseDate(from, locale: locale))"
+        case (nil, let to?):
+            return "Until \(ReceiptFormat.purchaseDate(to, locale: locale))"
+        case (let from?, let to?):
+            // Spelled out on both ends rather than abbreviated to a shared
+            // year: a range is the filter most likely to be wrong by a
+            // year, and this is where it would show.
+            return "\(ReceiptFormat.purchaseDate(from, locale: locale)) - "
+                + ReceiptFormat.purchaseDate(to, locale: locale)
+        }
     }
 
     /// `sort` and `order` are always sent, including at their defaults:
     /// the cursor encodes what it was minted under, and a request that
     /// omitted them would rely on the server's default matching this
-    /// client's forever.
+    /// client's forever. Everything else is sent only when set - the
+    /// server's schema is strict and rejects an empty `q`, `category` or
+    /// `paymentMethod`.
     var queryItems: [URLQueryItem] {
         var items: [URLQueryItem] = []
         if let searchTerm {
@@ -90,6 +135,15 @@ struct ReceiptQuery: Equatable {
         }
         if let category {
             items.append(URLQueryItem(name: "category", value: category))
+        }
+        if let paymentMethod {
+            items.append(URLQueryItem(name: "paymentMethod", value: paymentMethod))
+        }
+        if let from {
+            items.append(URLQueryItem(name: "from", value: from))
+        }
+        if let to {
+            items.append(URLQueryItem(name: "to", value: to))
         }
         items.append(URLQueryItem(name: "sort", value: sort.rawValue))
         items.append(URLQueryItem(name: "order", value: order.rawValue))

@@ -19,6 +19,12 @@ final class ConfirmQueueModelTests: XCTestCase {
             XCTAssertEqual(query.status, .pending)
             XCTAssertNil(query.searchTerm)
             XCTAssertNil(query.category)
+            XCTAssertNil(query.paymentMethod)
+            // No date bounds either: the queue works the whole pending
+            // pile, and a range left over from Home's filters would hide
+            // receipts the §5.2a badge is still counting.
+            XCTAssertNil(query.from)
+            XCTAssertNil(query.to)
             XCTAssertEqual(query.sort, .purchasedAt)
             XCTAssertEqual(query.order, .desc)
             return Fixtures.page(receipts, pendingCount: pendingCount)

@@ -230,11 +230,93 @@ final class ReceiptListModelTests: XCTestCase {
         // data and the server matches it literally.
         XCTAssertEqual(api.receiptsPageCalls.last?.query.category, "Office  supplies")
 
+        await model.setPaymentMethod("Visa ending 3735")
+        XCTAssertEqual(api.receiptsPageCalls.last?.query.paymentMethod, "Visa ending 3735")
+
+        await model.setDateRange(from: "2026-01-01", to: "2026-03-31")
+        XCTAssertEqual(api.receiptsPageCalls.last?.query.from, "2026-01-01")
+        XCTAssertEqual(api.receiptsPageCalls.last?.query.to, "2026-03-31")
+
         await model.setOrder(.asc)
         XCTAssertEqual(api.receiptsPageCalls.last?.query.order, .asc)
 
         // Every one of them asked from the top.
         XCTAssertTrue(api.receiptsPageCalls.allSatisfy { $0.cursor == nil })
+        // And each one narrowed rather than replaced: the filters set
+        // earlier are still on the last request.
+        let last = api.receiptsPageCalls.last?.query
+        XCTAssertEqual(last?.status, .pending)
+        XCTAssertEqual(last?.category, "Office  supplies")
+        XCTAssertEqual(last?.paymentMethod, "Visa ending 3735")
+    }
+
+    /// The range sheet applies both ends together, so narrowing a range
+    /// costs one request - and one paging restart - not one per end.
+    func testTheDateRangeAppliesBothEndsInOneRequest() async {
+        let firstSet = Fixtures.receipt()
+        let inRange = Fixtures.receipt()
+        api.receiptsPageHandler = { cursor, query, _ in
+            guard query.from != nil || query.to != nil else {
+                return Fixtures.page([firstSet], nextCursor: "cursor-page-2", pendingCount: 1)
+            }
+            XCTAssertNil(cursor, "a filter change must not reuse the old list's cursor")
+            return Fixtures.page([inRange], pendingCount: 1)
+        }
+        let model = makeModel()
+        await model.loadFirstPage()
+        let callsBefore = api.receiptsPageCalls.count
+
+        await model.setDateRange(from: "2026-01-01", to: "2026-03-31")
+
+        XCTAssertEqual(api.receiptsPageCalls.count, callsBefore + 1)
+        XCTAssertEqual(model.receipts, [inRange], "the narrowed list replaces, never appends")
+        XCTAssertEqual(model.nextPage, .idle)
+        XCTAssertTrue(model.query.isFiltering)
+    }
+
+    /// One bound on its own is a legitimate question, and clearing one end
+    /// must leave the other standing.
+    func testEachEndOfTheRangeIsIndependentlyClearable() async {
+        stubPages(byCursor: [nil: Fixtures.page([Fixtures.receipt()])])
+        let model = makeModel()
+        await model.loadFirstPage()
+
+        await model.setDateRange(from: "2026-04-01", to: nil)
+        XCTAssertEqual(model.query.from, "2026-04-01")
+        XCTAssertNil(model.query.to)
+        XCTAssertTrue(model.query.isFiltering)
+
+        await model.setDateRange(from: nil, to: "2026-12-31")
+        XCTAssertNil(model.query.from)
+        XCTAssertEqual(model.query.to, "2026-12-31")
+        XCTAssertTrue(model.query.isFiltering)
+
+        await model.setDateRange(from: nil, to: nil)
+        XCTAssertFalse(model.query.isFiltering)
+    }
+
+    /// The fragility this pins: `applySearch` used to rebuild the query
+    /// field by field, so every filter it forgot to list was silently
+    /// reset the next time anyone typed in the search box.
+    func testSearchingDoesNotDropTheFiltersAlreadyApplied() async {
+        stubPages(byCursor: [nil: Fixtures.page([Fixtures.receipt()])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        await model.setStatus(.confirmed)
+        await model.setCategory("meals")
+        await model.setPaymentMethod("Visa")
+        await model.setDateRange(from: "2026-01-01", to: "2026-03-31")
+
+        model.searchText = "maple"
+        await model.applySearch()
+
+        let sent = api.receiptsPageCalls.last?.query
+        XCTAssertEqual(sent?.searchTerm, "maple")
+        XCTAssertEqual(sent?.status, .confirmed)
+        XCTAssertEqual(sent?.category, "meals")
+        XCTAssertEqual(sent?.paymentMethod, "Visa")
+        XCTAssertEqual(sent?.from, "2026-01-01")
+        XCTAssertEqual(sent?.to, "2026-03-31")
     }
 
     func testTheSearchBoxIsOnlyAppliedWhenTheTermActuallyChanges() async {
@@ -267,16 +349,27 @@ final class ReceiptListModelTests: XCTestCase {
         await model.loadFirstPage()
         await model.setSort(.vendor)
         await model.setStatus(.pending)
+        await model.setCategory("meals")
+        await model.setPaymentMethod("Visa")
+        await model.setDateRange(from: "2026-01-01", to: "2026-03-31")
         model.searchText = "maple"
         await model.applySearch()
         XCTAssertTrue(model.query.isFiltering)
 
         await model.clearFilters()
 
+        // Every one of them, in one request - a "Clear filters" that left
+        // one behind is worse than none, because the list stays narrowed
+        // with nothing on screen saying why.
         XCTAssertFalse(model.query.isFiltering)
         XCTAssertEqual(model.searchText, "")
-        XCTAssertNil(api.receiptsPageCalls.last?.query.status)
-        XCTAssertNil(api.receiptsPageCalls.last?.query.searchTerm)
+        let sent = api.receiptsPageCalls.last?.query
+        XCTAssertNil(sent?.status)
+        XCTAssertNil(sent?.searchTerm)
+        XCTAssertNil(sent?.category)
+        XCTAssertNil(sent?.paymentMethod)
+        XCTAssertNil(sent?.from)
+        XCTAssertNil(sent?.to)
         // Ordering is not a filter and is not cleared with them.
         XCTAssertEqual(model.query.sort, .vendor)
     }

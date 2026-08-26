@@ -153,8 +153,7 @@ struct ConfirmReceiptView: View {
             // of Greenwich and saves the next day when "corrected".
             VStack(alignment: .leading, spacing: 4) {
                 DatePicker("Date", selection: $model.purchasedDate, displayedComponents: .date)
-                    .environment(\.calendar, ReceiptFormat.utcCalendar)
-                    .environment(\.timeZone, ReceiptFormat.utcTimeZone)
+                    .receiptDatePickerPin()
                 if model.dateIsCaptureDayFallback {
                     // The one suggestion that can be fabricated: no date
                     // parsed, so this is the capture day, said out loud

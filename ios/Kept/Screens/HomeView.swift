@@ -5,8 +5,9 @@ import SwiftUI
 /// badge and are counted in the header - visible and slightly annoying,
 /// per spec §5.2a.
 ///
-/// Search, sort and the two filters (2026-08-26) are all server-side and
-/// travel through the same keyset paging: the screen never re-orders or
+/// Search, sort and the filters - status, category, payment method and
+/// receipt-date range (2026-08-26) - are all server-side and travel
+/// through the same keyset paging: the screen never re-orders or
 /// re-filters rows it already has, because that would disagree with the
 /// next page.
 struct HomeView: View {
@@ -19,6 +20,9 @@ struct HomeView: View {
     #endif
     @State private var showCaptureFlow = false
     @State private var showConfirmQueue = false
+    /// Whether the receipt-date range sheet is up. A sheet because a
+    /// DatePicker cannot live inside the toolbar Menu that opens it.
+    @State private var showDateRangeFilter = false
     /// The needs-attention item a discard confirmation is showing for.
     @State private var discardCandidate: OutboxController.Entry?
     /// Coalesces list reloads while the outbox drains a batch: eighty
@@ -116,6 +120,18 @@ struct HomeView: View {
             }
             .refreshable {
                 await model.loadFirstPage()
+            }
+            // Anchored to the List rather than to the menu button, for the
+            // reason the dialogs below are: the toolbar Menu that raises
+            // this closes on tap, and a presentation modifier attached to
+            // a control that has gone away is fragile ground.
+            .sheet(isPresented: $showDateRangeFilter) {
+                DateRangeFilterSheet(
+                    initialFrom: model.query.from,
+                    initialTo: model.query.to
+                ) { from, to in
+                    await model.setDateRange(from: from, to: to)
+                }
             }
             #if DEBUG
             .sheet(isPresented: $showServerSettings) {
@@ -256,7 +272,31 @@ struct HomeView: View {
             }
             .pickerStyle(.inline)
 
-            categoryFilter
+            reusableValueFilter(
+                name: "Category",
+                anyLabel: "Any category",
+                unavailableLabel: "Categories unavailable",
+                icon: "tag",
+                values: options.options.categories,
+                selection: binding(\.category, apply: model.setCategory)
+            )
+
+            reusableValueFilter(
+                name: "Payment",
+                anyLabel: "Any payment method",
+                unavailableLabel: "Payment methods unavailable",
+                icon: "creditcard",
+                values: options.options.paymentMethods,
+                selection: binding(\.paymentMethod, apply: model.setPaymentMethod)
+            )
+
+            Button {
+                showDateRangeFilter = true
+            } label: {
+                // The applied range on the control that opens it, so a
+                // narrowed list says so without opening anything.
+                Label(model.query.dateRangeLabel(), systemImage: "calendar")
+            }
 
             if model.query.isFiltering {
                 Divider()
@@ -274,27 +314,39 @@ struct HomeView: View {
         }
     }
 
-    /// The category filter's values are the person's own past categories
-    /// (GET /api/receipts/options). With none fetched there is nothing to
-    /// pick from - which is either "no category has ever been used" or a
-    /// failed fetch, and those are different facts, so the failed one says
-    /// so instead of looking like the empty one.
+    /// The two free-text filters, which are the same control over
+    /// different values: the person's own past categories and payment
+    /// methods (GET /api/receipts/options).
+    ///
+    /// With no values there is nothing to pick from - which is either "no
+    /// such value has ever been used" or a failed fetch, and those are
+    /// different facts, so the failed one says so instead of looking like
+    /// the empty one. One function rather than two near-identical ones, so
+    /// the pair cannot drift.
     @ViewBuilder
-    private var categoryFilter: some View {
-        if !options.options.categories.isEmpty {
+    private func reusableValueFilter(
+        name: String,
+        anyLabel: String,
+        unavailableLabel: String,
+        icon: String,
+        values: [String],
+        selection: Binding<String?>
+    ) -> some View {
+        if !values.isEmpty {
             Menu {
-                Picker("Category", selection: binding(\.category, apply: model.setCategory)) {
-                    Text("Any category").tag(String?.none)
-                    ForEach(options.options.categories, id: \.self) { category in
-                        Text(category).tag(String?.some(category))
+                Picker(name, selection: selection) {
+                    Text(anyLabel).tag(String?.none)
+                    // Distinct, as the options route serves them.
+                    ForEach(values, id: \.self) { value in
+                        Text(value).tag(String?.some(value))
                     }
                 }
                 .pickerStyle(.inline)
             } label: {
-                Label(model.query.category ?? "Category", systemImage: "tag")
+                Label(selection.wrappedValue ?? name, systemImage: icon)
             }
         } else if options.lastFailure != nil {
-            Label("Categories unavailable", systemImage: "exclamationmark.triangle")
+            Label(unavailableLabel, systemImage: "exclamationmark.triangle")
         }
     }
 
