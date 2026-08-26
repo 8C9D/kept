@@ -4,6 +4,7 @@ import type {
   Profile,
   ReceiptDetail,
   ReceiptList,
+  ReceiptOptions,
   ReceiptPatch,
   Receipt,
   SignInResponse,
@@ -40,7 +41,6 @@ export interface UploadUrlResponse {
 export interface CreateReceiptRequest {
   purchasedAt: string;
   capturedAt: string;
-  isBusiness: boolean;
   image: { objectKey: string; sha256: string };
 }
 
@@ -105,6 +105,11 @@ export class KeptApi {
 
   receipt(id: string): Promise<ReceiptDetail> {
     return this.request<ReceiptDetail>("GET", `/api/receipts/${id}`);
+  }
+
+  /** The user's own past categories and payment methods, for reuse. */
+  receiptOptions(): Promise<ReceiptOptions> {
+    return this.request<ReceiptOptions>("GET", "/api/receipts/options");
   }
 
   updateReceipt(id: string, patch: ReceiptPatch): Promise<Receipt> {
@@ -172,13 +177,26 @@ export function listQuery(
   const params = new URLSearchParams();
   if (filters.from !== undefined) params.set("from", filters.from);
   if (filters.to !== undefined) params.set("to", filters.to);
-  if (filters.isBusiness !== undefined) {
-    params.set("isBusiness", filters.isBusiness ? "true" : "false");
-  }
   if (filters.status !== undefined) params.set("status", filters.status);
   if (filters.q !== undefined && filters.q.trim() !== "") {
     params.set("q", filters.q.trim());
   }
+  if (filters.category !== undefined && filters.category.trim() !== "") {
+    params.set("category", filters.category.trim());
+  }
+  if (
+    filters.paymentMethod !== undefined &&
+    filters.paymentMethod.trim() !== ""
+  ) {
+    params.set("paymentMethod", filters.paymentMethod.trim());
+  }
+  // Sort and order have server defaults (purchasedAt, desc); an unset one
+  // is left out entirely rather than restated, so the common query stays
+  // the shortest thing that says what was asked for.
+  if (filters.sort !== undefined) params.set("sort", filters.sort);
+  if (filters.order !== undefined) params.set("order", filters.order);
+  // Last, and never carried across a sort or filter change: the cursor
+  // encodes the position of one particular ordered result set.
   if (cursor !== null) params.set("cursor", cursor);
   return params.toString();
 }

@@ -13,15 +13,12 @@ function receipt(overrides: Partial<Receipt> = {}): Receipt {
     purchasedAt: "2026-08-21",
     capturedAt: "2026-08-21T12:00:00.000Z",
     vendor: null,
-    vendorTaxNumber: null,
     subtotalCents: null,
     hstCents: null,
-    otherTaxCents: null,
     totalCents: null,
     currency: "CAD",
     category: null,
     paymentMethod: null,
-    isBusiness: null,
     notes: null,
     status: "pending",
     suggestions: null,
@@ -42,7 +39,6 @@ describe("draftFromPending - the §7.3 display rule, as iOS renders it", () => {
         totalCents: { value: 11300, source: "llm" },
         hstCents: { value: null, source: null },
         subtotalCents: { value: null, source: null },
-        vendorTaxNumber: { value: null, source: null },
       },
     });
     const draft = draftFromPending(row);
@@ -80,8 +76,34 @@ describe("patchFromDraft", () => {
   });
 
   it("is empty for an untouched draft - the no-op submit sends nothing", () => {
-    const row = receipt({ vendor: "Same", totalCents: 500, isBusiness: true });
+    const row = receipt({ vendor: "Same", totalCents: 500, category: "meals" });
     expect(patchFromDraft(row, draftFromReceipt(row))).toEqual({});
+  });
+
+  it("carries every field the record still has, and only those", () => {
+    const row = receipt();
+    const patch = patchFromDraft(row, {
+      purchasedAt: "2026-08-20",
+      vendor: "Food Basics",
+      subtotal: "100.00",
+      hst: "13.00",
+      total: "113.00",
+      category: "groceries",
+      paymentMethod: "visa",
+      notes: "business kitchen",
+    });
+    // The 2026-08-26 reduction: no vendorTaxNumber, otherTaxCents or
+    // isBusiness exists to send, on this or any other draft.
+    expect(patch).toEqual({
+      purchasedAt: "2026-08-20",
+      vendor: "Food Basics",
+      subtotalCents: 10000,
+      hstCents: 1300,
+      totalCents: 11300,
+      category: "groceries",
+      paymentMethod: "visa",
+      notes: "business kitchen",
+    });
   });
 
   it("names the field when money does not parse", () => {
@@ -89,11 +111,5 @@ describe("patchFromDraft", () => {
     const draft = { ...draftFromReceipt(row), hst: "abc" };
     expect(() => patchFromDraft(row, draft)).toThrow(DraftError);
     expect(() => patchFromDraft(row, draft)).toThrow(/HST/);
-  });
-
-  it("never patches isBusiness back to null - the choice, once made, is edited, not unmade", () => {
-    const row = receipt({ isBusiness: true });
-    const draft = { ...draftFromReceipt(row), isBusiness: null };
-    expect(patchFromDraft(row, draft)).toEqual({});
   });
 });

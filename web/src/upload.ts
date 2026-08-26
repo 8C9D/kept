@@ -72,7 +72,6 @@ export async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
 export async function uploadOne(
   api: KeptApi,
   file: UploadCandidate,
-  isBusiness: boolean,
   now: Date,
 ): Promise<UploadOutcome> {
   const contentType = supportedContentType(file.type);
@@ -100,7 +99,6 @@ export async function uploadOne(
     const receipt = await api.createReceipt({
       purchasedAt: isoDateToday(now),
       capturedAt: now.toISOString(),
-      isBusiness,
       image: { objectKey, sha256 },
     });
     return { state: "created", receiptId: receipt.id };

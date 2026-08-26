@@ -13,19 +13,33 @@ describe("listQuery", () => {
 
   it("sends exactly the set filters", () => {
     const query = listQuery(
-      { from: "2026-01-01", to: "2026-12-31", isBusiness: true, status: "pending" },
+      {
+        from: "2026-01-01",
+        to: "2026-12-31",
+        status: "pending",
+        category: "meals",
+        paymentMethod: "visa",
+      },
       null,
     );
     const params = new URLSearchParams(query);
     expect(params.get("from")).toBe("2026-01-01");
     expect(params.get("to")).toBe("2026-12-31");
-    expect(params.get("isBusiness")).toBe("true");
     expect(params.get("status")).toBe("pending");
-    expect([...params.keys()].sort()).toEqual(["from", "isBusiness", "status", "to"]);
+    expect(params.get("category")).toBe("meals");
+    expect(params.get("paymentMethod")).toBe("visa");
+    expect([...params.keys()].sort()).toEqual([
+      "category",
+      "from",
+      "paymentMethod",
+      "status",
+      "to",
+    ]);
   });
 
-  it("sends isBusiness=false as the string the server's schema expects", () => {
-    expect(listQuery({ isBusiness: false }, null)).toBe("isBusiness=false");
+  it("has no business/personal filter to send - the field is gone", () => {
+    const query = listQuery({ status: "confirmed" }, null);
+    expect(query).not.toContain("isBusiness");
   });
 
   it("drops a blank search instead of sending q= to a min(1) schema", () => {
@@ -33,7 +47,26 @@ describe("listQuery", () => {
     expect(listQuery({ q: " thai " }, null)).toBe("q=thai");
   });
 
-  it("carries the cursor when paging", () => {
+  it("drops blank category and payment filters the same way", () => {
+    expect(listQuery({ category: "   ", paymentMethod: "" }, null)).toBe("");
+    expect(listQuery({ category: " meals " }, null)).toBe("category=meals");
+    expect(listQuery({ paymentMethod: " visa " }, null)).toBe(
+      "paymentMethod=visa",
+    );
+  });
+
+  it("sends sort and order only when chosen - the server has the defaults", () => {
+    expect(listQuery({}, null)).toBe("");
+    expect(listQuery({ sort: "total", order: "asc" }, null)).toBe(
+      "sort=total&order=asc",
+    );
+    expect(listQuery({ order: "desc" }, null)).toBe("order=desc");
+  });
+
+  it("carries the cursor last, after the sort it was minted under", () => {
     expect(listQuery({}, "abc123")).toBe("cursor=abc123");
+    expect(listQuery({ sort: "vendor", order: "asc" }, "abc123")).toBe(
+      "sort=vendor&order=asc&cursor=abc123",
+    );
   });
 });

@@ -1,6 +1,10 @@
-import { useState } from "react";
 import { formatCents, parseMoneyInput } from "../money.js";
-import type { Receipt, ReceiptPatch } from "../types.js";
+import {
+  CATEGORY_LIST_ID,
+  PAYMENT_LIST_ID,
+  ReceiptOptionsDatalists,
+} from "../options.js";
+import type { Receipt, ReceiptOptions, ReceiptPatch } from "../types.js";
 
 /**
  * The one field grid both the detail view and the confirm queue render.
@@ -13,14 +17,11 @@ import type { Receipt, ReceiptPatch } from "../types.js";
 export interface ReceiptDraft {
   purchasedAt: string;
   vendor: string;
-  vendorTaxNumber: string;
   subtotal: string;
   hst: string;
-  otherTax: string;
   total: string;
   category: string;
   paymentMethod: string;
-  isBusiness: boolean | null;
   notes: string;
 }
 
@@ -28,14 +29,11 @@ export function draftFromReceipt(receipt: Receipt): ReceiptDraft {
   return {
     purchasedAt: receipt.purchasedAt,
     vendor: receipt.vendor ?? "",
-    vendorTaxNumber: receipt.vendorTaxNumber ?? "",
     subtotal: formatCents(receipt.subtotalCents),
     hst: formatCents(receipt.hstCents),
-    otherTax: formatCents(receipt.otherTaxCents),
     total: formatCents(receipt.totalCents),
     category: receipt.category ?? "",
     paymentMethod: receipt.paymentMethod ?? "",
-    isBusiness: receipt.isBusiness,
     notes: receipt.notes ?? "",
   };
 }
@@ -52,7 +50,6 @@ export function draftFromPending(receipt: Receipt): ReceiptDraft {
     ...draftFromReceipt(receipt),
     purchasedAt: s?.purchasedAt.value ?? receipt.purchasedAt,
     vendor: s?.vendor.value ?? receipt.vendor ?? "",
-    vendorTaxNumber: s?.vendorTaxNumber.value ?? receipt.vendorTaxNumber ?? "",
     subtotal: formatCents(s?.subtotalCents.value ?? receipt.subtotalCents),
     hst: formatCents(s?.hstCents.value ?? receipt.hstCents),
     total: formatCents(s?.totalCents.value ?? receipt.totalCents),
@@ -79,28 +76,18 @@ export function patchFromDraft(
     patch.purchasedAt = draft.purchasedAt;
   }
   assignText(patch, "vendor", draft.vendor, receipt.vendor);
-  assignText(
-    patch,
-    "vendorTaxNumber",
-    draft.vendorTaxNumber,
-    receipt.vendorTaxNumber,
-  );
   assignText(patch, "category", draft.category, receipt.category);
   assignText(patch, "paymentMethod", draft.paymentMethod, receipt.paymentMethod);
   assignText(patch, "notes", draft.notes, receipt.notes);
   assignMoney(patch, "subtotalCents", "subtotal", draft.subtotal, receipt.subtotalCents);
   assignMoney(patch, "hstCents", "HST", draft.hst, receipt.hstCents);
-  assignMoney(patch, "otherTaxCents", "other tax", draft.otherTax, receipt.otherTaxCents);
   assignMoney(patch, "totalCents", "total", draft.total, receipt.totalCents);
-  if (draft.isBusiness !== receipt.isBusiness && draft.isBusiness !== null) {
-    patch.isBusiness = draft.isBusiness;
-  }
   return patch;
 }
 
 function assignText(
   patch: ReceiptPatch,
-  key: "vendor" | "vendorTaxNumber" | "category" | "paymentMethod" | "notes",
+  key: "vendor" | "category" | "paymentMethod" | "notes",
   draft: string,
   current: string | null,
 ): void {
@@ -112,7 +99,7 @@ function assignText(
 
 function assignMoney(
   patch: ReceiptPatch,
-  key: "subtotalCents" | "hstCents" | "otherTaxCents" | "totalCents",
+  key: "subtotalCents" | "hstCents" | "totalCents",
   label: string,
   draft: string,
   current: number | null,
@@ -133,10 +120,13 @@ function assignMoney(
 export function ReceiptFieldsForm({
   draft,
   setDraft,
+  options,
   disabled,
 }: {
   draft: ReceiptDraft;
   setDraft: (update: (draft: ReceiptDraft) => ReceiptDraft) => void;
+  /** Past values offered under Category and Payment method. */
+  options: ReceiptOptions;
   disabled?: boolean;
 }) {
   const text =
@@ -160,15 +150,6 @@ export function ReceiptFieldsForm({
         <input value={draft.vendor} onChange={text("vendor")} disabled={disabled} />
       </label>
       <label>
-        GST/HST number
-        <input
-          value={draft.vendorTaxNumber}
-          onChange={text("vendorTaxNumber")}
-          disabled={disabled}
-          placeholder="123456789RT0001"
-        />
-      </label>
-      <label>
         Subtotal
         <input
           className="money"
@@ -189,16 +170,6 @@ export function ReceiptFieldsForm({
         />
       </label>
       <label>
-        Other tax
-        <input
-          className="money"
-          value={draft.otherTax}
-          onChange={text("otherTax")}
-          disabled={disabled}
-          placeholder="0.00"
-        />
-      </label>
-      <label>
         Total
         <input
           className="money"
@@ -208,6 +179,8 @@ export function ReceiptFieldsForm({
           placeholder="0.00"
         />
       </label>
+      {/* Free text with the person's own past values offered: a suggestion
+          list, never a closed set. */}
       <label>
         Category
         <input
@@ -215,6 +188,7 @@ export function ReceiptFieldsForm({
           onChange={text("category")}
           disabled={disabled}
           placeholder="free text"
+          list={CATEGORY_LIST_ID}
         />
       </label>
       <label>
@@ -223,32 +197,10 @@ export function ReceiptFieldsForm({
           value={draft.paymentMethod}
           onChange={text("paymentMethod")}
           disabled={disabled}
+          list={PAYMENT_LIST_ID}
         />
       </label>
-      <fieldset className="business-choice">
-        <legend>Business or personal</legend>
-        {/* No default (spec §5.2): both unchecked until a person chooses. */}
-        <label>
-          <input
-            type="radio"
-            name="isBusiness"
-            checked={draft.isBusiness === true}
-            onChange={() => setDraft((d) => ({ ...d, isBusiness: true }))}
-            disabled={disabled}
-          />
-          Business
-        </label>
-        <label>
-          <input
-            type="radio"
-            name="isBusiness"
-            checked={draft.isBusiness === false}
-            onChange={() => setDraft((d) => ({ ...d, isBusiness: false }))}
-            disabled={disabled}
-          />
-          Personal
-        </label>
-      </fieldset>
+      <ReceiptOptionsDatalists values={options} />
       <label className="notes">
         Notes
         <textarea

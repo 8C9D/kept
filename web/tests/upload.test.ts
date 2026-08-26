@@ -76,18 +76,23 @@ describe("uploadOne", () => {
       const outcome = await uploadOne(
         fakeApi({ seenBodies }),
         file,
-        true,
         new Date(2026, 7, 21, 12, 0, 0),
       );
       expect(outcome).toEqual({ state: "created", receiptId: "receipt-1" });
       const body = seenBodies[0] as {
         purchasedAt: string;
-        isBusiness: boolean;
+        capturedAt: string;
         image: { sha256: string };
       };
       expect(body.purchasedAt).toBe("2026-08-21");
-      expect(body.isBusiness).toBe(true);
       expect(body.image.sha256).toBe(await sha256Hex(PDF_BYTES));
+      // Nothing is asked before the drop any more: the create carries the
+      // dates and the image, and no business-or-personal choice exists.
+      expect(Object.keys(body).sort()).toEqual([
+        "capturedAt",
+        "image",
+        "purchasedAt",
+      ]);
     } finally {
       restore();
     }
@@ -107,7 +112,6 @@ describe("uploadOne", () => {
           },
         }),
         file,
-        false,
         new Date(),
       );
       expect(outcome).toEqual({ state: "duplicate" });
@@ -120,7 +124,6 @@ describe("uploadOne", () => {
     const outcome = await uploadOne(
       fakeApi({}),
       { name: "receipt.heic", type: "image/heic", bytes: async () => PDF_BYTES },
-      true,
       new Date(),
     );
     expect(outcome.state).toBe("unsupported");
@@ -129,7 +132,7 @@ describe("uploadOne", () => {
   it("reports a storage refusal as a failure naming the status", async () => {
     const restore = stubFetch(403);
     try {
-      const outcome = await uploadOne(fakeApi({}), file, true, new Date());
+      const outcome = await uploadOne(fakeApi({}), file, new Date());
       expect(outcome).toEqual({
         state: "failed",
         detail: "storage answered 403 to the upload",

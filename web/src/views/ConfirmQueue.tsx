@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { KeptApi } from "../api.js";
+import type { ReceiptOptionsHandle } from "../options.js";
 import type { ReceiptDetail } from "../types.js";
 import { ReceiptImage } from "./ReceiptDetail.js";
 import {
@@ -17,15 +18,16 @@ import {
  * confirm screen does (suggestion over row copy - constraint 2: these are
  * suggestions in an editable form, and nothing saves without the person
  * pressing Confirm). Confirm is one PATCH carrying the edited fields and
- * status=confirmed; the server refuses it without a total and a
- * business-or-personal choice, and this screen surfaces that refusal in
- * the server's own words.
+ * status=confirmed; the server refuses it without a total, and this screen
+ * surfaces that refusal in the server's own words.
  */
 export function ConfirmQueue({
   api,
+  options,
   onDone,
 }: {
   api: KeptApi;
+  options: ReceiptOptionsHandle;
   onDone: () => void;
 }) {
   const [current, setCurrent] = useState<ReceiptDetail | null>(null);
@@ -81,7 +83,11 @@ export function ConfirmQueue({
       throw caught;
     }
     try {
-      await api.updateReceipt(current.id, { ...patch, status: "confirmed" });
+      const confirmed = await api.updateReceipt(current.id, {
+        ...patch,
+        status: "confirmed",
+      });
+      options.noteSaved(confirmed);
       await loadNext(skippedIds);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -152,6 +158,7 @@ export function ConfirmQueue({
           <ReceiptFieldsForm
             draft={draft}
             setDraft={(update) => setDraft((d) => (d === null ? d : update(d)))}
+            options={options.values}
           />
           {error !== null && <p className="error">{error}</p>}
           <div className="detail-actions">

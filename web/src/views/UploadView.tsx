@@ -6,9 +6,8 @@ import { uploadOne, type UploadOutcome } from "../upload.js";
  * Spec §6A consequence 2: the email backlog is a folder of PDFs on a
  * laptop, so the web client takes a multi-file drop and each file becomes
  * its own pending receipt - the same create path as capture, no camera
- * code. Business-or-personal is chosen for the batch BEFORE anything
- * uploads: constraint 3 sets it at capture time, and this drop is the
- * capture. There is deliberately no preselected choice (spec §5.2).
+ * code. Nothing is asked before the drop: the receipts land pending and
+ * every field is typed in the confirm queue, with the image beside it.
  */
 
 interface QueuedFile {
@@ -23,14 +22,13 @@ export function UploadView({
   api: KeptApi;
   onChanged: () => void;
 }) {
-  const [isBusiness, setIsBusiness] = useState<boolean | null>(null);
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   async function handleFiles(files: File[]) {
-    if (isBusiness === null || files.length === 0 || busy) {
+    if (files.length === 0 || busy) {
       return;
     }
     setBusy(true);
@@ -46,7 +44,6 @@ export function UploadView({
       const outcome = await uploadOne(
         api,
         { name: file.name, type: file.type, bytes: () => file.arrayBuffer() },
-        isBusiness,
         new Date(),
       );
       setQueue((q) =>
@@ -70,33 +67,8 @@ export function UploadView({
         correct it when you confirm.
       </p>
 
-      <fieldset className="business-choice">
-        <legend>These receipts are</legend>
-        {/* Required, unchosen by default: the drop is disabled until one is
-            picked, because business-vs-personal is set at capture time
-            (constraint 3) and defaults are forbidden (spec §5.2). */}
-        <label>
-          <input
-            type="radio"
-            name="batch-business"
-            checked={isBusiness === true}
-            onChange={() => setIsBusiness(true)}
-          />
-          Business
-        </label>
-        <label>
-          <input
-            type="radio"
-            name="batch-business"
-            checked={isBusiness === false}
-            onChange={() => setIsBusiness(false)}
-          />
-          Personal
-        </label>
-      </fieldset>
-
       <div
-        className={`dropzone ${dragging ? "dragging" : ""} ${isBusiness === null ? "disabled" : ""}`}
+        className={`dropzone ${dragging ? "dragging" : ""}`}
         onDragOver={(e) => {
           e.preventDefault();
           setDragging(true);
@@ -108,21 +80,17 @@ export function UploadView({
           void handleFiles([...e.dataTransfer.files]);
         }}
       >
-        {isBusiness === null ? (
-          <p>Choose business or personal first.</p>
-        ) : (
-          <p>
-            Drop JPEG, PNG or PDF files here, or{" "}
-            <button
-              className="link"
-              onClick={() => fileInput.current?.click()}
-              disabled={busy}
-            >
-              choose files
-            </button>
-            .
-          </p>
-        )}
+        <p>
+          Drop JPEG, PNG or PDF files here, or{" "}
+          <button
+            className="link"
+            onClick={() => fileInput.current?.click()}
+            disabled={busy}
+          >
+            choose files
+          </button>
+          .
+        </p>
         <input
           ref={fileInput}
           type="file"

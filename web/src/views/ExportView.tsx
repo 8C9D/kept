@@ -93,9 +93,10 @@ export function ExportView({ api }: { api: KeptApi }) {
     <section className="export-view">
       <h2>Year-end export</h2>
       <p className="muted">
-        A zip with the spreadsheet (XLSX and CSV) and every image, named for
-        the period. Links stay good for 30 days; after that, re-run the
-        period - the receipts are the records, the zip is regenerable.
+        A zip with the same rows in three formats - XLSX, CSV and JSON - and
+        every image, named for the period. Links stay good for 30 days;
+        after that, re-run the period - the receipts are the records, the
+        zip is regenerable.
       </p>
 
       <div className="export-starters">

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { KeptApi } from "../api.js";
+import type { ReceiptOptionsHandle } from "../options.js";
 import type { ReceiptDetail } from "../types.js";
 import {
   DraftError,
@@ -12,17 +13,21 @@ import {
 /**
  * Spec §7A screen 3: the image at full size beside its fields, for
  * checking a number against the paper properly. Save is one PATCH of what
- * changed; delete is soft (the server keeps the row for retention) and
- * two-step inline - never window.confirm, which blocks the whole page.
+ * changed - on a confirmed receipt exactly as on a pending one, which is
+ * the point of the screen and not an exception to guard; delete is soft
+ * (the server keeps the row for retention) and two-step inline - never
+ * window.confirm, which blocks the whole page.
  */
 export function ReceiptDetailView({
   api,
   receiptId,
+  options,
   onBack,
   onChanged,
 }: {
   api: KeptApi;
   receiptId: string;
+  options: ReceiptOptionsHandle;
   onBack: () => void;
   onChanged: () => void;
 }) {
@@ -88,6 +93,7 @@ export function ReceiptDetailView({
       setReceipt({ ...receipt, ...updated });
       setDraft(draftFromReceipt({ ...receipt, ...updated }));
       setNotice("Saved.");
+      options.noteSaved(updated);
       onChanged();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -129,6 +135,7 @@ export function ReceiptDetailView({
           <ReceiptFieldsForm
             draft={draft}
             setDraft={(update) => setDraft((d) => (d === null ? d : update(d)))}
+            options={options.values}
           />
           {error !== null && <p className="error">{error}</p>}
           {notice !== null && <p className="muted">{notice}</p>}

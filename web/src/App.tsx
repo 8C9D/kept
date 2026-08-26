@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { KeptApi } from "./api.js";
+import { useReceiptOptions } from "./options.js";
 import { clearToken, storeToken, storedToken } from "./session.js";
 import { ConfirmQueue } from "./views/ConfirmQueue.js";
 import { ExportView } from "./views/ExportView.js";
@@ -47,6 +48,13 @@ export function App() {
     () => (token === null ? null : new KeptApi(token, signOut)),
     [token, signOut],
   );
+
+  // One fetch of the reusable category and payment values per signed-in
+  // session, held here because three screens offer them and none of them
+  // owns the session. Unconditional, above the sign-in return: it clears
+  // itself when `api` goes null, so one person's values never outlive
+  // their session.
+  const options = useReceiptOptions(api);
 
   if (api === null) {
     return (
@@ -137,6 +145,7 @@ export function App() {
           <ReceiptsTable
             api={api}
             dataVersion={dataVersion}
+            options={options}
             onOpen={(id) => setView({ name: "detail", id })}
             onConfirmQueue={() => setView({ name: "confirm" })}
             onChanged={changed}
@@ -146,6 +155,7 @@ export function App() {
           <ReceiptDetailView
             api={api}
             receiptId={view.id}
+            options={options}
             onBack={() => setView({ name: "table" })}
             onChanged={changed}
           />
@@ -153,6 +163,7 @@ export function App() {
         {view.name === "confirm" && (
           <ConfirmQueue
             api={api}
+            options={options}
             onDone={() => {
               changed();
               setView({ name: "table" });

@@ -2,29 +2,41 @@ import { useCallback, useEffect, useState } from "react";
 import type { KeptApi } from "../api.js";
 import { ApiError } from "../api.js";
 import { formatCents, parseMoneyInput } from "../money.js";
+import {
+  CATEGORY_LIST_ID,
+  PAYMENT_LIST_ID,
+  ReceiptOptionsDatalists,
+  type ReceiptOptionsHandle,
+} from "../options.js";
 import type {
   ListFilters,
   Receipt,
   ReceiptPatch,
+  ReceiptSort,
   ReceiptStatus,
+  SortOrder,
 } from "../types.js";
 
 /**
- * Spec §7A screen 2: every receipt, filterable (date range, business/
- * personal, status, free-text over vendor/category/notes), inline editing,
- * row click opens the receipt. Sorted as the server sorts - newest
- * purchase first, keyset-paged - and filters reset paging, because a
- * cursor encodes the sort position of a different result set.
+ * Spec §7A screen 2: every receipt, filterable (date range, status,
+ * category, payment, free-text over vendor/category/notes), sortable on the
+ * server's four keys, inline editing, row click opens the receipt.
+ * Keyset-paged, and any change to the filters or the sort restarts from
+ * page one by construction - a new `filters` object re-runs the first-page
+ * effect with a null cursor, because a cursor encodes a position in one
+ * particular ordered result set.
  */
 export function ReceiptsTable({
   api,
   dataVersion,
+  options,
   onOpen,
   onConfirmQueue,
   onChanged,
 }: {
   api: KeptApi;
   dataVersion: number;
+  options: ReceiptOptionsHandle;
   onOpen: (id: string) => void;
   onConfirmQueue: () => void;
   onChanged: () => void;
@@ -40,6 +52,10 @@ export function ReceiptsTable({
     async (activeFilters: ListFilters) => {
       setLoading(true);
       setError(null);
+      // The cursor in hand belongs to the result set being replaced; the
+      // server refuses one minted under a different sort, and it would be
+      // the wrong position under a different filter either way.
+      setNextCursor(null);
       try {
         const page = await api.listReceipts(activeFilters, null);
         setRows(page.receipts);
@@ -81,6 +97,7 @@ export function ReceiptsTable({
       setRows((current) =>
         current.map((row) => (row.id === id ? updated : row)),
       );
+      options.noteSaved(updated);
       onChanged();
       return null;
     } catch (caught) {
@@ -90,6 +107,11 @@ export function ReceiptsTable({
       return caught instanceof Error ? caught.message : String(caught);
     }
   }
+
+  // What the controls show while nothing is chosen is what the server does
+  // with the parameters absent: receipt date, newest first.
+  const sort: ReceiptSort = filters.sort ?? "purchasedAt";
+  const order: SortOrder = filters.order ?? "desc";
 
   return (
     <section>
@@ -125,30 +147,6 @@ export function ReceiptsTable({
           />
         </label>
         <label>
-          Type
-          <select
-            value={
-              filters.isBusiness === undefined
-                ? "all"
-                : filters.isBusiness
-                  ? "business"
-                  : "personal"
-            }
-            onChange={(e) =>
-              setFilters((f) => ({
-                ...f,
-                ...(e.target.value === "all"
-                  ? { isBusiness: undefined }
-                  : { isBusiness: e.target.value === "business" }),
-              }))
-            }
-          >
-            <option value="all">All</option>
-            <option value="business">Business</option>
-            <option value="personal">Personal</option>
-          </select>
-        </label>
-        <label>
           Status
           <select
             value={filters.status ?? "all"}
@@ -166,6 +164,64 @@ export function ReceiptsTable({
             <option value="confirmed">Confirmed</option>
           </select>
         </label>
+        {/* Exact-match filters over the stored free text, offering the
+            user's own past values; empty means no filter. */}
+        <label>
+          Category
+          <input
+            placeholder="any"
+            list={CATEGORY_LIST_ID}
+            value={filters.category ?? ""}
+            onChange={(e) =>
+              setFilters((f) => ({
+                ...f,
+                ...(e.target.value === ""
+                  ? { category: undefined }
+                  : { category: e.target.value }),
+              }))
+            }
+          />
+        </label>
+        <label>
+          Payment
+          <input
+            placeholder="any"
+            list={PAYMENT_LIST_ID}
+            value={filters.paymentMethod ?? ""}
+            onChange={(e) =>
+              setFilters((f) => ({
+                ...f,
+                ...(e.target.value === ""
+                  ? { paymentMethod: undefined }
+                  : { paymentMethod: e.target.value }),
+              }))
+            }
+          />
+        </label>
+        <ReceiptOptionsDatalists values={options.values} />
+        <label>
+          Sort by
+          <select
+            value={sort}
+            onChange={(e) =>
+              setFilters((f) => ({ ...f, sort: e.target.value as ReceiptSort }))
+            }
+          >
+            <option value="purchasedAt">Receipt date</option>
+            <option value="capturedAt">Capture date</option>
+            <option value="total">Total</option>
+            <option value="vendor">Vendor</option>
+          </select>
+        </label>
+        <button
+          className="sort-order"
+          title="Reverse the order"
+          onClick={() =>
+            setFilters((f) => ({ ...f, order: order === "desc" ? "asc" : "desc" }))
+          }
+        >
+          {describeOrder(sort, order)}
+        </button>
         <label className="grow">
           Search
           <input
@@ -207,7 +263,6 @@ export function ReceiptsTable({
               <th>Category</th>
               <th className="num">Total</th>
               <th className="num">HST</th>
-              <th>Type</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -230,6 +285,24 @@ export function ReceiptsTable({
       )}
     </section>
   );
+}
+
+/**
+ * The order button says what the order is, in the words of the key it
+ * sorts: "newest first" means nothing about a vendor column. Exported for
+ * its unit test - this mapping is the only part of the sort controls that
+ * is not a straight pass-through to the server.
+ */
+export function describeOrder(sort: ReceiptSort, order: SortOrder): string {
+  switch (sort) {
+    case "purchasedAt":
+    case "capturedAt":
+      return order === "desc" ? "↓ newest first" : "↑ oldest first";
+    case "total":
+      return order === "desc" ? "↓ largest first" : "↑ smallest first";
+    case "vendor":
+      return order === "desc" ? "↓ Z to A" : "↑ A to Z";
+  }
 }
 
 function ReceiptRow({
@@ -264,6 +337,7 @@ function ReceiptRow({
           <TextCell
             value={row.category}
             placeholder="category"
+            list={CATEGORY_LIST_ID}
             onSave={(v) => save({ category: v })}
           />
         </td>
@@ -282,21 +356,6 @@ function ReceiptRow({
           />
         </td>
         <td>
-          <select
-            value={row.isBusiness === null ? "" : row.isBusiness ? "b" : "p"}
-            onChange={(e) => {
-              if (e.target.value !== "") {
-                void save({ isBusiness: e.target.value === "b" });
-              }
-            }}
-          >
-            {/* No default (spec §5.2): an unchosen receipt shows the absence. */}
-            {row.isBusiness === null && <option value="">—</option>}
-            <option value="b">Business</option>
-            <option value="p">Personal</option>
-          </select>
-        </td>
-        <td>
           <button className="link" onClick={onOpen}>
             {row.status}
           </button>
@@ -304,7 +363,7 @@ function ReceiptRow({
       </tr>
       {rowError !== null && (
         <tr className="row-error">
-          <td colSpan={7}>
+          <td colSpan={6}>
             <span className="error">{rowError}</span>
             <button className="link" onClick={() => setRowError(null)}>
               dismiss
@@ -342,10 +401,13 @@ function DateCell({
 function TextCell({
   value,
   placeholder,
+  list,
   onSave,
 }: {
   value: string | null;
   placeholder: string;
+  /** A datalist to offer past values from, where one exists (category). */
+  list?: string;
   onSave: (value: string | null) => void;
 }) {
   const [draft, setDraft] = useState(value ?? "");
@@ -354,6 +416,7 @@ function TextCell({
     <input
       value={draft}
       placeholder={placeholder}
+      list={list}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={() => {
         const next = draft.trim() === "" ? null : draft.trim();
