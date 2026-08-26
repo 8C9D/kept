@@ -32,8 +32,8 @@ final class FileOutboxStoreTests: XCTestCase {
     // MARK: - File protection configuration
 
     func testQueuedReceiptsAreWrittenWithCompleteFileProtection() {
-        // item.json holds the vendor, the tax number, every amount, the
-        // payment method and the notes; image.jpg is the receipt itself.
+        // item.json holds the vendor, every amount, the payment method and
+        // the notes; image.jpg is the receipt itself.
         // Without an explicit class they inherit
         // completeUntilFirstUserAuthentication, which stops protecting
         // after the first unlock following a boot - so in practice, never.
@@ -85,14 +85,11 @@ final class FileOutboxStoreTests: XCTestCase {
             confirmation: ConfirmedReceiptFields(
                 purchasedAt: "2026-01-14",
                 vendor: "MAPLE",
-                vendorTaxNumber: nil,
                 subtotalCents: 10000,
                 hstCents: 1300,
-                otherTaxCents: nil,
                 totalCents: 11300,
                 category: "supplies",
                 paymentMethod: nil,
-                isBusiness: true,
                 notes: nil
             ),
             blockedMessage: "a reason"
@@ -105,6 +102,87 @@ final class FileOutboxStoreTests: XCTestCase {
         XCTAssertEqual(loaded.unreadableCount, 0)
         let image = try await store.imageData(itemId: captured.id)
         XCTAssertEqual(image, Data("first image".utf8))
+    }
+
+    /// The upgrade path, on the one piece of state that survives an app
+    /// update: a receipt captured on the shipped 1.0 (1) build and still
+    /// waiting to upload when the person installs the build that dropped
+    /// the tax number, other tax and business-or-personal (2026-08-26).
+    ///
+    /// Its item.json carries all three retired keys. JSONDecoder ignores
+    /// keys no property declares, so the item loads and uploads instead of
+    /// being counted unreadable and stranded on the phone - which for a
+    /// queue whose whole promise is "captured means safe" would be the
+    /// worst possible way to lose a receipt. Written as raw JSON, not
+    /// built from the current types, because the point is the old shape.
+    func testAnItemQueuedByTheOldBuildStillLoads() async throws {
+        let id = UUID()
+        let itemDirectory = directory.appending(path: id.uuidString.lowercased())
+        try FileManager.default.createDirectory(
+            at: itemDirectory,
+            withIntermediateDirectories: true
+        )
+        let oldShape = """
+        {
+          "id": "\(id.uuidString)",
+          "userId": "\(UUID().uuidString)",
+          "sequence": 7,
+          "capturedAt": "2026-08-20T14:03:00Z",
+          "sha256": "abc123",
+          "ocrAttempts": 0,
+          "progress": {
+            "uploaded": {
+              "_0": {
+                "suggestions": {
+                  "totalCents": 11300,
+                  "hstCents": 1300,
+                  "subtotalCents": 10000,
+                  "vendorTaxNumber": "123456789RT0001",
+                  "purchasedAt": "2026-08-20",
+                  "vendor": "MAPLE"
+                },
+                "ocrRawText": "MAPLE\\nTOTAL 113.00"
+              },
+              "objectKey": "user/2026/08/x.jpg"
+            }
+          },
+          "confirmation": {
+            "purchasedAt": "2026-08-20",
+            "vendor": "MAPLE",
+            "vendorTaxNumber": "123456789RT0001",
+            "subtotalCents": 10000,
+            "hstCents": 1300,
+            "otherTaxCents": 250,
+            "totalCents": 11300,
+            "category": "supplies",
+            "isBusiness": true
+          }
+        }
+        """
+        try Data(oldShape.utf8).write(to: itemDirectory.appending(path: "item.json"))
+        try Data("old image".utf8).write(to: itemDirectory.appending(path: "image.jpg"))
+
+        let loaded = try await store.loadAll()
+
+        XCTAssertEqual(loaded.unreadableCount, 0, "an old-shape item must not be misfiled as corrupt")
+        let item = try XCTUnwrap(loaded.items.first)
+        XCTAssertEqual(item.id, id)
+        XCTAssertEqual(item.sequence, 7)
+        // The fields that remain survive intact; the retired keys are
+        // simply not there to read.
+        let confirmation = try XCTUnwrap(item.confirmation)
+        XCTAssertEqual(confirmation.totalCents, 11300)
+        XCTAssertEqual(confirmation.hstCents, 1300)
+        XCTAssertEqual(confirmation.subtotalCents, 10000)
+        XCTAssertEqual(confirmation.category, "supplies")
+        XCTAssertNil(confirmation.paymentMethod)
+        XCTAssertNil(confirmation.notes)
+        guard case .uploaded(let parsed, let objectKey) = item.progress else {
+            return XCTFail("Expected .uploaded, got \(item.progress)")
+        }
+        XCTAssertEqual(objectKey, "user/2026/08/x.jpg")
+        XCTAssertEqual(parsed.suggestions.totalCents, 11300)
+        XCTAssertEqual(parsed.suggestions.vendor, "MAPLE")
     }
 
     func testLoadAllOrdersBySequenceNotDirectoryOrder() async throws {

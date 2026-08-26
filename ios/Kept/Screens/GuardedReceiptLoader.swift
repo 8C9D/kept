@@ -35,15 +35,18 @@ final class GuardedReceiptLoader {
         generation += 1
     }
 
-    func firstPage() async -> Outcome<ReceiptListPage> {
+    func firstPage(query: ReceiptQuery) async -> Outcome<ReceiptListPage> {
         await run { api in
-            try await api.receiptsPage(cursor: nil, status: nil, limit: nil)
+            try await api.receiptsPage(cursor: nil, query: query, limit: nil)
         }
     }
 
-    func page(cursor: String) async -> Outcome<ReceiptListPage> {
+    /// The query travels with the cursor deliberately: the server refuses
+    /// a cursor whose encoded sort disagrees with the one sent beside it,
+    /// so the two must not be able to drift apart between pages.
+    func page(cursor: String, query: ReceiptQuery) async -> Outcome<ReceiptListPage> {
         await run { api in
-            try await api.receiptsPage(cursor: cursor, status: nil, limit: nil)
+            try await api.receiptsPage(cursor: cursor, query: query, limit: nil)
         }
     }
 

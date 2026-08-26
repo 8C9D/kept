@@ -1,12 +1,14 @@
 import SwiftUI
 
 /// One receipt: the image (fetched via its presigned URL) and every field,
-/// in the spec §7.2 order. The fields here are read-only by design -
-/// editing a pending receipt goes through "Confirm this receipt" below,
-/// which presents the one confirm form (§7.2), so this screen has no
-/// editable field of its own and inherits the form's behaviour whole.
+/// in the spec §7.2 order. The fields here are read-only by design - both
+/// ways into editing, "Confirm this receipt" on a pending row and "Edit
+/// receipt" on a confirmed one, present the same confirm form (§7.2), so
+/// this screen has no editable field of its own and inherits the form's
+/// behaviour whole.
 struct ReceiptDetailView: View {
     @StateObject private var model: ReceiptDetailModel
+    @ObservedObject private var options: ReceiptOptionsStore
     private let receipt: Receipt
     private let api: APIClient
 
@@ -14,8 +16,9 @@ struct ReceiptDetailView: View {
     /// model is created at tap time from the already-loaded detail.
     @State private var confirmModel: ConfirmReceiptModel?
 
-    init(api: APIClient, receipt: Receipt) {
+    init(api: APIClient, options: ReceiptOptionsStore, receipt: Receipt) {
         _model = StateObject(wrappedValue: ReceiptDetailModel(api: api))
+        self.options = options
         self.receipt = receipt
         self.api = api
     }
@@ -43,11 +46,17 @@ struct ReceiptDetailView: View {
             NavigationStack {
                 ConfirmReceiptView(
                     model: presented,
+                    options: options,
                     onSaved: {
                         confirmModel = nil
-                        // The row just went confirmed; re-read it so the
-                        // screen shows the saved truth, not a stale badge.
+                        // The row just changed; re-read it so the screen
+                        // shows the saved truth, not a stale badge or a
+                        // pre-edit value.
                         await model.load(id: receipt.id)
+                        // An edit can introduce a category or payment
+                        // method this account has never used; the pickers
+                        // must know about it next time.
+                        await options.refresh()
                     },
                     onSetAside: { confirmModel = nil }
                 )
@@ -91,7 +100,8 @@ struct ReceiptDetailView: View {
                 }
                 .padding(.vertical, 4)
 
-                if detail.receipt.status == .pending {
+                switch detail.receipt.status {
+                case .pending:
                     // A pending receipt's obvious next step, offered where
                     // the person already is - the header-badge queue must
                     // not be the only route (wave-4 re-test, the owner's
@@ -104,23 +114,30 @@ struct ReceiptDetailView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
+                case .confirmed:
+                    // A confirmed receipt is still correctable - a typo in
+                    // a total or a category is found weeks later, and
+                    // re-scanning the paper is not the remedy (2026-08-26
+                    // ruling). The same form, opened with nothing amber:
+                    // these values are the person's own.
+                    Button {
+                        confirmModel = ConfirmReceiptModel(api: api, detail: detail, purpose: .edit)
+                    } label: {
+                        Text("Edit receipt")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
 
             Section("Details") {
                 // Merge-covered fields read the display rule (ReceiptDisplay):
-                // pending shows the served merge, confirmed the record. Other
-                // tax and below carry no suggestion and always show the row.
+                // pending shows the served merge, confirmed the record. The
+                // rows below carry no suggestion and always show the row.
                 FieldRow(label: "Date", value: ReceiptFormat.purchaseDate(detail.receipt.displayPurchasedAt))
                 FieldRow(label: "Vendor", value: detail.receipt.displayVendor)
                 FieldRow(label: "HST", value: money(detail.receipt.displayHstCents, detail.receipt.currency))
                 FieldRow(label: "Subtotal", value: money(detail.receipt.displaySubtotalCents, detail.receipt.currency))
-                FieldRow(label: "Other tax", value: money(detail.receipt.otherTaxCents, detail.receipt.currency))
-                FieldRow(label: "Tax number", value: detail.receipt.displayVendorTaxNumber)
-                FieldRow(
-                    label: "Type",
-                    value: detail.receipt.isBusiness.map { $0 ? "Business" : "Personal" }
-                )
                 FieldRow(label: "Category", value: detail.receipt.category)
                 FieldRow(label: "Payment", value: detail.receipt.paymentMethod)
                 FieldRow(label: "Notes", value: detail.receipt.notes)

@@ -8,8 +8,9 @@ import Foundation
 /// it into nonisolated request tasks.
 protocol KeptAPI: Sendable {
     func signInWithApple(identityToken: String, displayName: String?) async throws -> SignInResponse
-    func receiptsPage(cursor: String?, status: ReceiptStatus?, limit: Int?) async throws -> ReceiptListPage
+    func receiptsPage(cursor: String?, query: ReceiptQuery, limit: Int?) async throws -> ReceiptListPage
     func receiptDetail(id: UUID) async throws -> ReceiptDetail
+    func receiptOptions() async throws -> ReceiptOptions
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget
     func uploadImage(to target: UploadTarget, data: Data, contentType: ImageUploadContentType) async throws
     func createReceipt(_ request: CreateReceiptRequest) async throws -> Receipt
@@ -33,18 +34,19 @@ extension APIClient: KeptAPI {
         )
     }
 
-    func receiptsPage(cursor: String?, status: ReceiptStatus?, limit: Int?) async throws -> ReceiptListPage {
-        var query: [URLQueryItem] = []
+    func receiptsPage(cursor: String?, query: ReceiptQuery, limit: Int?) async throws -> ReceiptListPage {
+        // The cursor leads: it is opaque, and it encodes the sort it was
+        // minted under, which the server checks against the sort sent
+        // alongside it.
+        var items: [URLQueryItem] = []
         if let cursor {
-            query.append(URLQueryItem(name: "cursor", value: cursor))
+            items.append(URLQueryItem(name: "cursor", value: cursor))
         }
-        if let status {
-            query.append(URLQueryItem(name: "status", value: status.rawValue))
-        }
+        items.append(contentsOf: query.queryItems)
         if let limit {
-            query.append(URLQueryItem(name: "limit", value: String(limit)))
+            items.append(URLQueryItem(name: "limit", value: String(limit)))
         }
-        return try await get("/api/receipts", query: query)
+        return try await get("/api/receipts", query: items)
     }
 
     func receiptDetail(id: UUID) async throws -> ReceiptDetail {
@@ -52,6 +54,13 @@ extension APIClient: KeptAPI {
         // pattern is case-insensitive, but sending what the server stores
         // costs nothing.
         try await get("/api/receipts/\(id.uuidString.lowercased())")
+    }
+
+    /// The values this user has already used for category and payment.
+    /// The route is a literal path registered above `/:id`, so it is not
+    /// a receipt id and never collides with one.
+    func receiptOptions() async throws -> ReceiptOptions {
+        try await get("/api/receipts/options")
     }
 
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget {

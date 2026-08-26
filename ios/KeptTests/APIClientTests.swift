@@ -58,7 +58,7 @@ final class APIClientTests: XCTestCase {
         let client = try makeClient()
         transport.enqueue(status: 200, jsonBody: emptyPageJSON)
 
-        _ = try await client.receiptsPage(cursor: nil, status: nil, limit: nil)
+        _ = try await client.receiptsPage(cursor: nil, query: .default, limit: nil)
 
         let request = try XCTUnwrap(transport.requests.first)
         XCTAssertEqual(
@@ -95,7 +95,7 @@ final class APIClientTests: XCTestCase {
         let client = try makeClient()
 
         await assertThrowsSessionRejected {
-            _ = try await client.receiptsPage(cursor: nil, status: nil, limit: nil) as ReceiptListPage
+            _ = try await client.receiptsPage(cursor: nil, query: .default, limit: nil) as ReceiptListPage
         }
         XCTAssertEqual(sessionRejections, 1)
         XCTAssertTrue(transport.requests.isEmpty)
@@ -125,7 +125,7 @@ final class APIClientTests: XCTestCase {
         transport.enqueue(status: 502, jsonBody: "<html>Bad Gateway</html>")
 
         do {
-            _ = try await client.receiptsPage(cursor: nil, status: nil, limit: nil)
+            _ = try await client.receiptsPage(cursor: nil, query: .default, limit: nil)
             XCTFail("Expected a thrown APIError")
         } catch let APIError.unexpectedResponse(status) {
             XCTAssertEqual(status, 502)
@@ -137,7 +137,7 @@ final class APIClientTests: XCTestCase {
         transport.enqueueFailure(URLError(.notConnectedToInternet))
 
         do {
-            _ = try await client.receiptsPage(cursor: nil, status: nil, limit: nil)
+            _ = try await client.receiptsPage(cursor: nil, query: .default, limit: nil)
             XCTFail("Expected a thrown APIError")
         } catch let APIError.network(urlError) {
             XCTAssertEqual(urlError.code, .notConnectedToInternet)
@@ -149,7 +149,7 @@ final class APIClientTests: XCTestCase {
         transport.enqueue(status: 200, jsonBody: #"{"unexpected":"shape"}"#)
 
         do {
-            _ = try await client.receiptsPage(cursor: nil, status: nil, limit: nil)
+            _ = try await client.receiptsPage(cursor: nil, query: .default, limit: nil)
             XCTFail("Expected a thrown APIError")
         } catch APIError.undecodableResponse {
             // Expected.
@@ -166,7 +166,7 @@ final class APIClientTests: XCTestCase {
         )
 
         await assertThrowsSessionRejected {
-            _ = try await client.receiptsPage(cursor: nil, status: nil, limit: nil) as ReceiptListPage
+            _ = try await client.receiptsPage(cursor: nil, query: .default, limit: nil) as ReceiptListPage
         }
         XCTAssertEqual(sessionRejections, 1)
     }
@@ -193,7 +193,7 @@ final class APIClientTests: XCTestCase {
         let client = try makeClient()
         transport.enqueue(status: 200, jsonBody: listPageJSON)
 
-        let page = try await client.receiptsPage(cursor: nil, status: nil, limit: nil)
+        let page = try await client.receiptsPage(cursor: nil, query: .default, limit: nil)
 
         XCTAssertEqual(page.receipts.count, 2)
         XCTAssertEqual(page.nextCursor, "opaque-cursor-value")
@@ -246,7 +246,10 @@ final class APIClientTests: XCTestCase {
         // The no-fallthrough absence, exactly as served: {value: null,
         // source: null} must land as nil, the stated-absence prefill.
         XCTAssertNil(suggestions.subtotalCents.value)
-        XCTAssertNil(suggestions.vendorTaxNumber.value)
+        // The fixture also carries the server's transitional
+        // `suggestions.vendorTaxNumber` shim, kept for the shipped 1.0 (1)
+        // build. Decoding got this far with it present, which is the whole
+        // assertion: this build ignores it rather than breaking on it.
         XCTAssertEqual(detail.images.count, 1)
         XCTAssertEqual(detail.images.first?.page, 1)
         XCTAssertEqual(
@@ -265,7 +268,7 @@ final class APIClientTests: XCTestCase {
             jsonBody: listPageJSON.replacingOccurrences(of: ".000Z", with: "Z")
         )
 
-        let page = try await client.receiptsPage(cursor: nil, status: nil, limit: nil)
+        let page = try await client.receiptsPage(cursor: nil, query: .default, limit: nil)
 
         XCTAssertEqual(
             page.receipts.first?.capturedAt,
@@ -277,15 +280,74 @@ final class APIClientTests: XCTestCase {
         let client = try makeClient()
         transport.enqueue(status: 200, jsonBody: emptyPageJSON)
 
-        _ = try await client.receiptsPage(cursor: "cursor-1", status: .pending, limit: 200)
+        _ = try await client.receiptsPage(
+            cursor: "cursor-1",
+            query: ReceiptQuery(
+                search: "  maple  ",
+                status: .pending,
+                category: "Office supplies",
+                sort: .total,
+                order: .asc
+            ),
+            limit: 200
+        )
 
         let url = try XCTUnwrap(transport.requests.first?.url)
         let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
         XCTAssertEqual(components.path, "/api/receipts")
         let items = try XCTUnwrap(components.queryItems)
         XCTAssertEqual(items.first { $0.name == "cursor" }?.value, "cursor-1")
+        XCTAssertEqual(items.first { $0.name == "q" }?.value, "maple") // trimmed
         XCTAssertEqual(items.first { $0.name == "status" }?.value, "pending")
+        // Free text, sent exactly as stored - the server matches it
+        // literally, and normalizing here would silently miss a category
+        // the person actually typed.
+        XCTAssertEqual(items.first { $0.name == "category" }?.value, "Office supplies")
+        XCTAssertEqual(items.first { $0.name == "sort" }?.value, "total")
+        XCTAssertEqual(items.first { $0.name == "order" }?.value, "asc")
         XCTAssertEqual(items.first { $0.name == "limit" }?.value, "200")
+    }
+
+    func testTheDefaultListQuerySendsOnlyTheOrderingItPinsOn() async throws {
+        // Blank search, no filters: `q` must be absent rather than empty
+        // (the server's minimum length is 1 and would reject ""), while
+        // sort and order are always sent - the cursor encodes what it was
+        // minted under, so the client states its ordering rather than
+        // trusting the server's default to keep matching.
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: emptyPageJSON)
+
+        _ = try await client.receiptsPage(cursor: nil, query: .default, limit: nil)
+
+        let url = try XCTUnwrap(transport.requests.first?.url)
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let items = try XCTUnwrap(components.queryItems)
+        XCTAssertEqual(items.map(\.name).sorted(), ["order", "sort"])
+        XCTAssertEqual(items.first { $0.name == "sort" }?.value, "purchasedAt")
+        XCTAssertEqual(items.first { $0.name == "order" }?.value, "desc")
+    }
+
+    func testDecodesReceiptOptions() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: optionsJSON)
+
+        let options = try await client.receiptOptions()
+
+        XCTAssertEqual(transport.requests.first?.url?.path, "/api/receipts/options")
+        // Most recently used first, and free text verbatim - the doubled
+        // space in "Office  supplies" is the user's own data (2026-08-26
+        // ruling) and must survive the round trip untouched.
+        XCTAssertEqual(options.categories, ["Office  supplies", "meals"])
+        XCTAssertEqual(options.paymentMethods, ["Visa"])
+    }
+
+    func testAnAccountWithNothingUsedYetDecodesAsEmptyNotAFailure() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: #"{"categories": [], "paymentMethods": []}"#)
+
+        let options = try await client.receiptOptions()
+
+        XCTAssertTrue(options.isEmpty)
     }
 
     // MARK: - Account deletion
@@ -375,15 +437,12 @@ final class APIClientTests: XCTestCase {
           "purchasedAt": "2026-03-20",
           "capturedAt": "2026-03-20T12:00:00.000Z",
           "vendor": "Synthetic Vendor Three",
-          "vendorTaxNumber": "000000000RT0001",
           "subtotalCents": 2500,
           "hstCents": 325,
-          "otherTaxCents": 100,
           "totalCents": 2925,
           "currency": "CAD",
           "category": "meals",
           "paymentMethod": null,
-          "isBusiness": true,
           "notes": "synthetic note",
           "status": "confirmed",
           "suggestions": null,
@@ -395,15 +454,12 @@ final class APIClientTests: XCTestCase {
           "purchasedAt": "2026-02-02",
           "capturedAt": "2026-02-02T18:30:00.000Z",
           "vendor": null,
-          "vendorTaxNumber": null,
           "subtotalCents": null,
           "hstCents": null,
-          "otherTaxCents": null,
           "totalCents": 4200,
           "currency": "CAD",
           "category": null,
           "paymentMethod": null,
-          "isBusiness": false,
           "notes": null,
           "status": "pending",
           "createdAt": "2026-08-05T10:00:01.000Z",
@@ -417,21 +473,25 @@ final class APIClientTests: XCTestCase {
 
     private let emptyPageJSON = #"{"receipts": [], "nextCursor": null, "pendingCount": 0}"#
 
+    /// The detail response as the server serves it after the 2026-08-26
+    /// field reduction - including `suggestions.vendorTaxNumber`, which the
+    /// server keeps as a served absence so the shipped 1.0 (1) build, which
+    /// decodes that key non-optionally, keeps working. This build declares
+    /// no such property, and an undeclared key is simply not decoded: the
+    /// fixture carries it to prove that tolerance, not to describe a field
+    /// this client has.
     private let detailJSON = """
     {
       "id": "0a1b2c3d-0000-4000-8000-000000000001",
       "purchasedAt": "2026-03-20",
       "capturedAt": "2026-03-20T12:00:00.000Z",
       "vendor": "Synthetic Vendor Three",
-      "vendorTaxNumber": null,
       "subtotalCents": 2500,
       "hstCents": 325,
-      "otherTaxCents": 100,
       "totalCents": 2925,
       "currency": "CAD",
       "category": "meals",
       "paymentMethod": null,
-      "isBusiness": true,
       "notes": null,
       "status": "confirmed",
       "suggestions": {
@@ -440,7 +500,7 @@ final class APIClientTests: XCTestCase {
         "totalCents": {"value": 2925, "source": "heuristic"},
         "hstCents": {"value": 325, "source": "heuristic"},
         "subtotalCents": {"value": null, "source": null},
-        "vendorTaxNumber": {"value": null, "source": null}
+        "vendorTaxNumber": {"value": null}
       },
       "createdAt": "2026-08-05T10:00:00.000Z",
       "updatedAt": "2026-08-05T10:00:00.000Z",
@@ -448,6 +508,14 @@ final class APIClientTests: XCTestCase {
       "images": [
         {"page": 1, "downloadUrl": "https://storage.example/presigned/abc"}
       ]
+    }
+    """
+
+    /// GET /api/receipts/options, most-recently-used first.
+    private let optionsJSON = """
+    {
+      "categories": ["Office  supplies", "meals"],
+      "paymentMethods": ["Visa"]
     }
     """
 

@@ -37,13 +37,13 @@ final class KeyboardExitUITests: XCTestCase {
         app.buttons["keyboard.done"]
     }
 
-    /// The four decimal pads have no return key and notes' return key
-    /// inserts a newline, so each of these five must raise a Done button
+    /// The three decimal pads have no return key and notes' return key
+    /// inserts a newline, so each of these four must raise a Done button
     /// a person can press.
     func testEveryKeyboardWithNoExitOfItsOwnGetsAPressableDoneButton() {
         let app = launchConfirmScreen()
 
-        for field in ["Total", "HST", "Subtotal", "Other tax", "Notes"] {
+        for field in ["Total", "HST", "Subtotal", "Notes"] {
             let input = app.textFields["field.\(field)"].firstMatch
             let target = input.exists ? input : app.textViews["field.\(field)"].firstMatch
             XCTAssertTrue(

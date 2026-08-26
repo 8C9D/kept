@@ -17,17 +17,26 @@ struct CaptureFlowView: View {
     }
 
     @StateObject private var captureModel: CaptureFlowModel
+    /// The capture-time confirm offers whatever the last options fetch
+    /// cached; this screen never asks for a fresh one (it is the offline
+    /// path by design).
+    @ObservedObject private var options: ReceiptOptionsStore
     @State private var stage: Stage = .scanning
 
     /// Called on the way out; true when anything might have changed and
     /// Home should refresh its list.
     private let onFinished: (_ didChangeAnything: Bool) -> Void
 
-    init(outbox: OutboxController, onFinished: @escaping (_ didChangeAnything: Bool) -> Void) {
+    init(
+        outbox: OutboxController,
+        options: ReceiptOptionsStore,
+        onFinished: @escaping (_ didChangeAnything: Bool) -> Void
+    ) {
         _captureModel = StateObject(wrappedValue: CaptureFlowModel(
             outbox: outbox,
             recognizer: VisionReceiptTextRecognizer()
         ))
+        self.options = options
         self.onFinished = onFinished
     }
 
@@ -73,6 +82,7 @@ struct CaptureFlowView: View {
             NavigationStack {
                 ConfirmReceiptView(
                     model: confirmModel,
+                    options: options,
                     onSaved: {
                         // The saveAction already queued the confirmed
                         // receipt durably; straight back to Home, no

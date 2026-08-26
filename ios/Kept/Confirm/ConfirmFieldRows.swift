@@ -11,11 +11,11 @@ import SwiftUI
 struct SuggestedFieldRow: View {
     let label: String
     @Binding var text: String
-    /// Every row is focusable, including ones carrying no suggestion
-    /// (other tax): focus is what the keyboard toolbar and the tint both
-    /// read, and a money field with no focus value is a decimal pad the
-    /// Done button cannot close. Whether the tint moves is decided by the
-    /// field's `suggestion`, not by whether it can take focus.
+    /// Every row is focusable, including ones carrying no suggestion:
+    /// focus is what the keyboard toolbar and the tint both read, and a
+    /// money field with no focus value is a decimal pad the Done button
+    /// cannot close. Whether the tint moves is decided by the field's
+    /// `suggestion`, not by whether it can take focus.
     let field: ConfirmReceiptModel.EditableField
     var focus: FocusState<ConfirmReceiptModel.EditableField?>.Binding
     let isUnreviewed: Bool
@@ -44,55 +44,43 @@ struct SuggestedFieldRow: View {
     }
 }
 
-/// The §7.2 required choice: two buttons, prominent, never pre-selected.
-/// The chosen one fills in; until then both sit outlined and save stays
-/// disabled with its reason (wired in ConfirmReceiptView).
-struct BusinessPersonalPicker: View {
-    let choice: Bool?
-    let choose: (Bool) -> Void
+/// Category and Payment: free text, plus a menu of the values this person
+/// has already used (GET /api/receipts/options, 2026-08-26 field
+/// reduction). Picking one fills the field, which stays editable - these
+/// are suggestions from the user's own data, never a vocabulary to choose
+/// from, and `category` is still free text with no enum behind it.
+///
+/// With no past values - a new account, or an options fetch that has not
+/// landed or failed - the menu is absent and the row is the plain
+/// free-text field it has always been. Nothing here waits on the network.
+struct ReusableValueFieldRow: View {
+    let label: String
+    @Binding var text: String
+    let field: ConfirmReceiptModel.EditableField
+    var focus: FocusState<ConfirmReceiptModel.EditableField?>.Binding
+    /// Distinct, most-recently-used first, as the options route serves it.
+    let pastValues: [String]
 
     var body: some View {
-        HStack(spacing: 12) {
-            choiceButton(title: "Business", value: true)
-            choiceButton(title: "Personal", value: false)
-        }
-        .listRowBackground(Color.clear)
-        // Default row insets, deliberately: with zero insets the buttons
-        // ran to the row's clip bounds and the outer rounded strokes were
-        // cut flat at both edges (wave-4 device run, the owner's finding 4).
-        // Inside the insets, nothing is clipped.
-    }
-
-    @ViewBuilder
-    private func choiceButton(title: String, value: Bool) -> some View {
-        let isChosen = choice == value
-        Button {
-            choose(value)
-        } label: {
-            Text(title)
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-        }
-        .buttonStyle(ChoiceButtonStyle(isChosen: isChosen))
-        .accessibilityAddTraits(isChosen ? .isSelected : [])
-    }
-
-    private struct ChoiceButtonStyle: ButtonStyle {
-        let isChosen: Bool
-
-        func makeBody(configuration: Configuration) -> some View {
-            configuration.label
-                .foregroundStyle(isChosen ? Color.white : Color.accentColor)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(isChosen ? Color.accentColor : Color.clear)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(Color.accentColor, lineWidth: 1.5)
-                )
-                .opacity(configuration.isPressed ? 0.7 : 1)
+        LabeledContent(label) {
+            HStack(spacing: 8) {
+                TextField("None", text: $text)
+                    .multilineTextAlignment(.trailing)
+                    .focused(focus, equals: field)
+                    .accessibilityIdentifier("field.\(label)")
+                if !pastValues.isEmpty {
+                    Menu {
+                        ForEach(pastValues, id: \.self) { value in
+                            Button(value) { text = value }
+                        }
+                    } label: {
+                        Image(systemName: "chevron.down.circle")
+                            .imageScale(.large)
+                    }
+                    .accessibilityLabel("\(label) you have used before")
+                    .accessibilityIdentifier("options.\(label)")
+                }
+            }
         }
     }
 }

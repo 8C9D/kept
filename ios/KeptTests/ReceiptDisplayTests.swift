@@ -8,26 +8,23 @@ import XCTest
 /// holds the human's values.
 final class ReceiptDisplayTests: XCTestCase {
     /// The device-pass defect verbatim: the row carries the capture-time
-    /// heuristic snapshot ("Basics", a bare tax number, a misparsed 2011
-    /// date) while the merge carries the corrections. Every screen must
-    /// read the corrections.
+    /// heuristic snapshot ("Basics", a misparsed 2011 date) while the
+    /// merge carries the corrections. Every screen must read the
+    /// corrections.
     func testPendingRendersTheMergeOverTheRowCopy() {
         let receipt = Fixtures.receipt(
             purchasedAt: "2011-07-26",
             vendor: "Basics",
-            vendorTaxNumber: "105216170",
             subtotalCents: 1000,
             hstCents: 111,
             totalCents: 1111,
-            isBusiness: nil,
             status: .pending,
             suggestions: Fixtures.merged(
                 vendor: "Food Basics",
                 purchasedAt: "2026-07-26",
                 totalCents: 1131,
                 hstCents: 131,
-                subtotalCents: 1020,
-                vendorTaxNumber: "R105216170"
+                subtotalCents: 1020
             )
         )
         XCTAssertEqual(receipt.displayVendor, "Food Basics")
@@ -35,7 +32,6 @@ final class ReceiptDisplayTests: XCTestCase {
         XCTAssertEqual(receipt.displayTotalCents, 1131)
         XCTAssertEqual(receipt.displayHstCents, 131)
         XCTAssertEqual(receipt.displaySubtotalCents, 1020)
-        XCTAssertEqual(receipt.displayVendorTaxNumber, "R105216170")
     }
 
     func testRowFillsFieldsNoSuggestionCovers() {
@@ -45,16 +41,13 @@ final class ReceiptDisplayTests: XCTestCase {
         let receipt = Fixtures.receipt(
             purchasedAt: "2026-03-20",
             vendor: "Basics",
-            vendorTaxNumber: "105216170",
             totalCents: 2925,
-            isBusiness: nil,
             status: .pending,
             suggestions: Fixtures.merged(vendor: "Food Basics")
         )
         XCTAssertEqual(receipt.displayVendor, "Food Basics")
         XCTAssertEqual(receipt.displayPurchasedAt, "2026-03-20")
         XCTAssertEqual(receipt.displayTotalCents, 2925)
-        XCTAssertEqual(receipt.displayVendorTaxNumber, "105216170")
         XCTAssertNil(receipt.displayHstCents)
         XCTAssertNil(receipt.displaySubtotalCents)
     }
@@ -62,11 +55,12 @@ final class ReceiptDisplayTests: XCTestCase {
     func testConfirmedRendersTheRowWhateverTheMergeSays() {
         // Confirmed receipts are swept and served suggestions too (the
         // accuracy set needs them), but the row holds what a human
-        // confirmed and the merge overrides it nowhere.
+        // confirmed and the merge overrides it nowhere. Since 2026-08-26 a
+        // confirmed receipt is editable, which makes this the rule that
+        // stops an edit being undone on screen by a stale parse.
         let receipt = Fixtures.receipt(
             purchasedAt: "2026-03-20",
             vendor: "Maple Foods",
-            vendorTaxNumber: "123456789RT0001",
             subtotalCents: 10000,
             hstCents: 1300,
             totalCents: 11300,
@@ -76,8 +70,7 @@ final class ReceiptDisplayTests: XCTestCase {
                 purchasedAt: "2026-03-22",
                 totalCents: 99999,
                 hstCents: 9999,
-                subtotalCents: 90000,
-                vendorTaxNumber: "999999999RT9999"
+                subtotalCents: 90000
             )
         )
         XCTAssertEqual(receipt.displayVendor, "Maple Foods")
@@ -85,7 +78,6 @@ final class ReceiptDisplayTests: XCTestCase {
         XCTAssertEqual(receipt.displayTotalCents, 11300)
         XCTAssertEqual(receipt.displayHstCents, 1300)
         XCTAssertEqual(receipt.displaySubtotalCents, 10000)
-        XCTAssertEqual(receipt.displayVendorTaxNumber, "123456789RT0001")
     }
 
     func testPendingWithNoSuggestionSetRendersTheRow() {
@@ -94,14 +86,12 @@ final class ReceiptDisplayTests: XCTestCase {
         let receipt = Fixtures.receipt(
             vendor: "Basics",
             totalCents: 2925,
-            isBusiness: nil,
             status: .pending,
             suggestions: nil
         )
         XCTAssertEqual(receipt.displayVendor, "Basics")
         XCTAssertEqual(receipt.displayPurchasedAt, "2026-03-20")
         XCTAssertEqual(receipt.displayTotalCents, 2925)
-        XCTAssertNil(receipt.displayVendorTaxNumber)
     }
 
     func testMergeAbsentEverywhereIsAStatedAbsenceNotAFabrication() {
@@ -111,7 +101,6 @@ final class ReceiptDisplayTests: XCTestCase {
         let receipt = Fixtures.receipt(
             vendor: nil,
             totalCents: nil,
-            isBusiness: nil,
             status: .pending,
             suggestions: Fixtures.merged()
         )
@@ -119,6 +108,5 @@ final class ReceiptDisplayTests: XCTestCase {
         XCTAssertNil(receipt.displayTotalCents)
         XCTAssertNil(receipt.displayHstCents)
         XCTAssertNil(receipt.displaySubtotalCents)
-        XCTAssertNil(receipt.displayVendorTaxNumber)
     }
 }

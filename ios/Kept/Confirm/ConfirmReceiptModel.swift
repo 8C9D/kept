@@ -13,7 +13,6 @@ struct ConfirmSuggestionSet {
     let totalCents: Int?
     let hstCents: Int?
     let subtotalCents: Int?
-    let vendorTaxNumber: String?
     /// Both parsers read a date off the same text and they differ (§7.3).
     /// Only the server merge can raise this.
     let dateDisagreement: Bool
@@ -24,7 +23,6 @@ struct ConfirmSuggestionSet {
         totalCents = merged.totalCents.value
         hstCents = merged.hstCents.value
         subtotalCents = merged.subtotalCents.value
-        vendorTaxNumber = merged.vendorTaxNumber.value
         dateDisagreement = merged.purchasedAt.disagreement
     }
 
@@ -34,7 +32,6 @@ struct ConfirmSuggestionSet {
         totalCents = parse.totalCents
         hstCents = parse.hstCents
         subtotalCents = parse.subtotalCents
-        vendorTaxNumber = parse.vendorTaxNumber
         dateDisagreement = false
     }
 }
@@ -51,8 +48,8 @@ struct ConfirmSuggestionSet {
 /// - the arithmetic check warns, inside the total card, and never blocks;
 /// - a date the two parsers disagreed on carries an inline note with the
 ///   arithmetic warning's treatment, cleared with the amber by touch;
-/// - save is disabled until business-or-personal is chosen (the §5.2
-///   no-default rule made visible), with the reason stated;
+/// - save is disabled until there is a valid total, with the reason
+///   stated;
 /// - a valid save hands the confirmed fields to whichever save path built
 ///   this model: a PATCH with status=confirmed for a server-side pending
 ///   receipt (the queue and the detail screen), or a durable outbox write
@@ -61,30 +58,36 @@ struct ConfirmSuggestionSet {
 ///   screen.
 @MainActor
 final class ConfirmReceiptModel: ObservableObject, Identifiable {
+    /// Why this form is open. The one difference between the two: an edit
+    /// shows a person their own confirmed values back, so nothing on it is
+    /// a machine suggestion and nothing starts amber (2026-08-26 field
+    /// reduction: confirmed receipts became editable).
+    enum Purpose {
+        case confirm
+        case edit
+    }
+
     /// The fields that can carry an OCR suggestion and therefore an amber
-    /// marking. Business/personal is deliberately not here: it is never
-    /// prefilled (spec §7.2), so it has nothing to mark.
+    /// marking.
     enum SuggestedField: CaseIterable {
-        case total, date, vendor, hst, subtotal, taxNumber
+        case total, date, vendor, hst, subtotal
     }
 
     /// Every field on the form that raises a keyboard, which the view's
-    /// focus runs on instead of SuggestedField. Two things needed the
-    /// wider set: "other tax" carries no suggestion and so had no focus
-    /// value at all - leaving one decimal pad nothing could close - and
-    /// the keyboard toolbar has to know which keyboard is up before it can
-    /// offer a way out of it. The date is deliberately absent: a
-    /// DatePicker raises no keyboard.
+    /// focus runs on instead of SuggestedField. The keyboard toolbar has
+    /// to know which keyboard is up before it can offer a way out of it,
+    /// so fields carrying no suggestion still need a focus value. The date
+    /// is deliberately absent: a DatePicker raises no keyboard.
     enum EditableField: Hashable, CaseIterable {
-        case total, vendor, hst, subtotal, otherTax, taxNumber
+        case total, vendor, hst, subtotal
         case category, paymentMethod, notes
 
         /// The money fields, which take a decimal pad.
         var usesDecimalPad: Bool {
             switch self {
-            case .total, .hst, .subtotal, .otherTax:
+            case .total, .hst, .subtotal:
                 return true
-            case .vendor, .taxNumber, .category, .paymentMethod, .notes:
+            case .vendor, .category, .paymentMethod, .notes:
                 return false
             }
         }
@@ -98,8 +101,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             case .vendor: return .vendor
             case .hst: return .hst
             case .subtotal: return .subtotal
-            case .taxNumber: return .taxNumber
-            case .otherTax, .category, .paymentMethod, .notes: return nil
+            case .category, .paymentMethod, .notes: return nil
             }
         }
     }
@@ -108,6 +110,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// a capture being confirmed before it has uploaded.
     let receiptId: UUID?
     let currency: String
+    let purpose: Purpose
     /// A presigned URL (short-lived; displayed promptly, never persisted)
     /// for stored receipts, or the scanned bytes still in hand for a
     /// capture-time confirm.
@@ -126,15 +129,9 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     @Published var vendorText: String
     @Published var hstText: String
     @Published var subtotalText: String
-    @Published var otherTaxText: String
-    @Published var taxNumberText: String
     @Published var categoryText: String
     @Published var paymentMethodText: String
     @Published var notesText: String
-
-    /// Nil until the person chooses - there is no default (spec §5.2), and
-    /// the save button stays disabled saying why.
-    @Published private(set) var businessChoice: Bool?
 
     @Published private(set) var unreviewedFields: Set<SuggestedField>
     @Published private(set) var isSaving = false
@@ -156,28 +153,35 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 
     // MARK: - Construction
 
-    /// A server-side pending receipt (the confirm queue, or the detail
-    /// screen's "Confirm this receipt"): the suggestion set is the §7.3
-    /// merge the API serves on every receipt - both parsers, merged by
-    /// the domain layer; this client renders, never decides (spec §4.1) -
-    /// and save PATCHes the receipt to confirmed.
-    convenience init(api: any KeptAPI, detail: ReceiptDetail) {
+    /// A server-side receipt: the confirm queue and the detail screen's
+    /// "Confirm this receipt" open it with `.confirm`, where the
+    /// suggestion set is the §7.3 merge the API serves on every receipt -
+    /// both parsers, merged by the domain layer; this client renders,
+    /// never decides (spec §4.1). The detail screen's "Edit receipt" on an
+    /// already-confirmed row opens it with `.edit`, where the row's values
+    /// are the human's own and no suggestion set applies at all. Either
+    /// way save PATCHes the receipt confirmed.
+    convenience init(api: any KeptAPI, detail: ReceiptDetail, purpose: Purpose = .confirm) {
         let receipt = detail.receipt
         let id = receipt.id
         self.init(
             receiptId: id,
             currency: receipt.currency,
+            purpose: purpose,
             imageSource: detail.images.first.map { .remote($0.downloadUrl) },
             ocrFailureNote: nil,
-            suggestions: receipt.suggestions.map(ConfirmSuggestionSet.init(merged:)),
+            // An edit prefills from the row alone: the merge is still
+            // served on confirmed receipts (the accuracy set needs it) and
+            // would otherwise overwrite what the person confirmed.
+            suggestions: purpose == .edit
+                ? nil
+                : receipt.suggestions.map(ConfirmSuggestionSet.init(merged:)),
             existing: ExistingValues(
                 purchasedAt: receipt.purchasedAt,
                 vendor: receipt.vendor,
-                vendorTaxNumber: receipt.vendorTaxNumber,
                 totalCents: receipt.totalCents,
                 hstCents: receipt.hstCents,
                 subtotalCents: receipt.subtotalCents,
-                otherTaxCents: receipt.otherTaxCents,
                 category: receipt.category,
                 paymentMethod: receipt.paymentMethod,
                 notes: receipt.notes
@@ -203,6 +207,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             // Not editable on this form (spec, wave-4 report §6.3); the
             // create omits it and the server's column default applies.
             currency: "CAD",
+            purpose: .confirm,
             imageSource: .local(draft.imageData),
             ocrFailureNote: draft.ocrFailureNote,
             suggestions: ConfirmSuggestionSet(parse: draft.suggestions),
@@ -220,11 +225,9 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     private struct ExistingValues {
         var purchasedAt: String
         var vendor: String?
-        var vendorTaxNumber: String?
         var totalCents: Int?
         var hstCents: Int?
         var subtotalCents: Int?
-        var otherTaxCents: Int?
         var category: String?
         var paymentMethod: String?
         var notes: String?
@@ -240,6 +243,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     private init(
         receiptId: UUID?,
         currency: String,
+        purpose: Purpose,
         imageSource: ReceiptImageSource?,
         ocrFailureNote: String?,
         suggestions: ConfirmSuggestionSet?,
@@ -248,6 +252,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     ) {
         self.receiptId = receiptId
         self.currency = currency
+        self.purpose = purpose
         self.imageSource = imageSource
         self.ocrFailureNote = ocrFailureNote
         self.saveAction = saveAction
@@ -265,35 +270,40 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             .map(MoneyInput.text(fromCents:)) ?? ""
         subtotalText = (suggestions?.subtotalCents ?? existing.subtotalCents)
             .map(MoneyInput.text(fromCents:)) ?? ""
-        otherTaxText = existing.otherTaxCents.map(MoneyInput.text(fromCents:)) ?? ""
-        taxNumberText = suggestions?.vendorTaxNumber ?? existing.vendorTaxNumber ?? ""
         categoryText = existing.category ?? ""
         paymentMethodText = existing.paymentMethod ?? ""
         notesText = existing.notes ?? ""
-        businessChoice = nil
 
-        var unreviewed: Set<SuggestedField> = [.date]
-        if let suggestions {
-            if suggestions.totalCents != nil { unreviewed.insert(.total) }
-            if suggestions.vendor != nil { unreviewed.insert(.vendor) }
-            if suggestions.hstCents != nil { unreviewed.insert(.hst) }
-            if suggestions.subtotalCents != nil { unreviewed.insert(.subtotal) }
-            if suggestions.vendorTaxNumber != nil { unreviewed.insert(.taxNumber) }
-            dateIsCaptureDayFallback = suggestions.purchasedAt == nil
-            dateDisagreement = suggestions.dateDisagreement
-        } else {
-            // No suggestion set at all - a receipt neither parser ever
-            // saw (pre-wave-4 rows): value-presence is the only proxy
-            // left, and no fabrication claim is made about the date.
-            if existing.totalCents != nil { unreviewed.insert(.total) }
-            if existing.vendor != nil { unreviewed.insert(.vendor) }
-            if existing.hstCents != nil { unreviewed.insert(.hst) }
-            if existing.subtotalCents != nil { unreviewed.insert(.subtotal) }
-            if existing.vendorTaxNumber != nil { unreviewed.insert(.taxNumber) }
+        switch purpose {
+        case .edit:
+            // Every value on screen is the human's own, already confirmed
+            // once. Nothing here is a machine suggestion, so nothing is
+            // amber and nothing claims a fabricated date.
+            unreviewedFields = []
             dateIsCaptureDayFallback = false
             dateDisagreement = false
+        case .confirm:
+            var unreviewed: Set<SuggestedField> = [.date]
+            if let suggestions {
+                if suggestions.totalCents != nil { unreviewed.insert(.total) }
+                if suggestions.vendor != nil { unreviewed.insert(.vendor) }
+                if suggestions.hstCents != nil { unreviewed.insert(.hst) }
+                if suggestions.subtotalCents != nil { unreviewed.insert(.subtotal) }
+                dateIsCaptureDayFallback = suggestions.purchasedAt == nil
+                dateDisagreement = suggestions.dateDisagreement
+            } else {
+                // No suggestion set at all - a receipt neither parser ever
+                // saw (pre-wave-4 rows): value-presence is the only proxy
+                // left, and no fabrication claim is made about the date.
+                if existing.totalCents != nil { unreviewed.insert(.total) }
+                if existing.vendor != nil { unreviewed.insert(.vendor) }
+                if existing.hstCents != nil { unreviewed.insert(.hst) }
+                if existing.subtotalCents != nil { unreviewed.insert(.subtotal) }
+                dateIsCaptureDayFallback = false
+                dateDisagreement = false
+            }
+            unreviewedFields = unreviewed
         }
-        unreviewedFields = unreviewed
     }
 
     // MARK: - Reviewing
@@ -313,6 +323,28 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         unreviewedFields.count
     }
 
+    /// The navigation title: the unreviewed counter while confirming -
+    /// the whole point of the screen - and a plain name while editing,
+    /// where there is nothing machine-suggested left to count.
+    var screenTitle: String {
+        switch purpose {
+        case .edit:
+            return "Edit receipt"
+        case .confirm:
+            return unreviewedCount == 0 ? "All checked" : "\(unreviewedCount) to check"
+        }
+    }
+
+    /// The way out without saving. "Later" while confirming means the
+    /// receipt stays pending and the badge keeps nagging (§5.2a); on an
+    /// already-confirmed receipt nothing is left over, so it is a cancel.
+    var dismissLabel: String {
+        switch purpose {
+        case .edit: return "Cancel"
+        case .confirm: return "Later"
+        }
+    }
+
     /// The date-disagreement note (spec §7.2, §10A.1): shown while the
     /// date is still unreviewed, gone the moment it is touched - the
     /// amber and the note clear together, because touched means a human
@@ -321,36 +353,27 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         dateDisagreement && isUnreviewed(.date)
     }
 
-    func chooseBusiness(_ isBusiness: Bool) {
-        businessChoice = isBusiness
-    }
-
     // MARK: - Money
 
     var totalInput: MoneyInput { MoneyInput.parse(totalText) }
     var hstInput: MoneyInput { MoneyInput.parse(hstText) }
     var subtotalInput: MoneyInput { MoneyInput.parse(subtotalText) }
-    var otherTaxInput: MoneyInput { MoneyInput.parse(otherTaxText) }
 
-    /// The §7.2 inline check: does subtotal + hst + other tax reach the
-    /// total? Only when there is a subtotal and a total to compare -
-    /// receipts with neither have nothing to reconcile - and never
-    /// blocking, because plenty of legitimate receipts do not reconcile.
+    /// The §7.2 inline check: does subtotal + hst reach the total? Only
+    /// when there is a subtotal and a total to compare - receipts with
+    /// neither have nothing to reconcile - and never blocking, because
+    /// plenty of legitimate receipts do not reconcile.
     var showsArithmeticWarning: Bool {
         guard
             case .cents(let total) = totalInput,
-            case .cents(let subtotal) = subtotalInput
+            case .cents(let subtotal) = subtotalInput,
+            let hst = centsOrZero(hstInput)
         else {
+            // An invalid amount is its own stated problem; warning about
+            // arithmetic over garbage would just be noise.
             return false
         }
-        let hst = centsOrZero(hstInput)
-        let otherTax = centsOrZero(otherTaxInput)
-        guard let hst, let otherTax else {
-            // An invalid amount in either field is its own stated problem;
-            // warning about arithmetic over garbage would just be noise.
-            return false
-        }
-        return subtotal + hst + otherTax != total
+        return subtotal + hst != total
     }
 
     /// nil for invalid text, 0 for blank - blank means "no such charge".
@@ -367,9 +390,6 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// The reason save is disabled, stated below the button rather than
     /// left to be inferred (spec §10A.1) - or nil, meaning save away.
     var saveBlocker: String? {
-        if businessChoice == nil {
-            return "Choose business or personal to save."
-        }
         switch totalInput {
         case .empty:
             return "Enter the total to save."
@@ -384,9 +404,6 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         if subtotalInput == .invalid {
             return "The subtotal isn't a valid amount."
         }
-        if otherTaxInput == .invalid {
-            return "Other tax isn't a valid amount."
-        }
         return nil
     }
 
@@ -399,7 +416,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// no success modal (spec §10A.1). Returns whether the receipt is now
     /// confirmed.
     func save() async -> Bool {
-        guard let isBusiness = businessChoice, case .cents(let totalCents) = totalInput else {
+        guard case .cents(let totalCents) = totalInput else {
             // The UI disables save while saveBlocker is non-nil; reaching
             // here anyway is a wiring bug, surfaced as the stated reason.
             saveError = saveBlocker
@@ -415,14 +432,11 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             try await saveAction(ConfirmedReceiptFields(
                 purchasedAt: ReceiptFormat.isoDate(fromPicker: purchasedDate),
                 vendor: normalized(vendorText),
-                vendorTaxNumber: normalized(taxNumberText),
                 subtotalCents: centsOrNil(subtotalInput),
                 hstCents: centsOrNil(hstInput),
-                otherTaxCents: centsOrNil(otherTaxInput),
                 totalCents: totalCents,
                 category: normalized(categoryText),
                 paymentMethod: normalized(paymentMethodText),
-                isBusiness: isBusiness,
                 notes: normalized(notesText)
             ))
             return true

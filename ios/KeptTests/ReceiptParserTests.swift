@@ -32,7 +32,6 @@ final class ReceiptParserTests: XCTestCase {
         XCTAssertEqual(suggestions.subtotalCents, 10000)
         XCTAssertEqual(suggestions.hstCents, 1300)
         XCTAssertEqual(suggestions.totalCents, 11300)
-        XCTAssertEqual(suggestions.vendorTaxNumber, "123456789RT0001")
     }
 
     func testRestaurantReceiptWithTipKeepsTipOutOfTax() {
@@ -68,7 +67,6 @@ final class ReceiptParserTests: XCTestCase {
         XCTAssertEqual(suggestions.subtotalCents, 100000)
         XCTAssertEqual(suggestions.hstCents, 13000)
         XCTAssertEqual(suggestions.totalCents, 113000)
-        XCTAssertEqual(suggestions.vendorTaxNumber, "987654321RT0002")
     }
 
     func testFadedReceiptFallsBackAndStatesAbsences() {
@@ -87,7 +85,6 @@ final class ReceiptParserTests: XCTestCase {
         XCTAssertNil(suggestions.purchasedAt)
         XCTAssertNil(suggestions.hstCents)
         XCTAssertNil(suggestions.subtotalCents)
-        XCTAssertNil(suggestions.vendorTaxNumber)
     }
 
     func testEmptyScanSuggestsNothing() {
@@ -260,25 +257,22 @@ final class ReceiptParserTests: XCTestCase {
         XCTAssertEqual(suggestions.totalCents, 3390)
     }
 
-    // MARK: - Tax number heuristics
-
-    func testBareNineDigitsNeedsAGstLabel() {
-        let labelled = ReceiptParser.parse(lines: [
-            line("GST# 123456789", y: 0.9),
-        ])
-        XCTAssertEqual(labelled.vendorTaxNumber, "123456789")
-
-        let unlabelled = ReceiptParser.parse(lines: [
-            line("Ref 123456789", y: 0.9),
-        ])
-        XCTAssertNil(unlabelled.vendorTaxNumber)
-    }
-
-    func testPhoneNumberIsNotATaxNumber() {
+    /// The tax-number heuristic and its field went on 2026-08-26 (the
+    /// receipt reduced to date, vendor, subtotal, HST, total, category,
+    /// payment, notes). A GST/HST registration line still prints on real
+    /// paper, so what matters now is that removing its reader left nothing
+    /// else reading it: it carries no two-decimal amount, and the money
+    /// heuristics around it are unmoved.
+    func testARegistrationNumberLineFeedsNoOtherHeuristic() {
         let suggestions = ReceiptParser.parse(lines: [
-            line("Tel 613-555-0142", y: 0.10),
+            line("SUBTOTAL 10.00", y: 0.60),
+            line("HST 1.30", y: 0.65),
+            line("TOTAL 11.30", y: 0.70),
+            line("GST/HST # 123456789 RT0001", y: 0.92),
         ])
-        XCTAssertNil(suggestions.vendorTaxNumber)
+        XCTAssertEqual(suggestions.subtotalCents, 1000)
+        XCTAssertEqual(suggestions.hstCents, 130)
+        XCTAssertEqual(suggestions.totalCents, 1130)
     }
 
     // MARK: - Date heuristics

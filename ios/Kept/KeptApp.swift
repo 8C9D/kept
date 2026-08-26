@@ -16,6 +16,7 @@ final class AppEnvironment: ObservableObject {
     let api: APIClient
     let session: SessionController
     let outbox: OutboxController
+    let receiptOptions: ReceiptOptionsStore
 
     init() {
         let serverConfig = ServerConfig(defaults: .standard)
@@ -45,6 +46,7 @@ final class AppEnvironment: ObservableObject {
             connectivity: NetworkPathConnectivityMonitor(),
             backgroundContinuation: AppBackgroundContinuation()
         )
+        let receiptOptions = ReceiptOptionsStore(api: api, defaults: .standard)
 
         // Wired after construction because the pieces reference each other:
         // the client reports rejected sessions to the controller it was
@@ -57,12 +59,16 @@ final class AppEnvironment: ObservableObject {
         session.onSignedIn = { [weak outbox] in
             outbox?.externalTrigger()
         }
-        session.onSignedOut = { [weak outbox] in
+        session.onSignedOut = { [weak outbox, weak receiptOptions] in
             outbox?.sessionDidEnd()
+            // One person's categories and payment methods must not become
+            // another's suggestions on a shared phone (constraint 4).
+            receiptOptions?.clear()
         }
         // Fires before the sign-out above: the queue's own copies of the
         // deleted account's receipts go with the account.
-        session.onAccountDeleted = { [weak outbox] userId in
+        session.onAccountDeleted = { [weak outbox, weak receiptOptions] userId in
+            receiptOptions?.clear()
             Task { await outbox?.discardAll(ownedBy: userId) }
         }
 
@@ -70,6 +76,7 @@ final class AppEnvironment: ObservableObject {
         self.api = api
         self.session = session
         self.outbox = outbox
+        self.receiptOptions = receiptOptions
 
         Task { await outbox.start() }
     }
@@ -82,7 +89,7 @@ struct KeptApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(api: environment.api)
+            RootView(api: environment.api, options: environment.receiptOptions)
                 .environmentObject(environment.session)
                 .environmentObject(environment.serverConfig)
                 .environmentObject(environment.outbox)

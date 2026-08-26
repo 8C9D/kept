@@ -13,8 +13,14 @@ final class ConfirmQueueModelTests: XCTestCase {
     }
 
     private func stubPendingList(_ receipts: [Receipt], pendingCount: Int) {
-        api.receiptsPageHandler = { _, status, _ in
-            XCTAssertEqual(status, .pending) // the queue only ever asks for pending
+        api.receiptsPageHandler = { _, query, _ in
+            // The queue only ever asks for pending, in the order Home
+            // defaults to - it is the same pile, worked from the top.
+            XCTAssertEqual(query.status, .pending)
+            XCTAssertNil(query.searchTerm)
+            XCTAssertNil(query.category)
+            XCTAssertEqual(query.sort, .purchasedAt)
+            XCTAssertEqual(query.order, .desc)
             return Fixtures.page(receipts, pendingCount: pendingCount)
         }
         api.receiptDetailHandler = { id in
@@ -26,7 +32,7 @@ final class ConfirmQueueModelTests: XCTestCase {
     }
 
     func testLoadsTheNextPendingReceiptIntoAConfirmForm() async {
-        let pending = Fixtures.receipt(isBusiness: nil, status: .pending)
+        let pending = Fixtures.receipt(status: .pending)
         stubPendingList([pending], pendingCount: 3)
 
         await queue.loadNext()
@@ -52,7 +58,7 @@ final class ConfirmQueueModelTests: XCTestCase {
         // §10A.1: a single confirmed receipt must return straight to Home
         // (the view shows a summary only for handledCount > 1 or set-
         // asides); the model's count is what that decision reads.
-        let only = Fixtures.receipt(isBusiness: nil, status: .pending)
+        let only = Fixtures.receipt(status: .pending)
         stubPendingList([only], pendingCount: 1)
 
         await queue.loadNext()
@@ -69,8 +75,8 @@ final class ConfirmQueueModelTests: XCTestCase {
     }
 
     func testSetAsideSkipsTheReceiptForTheRestOfTheSitting() async {
-        let first = Fixtures.receipt(isBusiness: nil, status: .pending)
-        let second = Fixtures.receipt(isBusiness: nil, status: .pending)
+        let first = Fixtures.receipt(status: .pending)
+        let second = Fixtures.receipt(status: .pending)
         stubPendingList([first, second], pendingCount: 2)
 
         await queue.loadNext()

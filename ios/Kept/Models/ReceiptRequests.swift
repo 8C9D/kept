@@ -30,7 +30,6 @@ struct OcrSuggestionsPayload: Encodable, Equatable {
     let totalCents: Int?
     let hstCents: Int?
     let subtotalCents: Int?
-    let vendorTaxNumber: String?
 
     init(_ suggestions: ReceiptSuggestions) {
         vendor = suggestions.vendor
@@ -38,7 +37,6 @@ struct OcrSuggestionsPayload: Encodable, Equatable {
         totalCents = suggestions.totalCents
         hstCents = suggestions.hstCents
         subtotalCents = suggestions.subtotalCents
-        vendorTaxNumber = suggestions.vendorTaxNumber
     }
 
     // The server's strict schema takes absent keys, not explicit nulls, so
@@ -50,11 +48,10 @@ struct OcrSuggestionsPayload: Encodable, Equatable {
         try container.encodeIfPresent(totalCents, forKey: .totalCents)
         try container.encodeIfPresent(hstCents, forKey: .hstCents)
         try container.encodeIfPresent(subtotalCents, forKey: .subtotalCents)
-        try container.encodeIfPresent(vendorTaxNumber, forKey: .vendorTaxNumber)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case vendor, purchasedAt, totalCents, hstCents, subtotalCents, vendorTaxNumber
+        case vendor, purchasedAt, totalCents, hstCents, subtotalCents
     }
 }
 
@@ -67,14 +64,11 @@ struct CreateReceiptRequest: Encodable, Equatable {
     let purchasedAt: String
     let capturedAt: String
     let vendor: String?
-    let vendorTaxNumber: String?
     let subtotalCents: Int?
     let hstCents: Int?
-    let otherTaxCents: Int?
     let totalCents: Int?
     let category: String?
     let paymentMethod: String?
-    let isBusiness: Bool?
     let notes: String?
     let status: ReceiptStatus?
     let ocrRawText: String?
@@ -92,14 +86,11 @@ struct CreateReceiptRequest: Encodable, Equatable {
         purchasedAt: String,
         capturedAt: String,
         vendor: String?,
-        vendorTaxNumber: String?,
         subtotalCents: Int?,
         hstCents: Int?,
-        otherTaxCents: Int? = nil,
         totalCents: Int?,
         category: String? = nil,
         paymentMethod: String? = nil,
-        isBusiness: Bool? = nil,
         notes: String? = nil,
         status: ReceiptStatus? = nil,
         ocrRawText: String?,
@@ -109,14 +100,11 @@ struct CreateReceiptRequest: Encodable, Equatable {
         self.purchasedAt = purchasedAt
         self.capturedAt = capturedAt
         self.vendor = vendor
-        self.vendorTaxNumber = vendorTaxNumber
         self.subtotalCents = subtotalCents
         self.hstCents = hstCents
-        self.otherTaxCents = otherTaxCents
         self.totalCents = totalCents
         self.category = category
         self.paymentMethod = paymentMethod
-        self.isBusiness = isBusiness
         self.notes = notes
         self.status = status
         self.ocrRawText = ocrRawText
@@ -124,23 +112,19 @@ struct CreateReceiptRequest: Encodable, Equatable {
         self.image = image
     }
 
-    // Absent keys, not explicit nulls, for the strict schema. `isBusiness`
-    // and `status` ride only on the confirmed-at-capture path - a pending
-    // create never sends them, because `is_business` has no default
-    // anywhere (spec §5.2) and only a human's explicit choice supplies it.
+    // Absent keys, not explicit nulls, for the strict schema. `status`
+    // rides only on the confirmed-at-capture path - a pending create never
+    // sends it, because only a human's confirmation may set it.
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(purchasedAt, forKey: .purchasedAt)
         try container.encode(capturedAt, forKey: .capturedAt)
         try container.encodeIfPresent(vendor, forKey: .vendor)
-        try container.encodeIfPresent(vendorTaxNumber, forKey: .vendorTaxNumber)
         try container.encodeIfPresent(subtotalCents, forKey: .subtotalCents)
         try container.encodeIfPresent(hstCents, forKey: .hstCents)
-        try container.encodeIfPresent(otherTaxCents, forKey: .otherTaxCents)
         try container.encodeIfPresent(totalCents, forKey: .totalCents)
         try container.encodeIfPresent(category, forKey: .category)
         try container.encodeIfPresent(paymentMethod, forKey: .paymentMethod)
-        try container.encodeIfPresent(isBusiness, forKey: .isBusiness)
         try container.encodeIfPresent(notes, forKey: .notes)
         try container.encodeIfPresent(status, forKey: .status)
         try container.encodeIfPresent(ocrRawText, forKey: .ocrRawText)
@@ -149,9 +133,9 @@ struct CreateReceiptRequest: Encodable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case purchasedAt, capturedAt, vendor, vendorTaxNumber
-        case subtotalCents, hstCents, otherTaxCents, totalCents
-        case category, paymentMethod, isBusiness, notes, status
+        case purchasedAt, capturedAt, vendor
+        case subtotalCents, hstCents, totalCents
+        case category, paymentMethod, notes, status
         case ocrRawText, ocrSuggestions, image
     }
 }
@@ -161,17 +145,18 @@ struct CreateReceiptRequest: Encodable, Equatable {
 /// "clear the field" - the server's update schema distinguishes absent
 /// (leave unchanged) from null (clear), and the confirm screen always
 /// sends the whole form, so every field is present.
+///
+/// The same body serves a first confirmation and a later edit of an
+/// already-confirmed receipt: `status: "confirmed"` is idempotent, and
+/// the route permits editing confirmed rows.
 struct ConfirmReceiptRequest: Encodable, Equatable {
     let purchasedAt: String
     let vendor: String?
-    let vendorTaxNumber: String?
     let subtotalCents: Int?
     let hstCents: Int?
-    let otherTaxCents: Int?
     let totalCents: Int
     let category: String?
     let paymentMethod: String?
-    let isBusiness: Bool
     let notes: String?
 
     /// The PATCH body from what the confirm form produced - the same
@@ -180,14 +165,11 @@ struct ConfirmReceiptRequest: Encodable, Equatable {
     init(_ fields: ConfirmedReceiptFields) {
         purchasedAt = fields.purchasedAt
         vendor = fields.vendor
-        vendorTaxNumber = fields.vendorTaxNumber
         subtotalCents = fields.subtotalCents
         hstCents = fields.hstCents
-        otherTaxCents = fields.otherTaxCents
         totalCents = fields.totalCents
         category = fields.category
         paymentMethod = fields.paymentMethod
-        isBusiness = fields.isBusiness
         notes = fields.notes
     }
 
@@ -195,21 +177,18 @@ struct ConfirmReceiptRequest: Encodable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(purchasedAt, forKey: .purchasedAt)
         try container.encode(vendor, forKey: .vendor)
-        try container.encode(vendorTaxNumber, forKey: .vendorTaxNumber)
         try container.encode(subtotalCents, forKey: .subtotalCents)
         try container.encode(hstCents, forKey: .hstCents)
-        try container.encode(otherTaxCents, forKey: .otherTaxCents)
         try container.encode(totalCents, forKey: .totalCents)
         try container.encode(category, forKey: .category)
         try container.encode(paymentMethod, forKey: .paymentMethod)
-        try container.encode(isBusiness, forKey: .isBusiness)
         try container.encode(notes, forKey: .notes)
         try container.encode("confirmed", forKey: .status)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case purchasedAt, vendor, vendorTaxNumber
-        case subtotalCents, hstCents, otherTaxCents, totalCents
-        case category, paymentMethod, isBusiness, notes, status
+        case purchasedAt, vendor
+        case subtotalCents, hstCents, totalCents
+        case category, paymentMethod, notes, status
     }
 }

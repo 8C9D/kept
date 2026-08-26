@@ -41,6 +41,17 @@ final class ReceiptListModel: ObservableObject {
     @Published private(set) var pendingCount: PendingCount = .exact(0)
     @Published private(set) var nextPage: NextPage = .idle
 
+    /// What the list is currently asking the server for. Changed only
+    /// through the methods below, each of which restarts from page one -
+    /// a cursor encodes the sort position of the result set it came from,
+    /// and the server refuses one minted under a different sort.
+    @Published private(set) var query: ReceiptQuery = .default
+
+    /// The search box's live text, bound straight to `.searchable`. It is
+    /// not the query: the view debounces it and calls `applySearch()`,
+    /// so a person typing "coffee" costs one request, not six.
+    @Published var searchText: String = ""
+
     private var nextCursor: String?
     private let loader: GuardedReceiptLoader
 
@@ -54,11 +65,17 @@ final class ReceiptListModel: ObservableObject {
     /// and Retry.
     func loadFirstPage() async {
         loader.beginNewList()
+        // Dropped before the await, not after: the rows on screen still
+        // belong to the old result set, and a scroll reaching the last of
+        // them mid-flight would otherwise page with a cursor this request
+        // is about to invalidate.
+        nextCursor = nil
+        nextPage = .idle
         if receipts.isEmpty {
             phase = .loading
         }
 
-        switch await loader.firstPage() {
+        switch await loader.firstPage(query: query) {
         case .superseded:
             return
         case .failure(let error):
@@ -87,10 +104,72 @@ final class ReceiptListModel: ObservableObject {
         await loadMore()
     }
 
+    // MARK: - Search, sort, filter
+
+    /// The debounced search box landing. A no-op when the term has not
+    /// actually changed, so the view can call it freely - including the
+    /// first time the field appears, which is not a search.
+    func applySearch() async {
+        let pending = ReceiptQuery(
+            search: searchText,
+            status: query.status,
+            category: query.category,
+            sort: query.sort,
+            order: query.order
+        )
+        guard pending.searchTerm != query.searchTerm else { return }
+        await apply(pending)
+    }
+
+    func setStatus(_ status: ReceiptStatus?) async {
+        var pending = query
+        pending.status = status
+        await apply(pending)
+    }
+
+    func setCategory(_ category: String?) async {
+        var pending = query
+        pending.category = category
+        await apply(pending)
+    }
+
+    func setSort(_ sort: ReceiptQuery.Sort) async {
+        var pending = query
+        pending.sort = sort
+        await apply(pending)
+    }
+
+    func setOrder(_ order: ReceiptQuery.Order) async {
+        var pending = query
+        pending.order = order
+        await apply(pending)
+    }
+
+    /// Clears every narrowing filter, ordering left alone - the "Show all"
+    /// escape from a filter set that has hidden everything.
+    func clearFilters() async {
+        var pending = query
+        pending.search = ""
+        pending.status = nil
+        pending.category = nil
+        searchText = ""
+        await apply(pending)
+    }
+
+    /// One route for every query change, so none of them can forget to
+    /// start again from page one.
+    private func apply(_ pending: ReceiptQuery) async {
+        guard pending != query else { return }
+        query = pending
+        await loadFirstPage()
+    }
+
+    // MARK: - Paging
+
     private func loadMore() async {
         guard let cursor = nextCursor, nextPage != .loading else { return }
         nextPage = .loading
-        switch await loader.page(cursor: cursor) {
+        switch await loader.page(cursor: cursor, query: query) {
         case .superseded:
             // A refresh replaced the list while this page was in flight;
             // the refresh path owns nextPage now.

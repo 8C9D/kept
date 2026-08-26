@@ -144,14 +144,11 @@ final class OutboxControllerTests: XCTestCase {
         let confirmed = ConfirmedReceiptFields(
             purchasedAt: "2026-01-15", // the human corrected the parsed date
             vendor: "Maple Foods",
-            vendorTaxNumber: nil,
             subtotalCents: 10000,
             hstCents: 1300,
-            otherTaxCents: nil,
             totalCents: 11300,
             category: "groceries",
             paymentMethod: "visa",
-            isBusiness: true,
             notes: nil
         )
         let controller = await makeController()
@@ -165,32 +162,43 @@ final class OutboxControllerTests: XCTestCase {
         let request = try XCTUnwrap(api.createReceiptCalls.first)
         XCTAssertEqual(request.status, .confirmed)
         XCTAssertEqual(request.purchasedAt, "2026-01-15")
-        XCTAssertEqual(request.isBusiness, true)
         XCTAssertEqual(request.category, "groceries")
+        XCTAssertEqual(request.paymentMethod, "visa")
         XCTAssertEqual(request.totalCents, 11300)
         XCTAssertEqual(request.ocrSuggestions.purchasedAt, "2026-01-14") // the parser's, untouched
         XCTAssertEqual(request.ocrRawText, Self.parsedFixture.ocrRawText)
         XCTAssertTrue(store.items.isEmpty)
 
-        // On the wire: status and isBusiness present for this create, and
-        // the recognizer was never asked - the parse rode in with the item.
-        let body = try JSONSerialization.jsonObject(with: APIClient.encoder.encode(request)) as? [String: Any]
-        XCTAssertEqual(body?["status"] as? String, "confirmed")
-        XCTAssertEqual(body?["isBusiness"] as? Bool, true)
+        // On the wire: status present for this create, none of the three
+        // retired keys anywhere. The server tolerates and discards them
+        // for the shipped 1.0 (1) build, so sending them would look like
+        // success while meaning this client was never updated.
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: APIClient.encoder.encode(request)) as? [String: Any]
+        )
+        XCTAssertEqual(body["status"] as? String, "confirmed")
+        XCTAssertNil(body["vendorTaxNumber"])
+        XCTAssertNil(body["otherTaxCents"])
+        XCTAssertNil(body["isBusiness"])
+        let suggestions = try XCTUnwrap(body["ocrSuggestions"] as? [String: Any])
+        XCTAssertNil(suggestions["vendorTaxNumber"])
     }
 
-    func testPendingCreateStillOmitsIsBusinessAndStatusOnTheWire() async throws {
-        // The §5.2 rule made visible at the transport: a pending create
-        // must not carry the keys only a human's choice may supply.
+    func testPendingCreateStillOmitsStatusOnTheWire() async throws {
+        // A pending create must not carry the key only a human's
+        // confirmation may supply.
         let controller = await makeController()
         try await controller.enqueue(imageData: Data("page one bytes".utf8))
         await settle(controller)
 
         let request = try XCTUnwrap(api.createReceiptCalls.first)
-        let body = try JSONSerialization.jsonObject(with: APIClient.encoder.encode(request)) as? [String: Any]
-        XCTAssertNotNil(body)
-        XCTAssertNil(body?["isBusiness"])
-        XCTAssertNil(body?["status"])
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: APIClient.encoder.encode(request)) as? [String: Any]
+        )
+        XCTAssertNil(body["status"])
+        XCTAssertNil(body["vendorTaxNumber"])
+        XCTAssertNil(body["otherTaxCents"])
+        XCTAssertNil(body["isBusiness"])
     }
 
     func testCreateCarriesParsedSuggestionsRawTextAndCaptureTimes() async throws {

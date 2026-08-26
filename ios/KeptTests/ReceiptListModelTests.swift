@@ -110,7 +110,9 @@ final class ReceiptListModelTests: XCTestCase {
         XCTAssertEqual(model.pendingCount, .exact(4))
         let pagedCall = api.receiptsPageCalls.last
         XCTAssertEqual(pagedCall?.cursor, "cursor-page-2")
-        XCTAssertNil(pagedCall?.status)
+        // The cursor travels with the query it was minted under: the
+        // server refuses one whose encoded sort disagrees.
+        XCTAssertEqual(pagedCall?.query, .default)
     }
 
     func testMidListReceiptDoesNotTriggerPaging() async {
@@ -180,6 +182,103 @@ final class ReceiptListModelTests: XCTestCase {
 
         XCTAssertEqual(model.receipts, [freshReceipt])
         XCTAssertEqual(model.nextPage, .idle)
+    }
+
+    // MARK: - Search, sort, filter (2026-08-26)
+
+    /// The rule the server forces: a cursor encodes the sort position of
+    /// the result set it came from, and one presented under a different
+    /// sort is a 400. So every query change starts again from page one -
+    /// with the old rows and the old cursor dropped, not appended to.
+    func testChangingTheSortRestartsFromPageOneAndDropsTheOldCursor() async {
+        let firstSet = Fixtures.receipt()
+        let secondSet = Fixtures.receipt()
+        api.receiptsPageHandler = { cursor, query, _ in
+            if query.sort == .total {
+                // The re-sorted list must be asked for from the top.
+                XCTAssertNil(cursor, "a cursor from the old sort must not be reused")
+                return Fixtures.page([secondSet], pendingCount: 1)
+            }
+            return Fixtures.page([firstSet], nextCursor: "cursor-page-2", pendingCount: 1)
+        }
+        let model = makeModel()
+        await model.loadFirstPage()
+        XCTAssertEqual(model.receipts, [firstSet])
+
+        await model.setSort(.total)
+
+        XCTAssertEqual(model.query.sort, .total)
+        XCTAssertEqual(model.receipts, [secondSet], "the new sort replaces the list, never appends")
+        XCTAssertEqual(model.nextPage, .idle)
+        // And the dropped cursor stays dropped: scrolling to the bottom of
+        // the new list must not resurrect it.
+        let callsAfterResort = api.receiptsPageCalls.count
+        await model.loadMoreIfNeeded(after: secondSet)
+        XCTAssertEqual(api.receiptsPageCalls.count, callsAfterResort)
+    }
+
+    func testEachFilterAndTheOrderReachTheServerAndRestartPaging() async {
+        stubPages(byCursor: [nil: Fixtures.page([Fixtures.receipt()])])
+        let model = makeModel()
+        await model.loadFirstPage()
+
+        await model.setStatus(.pending)
+        XCTAssertEqual(api.receiptsPageCalls.last?.query.status, .pending)
+
+        await model.setCategory("Office  supplies")
+        // Free text, unnormalized: the doubled space is the person's own
+        // data and the server matches it literally.
+        XCTAssertEqual(api.receiptsPageCalls.last?.query.category, "Office  supplies")
+
+        await model.setOrder(.asc)
+        XCTAssertEqual(api.receiptsPageCalls.last?.query.order, .asc)
+
+        // Every one of them asked from the top.
+        XCTAssertTrue(api.receiptsPageCalls.allSatisfy { $0.cursor == nil })
+    }
+
+    func testTheSearchBoxIsOnlyAppliedWhenTheTermActuallyChanges() async {
+        stubPages(byCursor: [nil: Fixtures.page([Fixtures.receipt()])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        let callsAfterFirstLoad = api.receiptsPageCalls.count
+
+        // The view's debounce fires on appearance too, with the term
+        // unchanged; that is not a search and must cost nothing.
+        await model.applySearch()
+        XCTAssertEqual(api.receiptsPageCalls.count, callsAfterFirstLoad)
+
+        // Whitespace is not a search either: `q` has a server-side minimum
+        // length of 1 and an all-spaces term would be rejected.
+        model.searchText = "   "
+        await model.applySearch()
+        XCTAssertEqual(api.receiptsPageCalls.count, callsAfterFirstLoad)
+
+        model.searchText = "  maple  "
+        await model.applySearch()
+        XCTAssertEqual(api.receiptsPageCalls.count, callsAfterFirstLoad + 1)
+        XCTAssertEqual(api.receiptsPageCalls.last?.query.searchTerm, "maple")
+        XCTAssertTrue(model.query.isFiltering)
+    }
+
+    func testClearingFiltersEmptiesTheSearchBoxAndLeavesTheOrderingAlone() async {
+        stubPages(byCursor: [nil: Fixtures.page([Fixtures.receipt()])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        await model.setSort(.vendor)
+        await model.setStatus(.pending)
+        model.searchText = "maple"
+        await model.applySearch()
+        XCTAssertTrue(model.query.isFiltering)
+
+        await model.clearFilters()
+
+        XCTAssertFalse(model.query.isFiltering)
+        XCTAssertEqual(model.searchText, "")
+        XCTAssertNil(api.receiptsPageCalls.last?.query.status)
+        XCTAssertNil(api.receiptsPageCalls.last?.query.searchTerm)
+        // Ordering is not a filter and is not cleared with them.
+        XCTAssertEqual(model.query.sort, .vendor)
     }
 
     func testFailedPageCanBeRetried() async {

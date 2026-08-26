@@ -6,11 +6,12 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var session: SessionController
     let api: APIClient
+    let options: ReceiptOptionsStore
 
     var body: some View {
         #if DEBUG
         if KeyboardExitUITestHarness.isRequested {
-            KeyboardExitUITestHarness()
+            KeyboardExitUITestHarness(options: options)
         } else {
             signedInOrOut
         }
@@ -25,7 +26,7 @@ struct RootView: View {
         case .signedOut, .signingIn:
             SignInView()
         case .signedIn:
-            HomeView(api: api)
+            HomeView(api: api, options: options)
         }
     }
 }

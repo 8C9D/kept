@@ -14,6 +14,7 @@ import SwiftUI
 /// Reached only via `-KeptUITestConfirmScreen` in the launch arguments,
 /// and compiled out of shipped builds.
 struct KeyboardExitUITestHarness: View {
+    @ObservedObject var options: ReceiptOptionsStore
     @State private var model: ConfirmReceiptModel?
 
     static var isRequested: Bool {
@@ -24,7 +25,12 @@ struct KeyboardExitUITestHarness: View {
         Color.clear
             .fullScreenCover(item: $model) { presented in
                 NavigationStack {
-                    ConfirmReceiptView(model: presented, onSaved: {}, onSetAside: {})
+                    ConfirmReceiptView(
+                        model: presented,
+                        options: options,
+                        onSaved: {},
+                        onSetAside: {}
+                    )
                 }
             }
             .onAppear {
@@ -40,7 +46,6 @@ struct KeyboardExitUITestHarness: View {
                 totalCents: 1234,
                 hstCents: 142,
                 subtotalCents: 1092,
-                vendorTaxNumber: "123456789RT0001",
                 purchasedAt: "2026-08-09",
                 vendor: "Test Vendor"
             ),

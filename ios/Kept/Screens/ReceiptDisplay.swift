@@ -37,8 +37,4 @@ extension Receipt {
     var displaySubtotalCents: Int? {
         displayedSuggestions?.subtotalCents.value ?? subtotalCents
     }
-
-    var displayVendorTaxNumber: String? {
-        displayedSuggestions?.vendorTaxNumber.value ?? vendorTaxNumber
-    }
 }

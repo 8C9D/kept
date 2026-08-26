@@ -101,14 +101,12 @@ final class CaptureFlowModelTests: XCTestCase {
 
         // Save = a durable outbox write carrying the human's fields AND
         // the parser's record (the §7.3 accuracy comparison needs both).
-        confirmModel.chooseBusiness(true)
         let saved = await confirmModel.save()
         XCTAssertTrue(saved)
         XCTAssertEqual(outbox.enqueued.count, 1)
         let receipt = outbox.enqueued[0]
         XCTAssertEqual(receipt.imageData, page)
         XCTAssertEqual(receipt.confirmation?.totalCents, 11300)
-        XCTAssertEqual(receipt.confirmation?.isBusiness, true)
         XCTAssertEqual(receipt.confirmation?.purchasedAt, "2026-01-14")
         XCTAssertEqual(receipt.parsed?.suggestions.totalCents, 11300)
         XCTAssertEqual(receipt.parsed?.ocrRawText, "MAPLE FOODS MARKET\n2026/01/14\nTOTAL 113.00")

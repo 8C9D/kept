@@ -50,7 +50,7 @@ final class ConfirmQueueModel: ObservableObject {
         do {
             let page = try await api.receiptsPage(
                 cursor: nil,
-                status: .pending,
+                query: ReceiptQuery(status: .pending),
                 limit: Self.pageSize
             )
             pendingCount = page.pendingCount

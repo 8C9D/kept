@@ -66,21 +66,24 @@ struct ParsedReceipt: Codable, Equatable, Sendable {
     let ocrRawText: String?
 }
 
-/// What a human confirmed on the §7.2 form, field for field. The total
-/// and the business choice are non-optional because the form cannot save
-/// without them (spec §5.2) - the same completeness the server's CHECK
-/// constraint demands of a confirmed row. Carried by a queued item when
-/// confirmation happened at capture; consumed by the drain's create.
+/// What a human confirmed on the §7.2 form, field for field. The total is
+/// non-optional because the form cannot save without it - the same
+/// completeness the server's CHECK constraint demands of a confirmed row.
+/// Carried by a queued item when confirmation happened at capture;
+/// consumed by the drain's create.
+///
+/// Decoding is forward-compatible by construction: an item queued by an
+/// earlier build carries the retired `vendorTaxNumber`, `otherTaxCents`
+/// and `isBusiness` keys, and JSONDecoder ignores keys no property
+/// declares - so a receipt captured before this build still uploads after
+/// the update instead of being stranded on the phone.
 struct ConfirmedReceiptFields: Codable, Equatable, Sendable {
     let purchasedAt: String
     let vendor: String?
-    let vendorTaxNumber: String?
     let subtotalCents: Int?
     let hstCents: Int?
-    let otherTaxCents: Int?
     let totalCents: Int
     let category: String?
     let paymentMethod: String?
-    let isBusiness: Bool
     let notes: String?
 }

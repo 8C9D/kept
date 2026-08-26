@@ -40,13 +40,18 @@ struct MergedDateSuggestion: Decodable, Hashable {
 /// the server's domain layer. This client renders it and decides nothing
 /// (spec §4.1) - which fields prefill, which start amber, and the date
 /// note all read straight off this shape.
+///
+/// The wire still carries a `vendorTaxNumber` entry: the server keeps it
+/// as a served absence so the shipped 1.0 (1) build, which decodes that
+/// key non-optionally, keeps working. It is deliberately not declared
+/// here - an undeclared key is simply not decoded - and nothing in this
+/// build reads a tax number.
 struct MergedSuggestions: Decodable, Hashable {
     let vendor: MergedSuggestion<String>
     let purchasedAt: MergedDateSuggestion
     let totalCents: MergedSuggestion<Int>
     let hstCents: MergedSuggestion<Int>
     let subtotalCents: MergedSuggestion<Int>
-    let vendorTaxNumber: MergedSuggestion<String>
 }
 
 /// One receipt as the list and detail routes project it.
@@ -58,10 +63,8 @@ struct Receipt: Decodable, Equatable, Hashable, Identifiable {
     let purchasedAt: String
     let capturedAt: Date
     let vendor: String?
-    let vendorTaxNumber: String?
     let subtotalCents: Int?
     let hstCents: Int?
-    let otherTaxCents: Int?
     /// Nullable since wave 4: a batch-scanned pending receipt whose total
     /// the parser could not read stores the absence. A confirmed receipt
     /// always has one (server check constraint).
@@ -69,9 +72,6 @@ struct Receipt: Decodable, Equatable, Hashable, Identifiable {
     let currency: String
     let category: String?
     let paymentMethod: String?
-    /// Nullable since wave 4, same reasoning: null is "not chosen yet",
-    /// which only a pending receipt is allowed to be.
-    let isBusiness: Bool?
     let notes: String?
     let status: ReceiptStatus
     /// The server-merged suggestion set (§7.3), on every receipt response.
@@ -91,6 +91,25 @@ struct ReceiptListPage: Decodable, Equatable {
     let receipts: [Receipt]
     let nextCursor: String?
     let pendingCount: Int
+}
+
+/// GET /api/receipts/options - the free-text values this user has already
+/// used, most recently used first, so the confirm form can offer them
+/// back. Both fields stay free text (engineering rule: no enum, no
+/// taxonomy); these are suggestions drawn from the person's own data, not
+/// a vocabulary they must pick from.
+///
+/// Codable, not just Decodable: the last fetch is cached on disk so an
+/// offline capture-time confirm still has something to offer.
+struct ReceiptOptions: Codable, Equatable {
+    let categories: [String]
+    let paymentMethods: [String]
+
+    static let none = ReceiptOptions(categories: [], paymentMethods: [])
+
+    var isEmpty: Bool {
+        categories.isEmpty && paymentMethods.isEmpty
+    }
 }
 
 struct ReceiptImage: Decodable, Equatable {

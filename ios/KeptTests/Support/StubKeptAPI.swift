@@ -14,8 +14,9 @@ final class StubKeptAPI: KeptAPI {
     }
 
     var signInHandler: ((_ identityToken: String, _ displayName: String?) async throws -> SignInResponse)?
-    var receiptsPageHandler: ((_ cursor: String?, _ status: ReceiptStatus?, _ limit: Int?) async throws -> ReceiptListPage)?
+    var receiptsPageHandler: ((_ cursor: String?, _ query: ReceiptQuery, _ limit: Int?) async throws -> ReceiptListPage)?
     var receiptDetailHandler: ((_ id: UUID) async throws -> ReceiptDetail)?
+    var receiptOptionsHandler: (() async throws -> ReceiptOptions)?
     var uploadTargetHandler: ((_ contentType: ImageUploadContentType) async throws -> UploadTarget)?
     var uploadImageHandler: ((_ target: UploadTarget, _ data: Data, _ contentType: ImageUploadContentType) async throws -> Void)?
     var createReceiptHandler: ((_ request: CreateReceiptRequest) async throws -> Receipt)?
@@ -27,13 +28,18 @@ final class StubKeptAPI: KeptAPI {
     /// log must be lock-guarded or the appends are a data race. (Wave-3
     /// reviewer finding.)
     private let callLock = NSLock()
-    private var recordedReceiptsPageCalls: [(cursor: String?, status: ReceiptStatus?, limit: Int?)] = []
+    private var recordedReceiptsPageCalls: [(cursor: String?, query: ReceiptQuery, limit: Int?)] = []
     private var recordedCreateReceiptCalls: [CreateReceiptRequest] = []
     private var recordedConfirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] = []
     private var recordedDeleteAccountCalls: [String?] = []
+    private var recordedReceiptOptionsCalls = 0
 
-    var receiptsPageCalls: [(cursor: String?, status: ReceiptStatus?, limit: Int?)] {
+    var receiptsPageCalls: [(cursor: String?, query: ReceiptQuery, limit: Int?)] {
         callLock.withLock { recordedReceiptsPageCalls }
+    }
+
+    var receiptOptionsCalls: Int {
+        callLock.withLock { recordedReceiptOptionsCalls }
     }
 
     var createReceiptCalls: [CreateReceiptRequest] {
@@ -56,15 +62,21 @@ final class StubKeptAPI: KeptAPI {
         return try await signInHandler(identityToken, displayName)
     }
 
-    func receiptsPage(cursor: String?, status: ReceiptStatus?, limit: Int?) async throws -> ReceiptListPage {
-        callLock.withLock { recordedReceiptsPageCalls.append((cursor, status, limit)) }
+    func receiptsPage(cursor: String?, query: ReceiptQuery, limit: Int?) async throws -> ReceiptListPage {
+        callLock.withLock { recordedReceiptsPageCalls.append((cursor, query, limit)) }
         guard let receiptsPageHandler else { throw UnstubbedCall(endpoint: "receiptsPage") }
-        return try await receiptsPageHandler(cursor, status, limit)
+        return try await receiptsPageHandler(cursor, query, limit)
     }
 
     func receiptDetail(id: UUID) async throws -> ReceiptDetail {
         guard let receiptDetailHandler else { throw UnstubbedCall(endpoint: "receiptDetail") }
         return try await receiptDetailHandler(id)
+    }
+
+    func receiptOptions() async throws -> ReceiptOptions {
+        callLock.withLock { recordedReceiptOptionsCalls += 1 }
+        guard let receiptOptionsHandler else { throw UnstubbedCall(endpoint: "receiptOptions") }
+        return try await receiptOptionsHandler()
     }
 
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget {

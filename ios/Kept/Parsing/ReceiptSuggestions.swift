@@ -9,15 +9,14 @@ import Foundation
 /// suggestions, including re-parsing old receipts from their stored raw
 /// text, without the confirm screen changing at all.
 /// Codable because the wave-5 outbox persists the parse result with each
-/// queued receipt.
+/// queued receipt. Removing a field is decode-safe for items already on
+/// disk: JSONDecoder ignores keys no property declares, so a receipt
+/// parsed by an earlier build still uploads after the update.
 struct ReceiptSuggestions: Codable, Equatable {
     /// Integer cents, like every money value in the system. Never a float.
     var totalCents: Int?
     var hstCents: Int?
     var subtotalCents: Int?
-
-    /// Normalized GST/HST registration number, e.g. "123456789RT0001".
-    var vendorTaxNumber: String?
 
     /// The purchase date as yyyy-mm-dd - a calendar date, same as the API.
     var purchasedAt: String?
@@ -28,6 +27,6 @@ struct ReceiptSuggestions: Codable, Equatable {
     /// receipt starts from a blank form rather than suggestions.
     var isEmpty: Bool {
         totalCents == nil && hstCents == nil && subtotalCents == nil
-            && vendorTaxNumber == nil && purchasedAt == nil && vendor == nil
+            && purchasedAt == nil && vendor == nil
     }
 }

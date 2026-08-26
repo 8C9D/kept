@@ -3,13 +3,21 @@ import SwiftUI
 /// The confirm screen (spec §7.2, §10A.1) - the heart of the app. The
 /// scanned image up top for checking numbers against paper, the total as
 /// the loudest thing on screen, every OCR suggestion amber until touched,
-/// and a save that stays disabled - with the reason stated - until the
-/// business-or-personal choice is made.
+/// and a save that stays disabled - with the reason stated - until there
+/// is a valid total.
+///
+/// The same screen edits an already-confirmed receipt (`purpose == .edit`)
+/// with nothing amber on it: the values are the person's own.
 ///
 /// This view renders and reports touches; every decision lives in
 /// ConfirmReceiptModel, where it is tested without a camera.
 struct ConfirmReceiptView: View {
     @ObservedObject var model: ConfirmReceiptModel
+    /// The person's own past categories and payment methods, offered back
+    /// on those two rows. Empty until the fetch lands - or forever, if it
+    /// fails or nothing has been used yet - and the form is complete
+    /// either way (never blocks on the network).
+    @ObservedObject var options: ReceiptOptionsStore
     let onSaved: () async -> Void
     let onSetAside: () async -> Void
 
@@ -21,7 +29,6 @@ struct ConfirmReceiptView: View {
             imageSection
             totalSection
             detailFieldsSection
-            businessPersonalSection
             optionalFieldsSection
             saveSection
         }
@@ -36,14 +43,22 @@ struct ConfirmReceiptView: View {
         // `ToolbarItemGroup(placement: .keyboard)` here until the device
         // proved it installs nothing through this screen's presentation.
         .background(ProvidesKeyboardExits())
-        .navigationTitle(counterTitle)
+        .navigationTitle(model.screenTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Later") {
+                Button(model.dismissLabel) {
                     Task { await onSetAside() }
                 }
             }
+        }
+        .task {
+            // Only for a server-backed form. A capture-time confirm is
+            // deliberately an offline screen - OCR ran on the device and
+            // Save is a disk write - so it offers whatever the last fetch
+            // cached and asks for nothing.
+            guard model.receiptId != nil else { return }
+            await options.refresh()
         }
         .onChange(of: focusedField) { _, newFocus in
             // Focusing a field is looking at it: the amber clears whether
@@ -57,12 +72,6 @@ struct ConfirmReceiptView: View {
                 ZoomableImageSheet(source: imageSource)
             }
         }
-    }
-
-    private var counterTitle: String {
-        model.unreviewedCount == 0
-            ? "All checked"
-            : "\(model.unreviewedCount) to check"
     }
 
     // MARK: - Image
@@ -120,7 +129,7 @@ struct ConfirmReceiptView: View {
                     // look, not an error - plenty of legitimate receipts
                     // do not reconcile (spec §7.2, §10A.1).
                     Label(
-                        "Subtotal, HST, and other tax don't add up to this total. Worth a look.",
+                        "Subtotal and HST don't add up to this total. Worth a look.",
                         systemImage: "exclamationmark.triangle"
                     )
                     .font(.footnote)
@@ -200,34 +209,6 @@ struct ConfirmReceiptView: View {
                 isUnreviewed: model.isUnreviewed(.subtotal),
                 moneyInput: model.subtotalInput
             )
-            SuggestedFieldRow(
-                label: "Other tax",
-                text: $model.otherTaxText,
-                field: .otherTax,
-                focus: $focusedField,
-                isUnreviewed: false,
-                moneyInput: model.otherTaxInput
-            )
-            SuggestedFieldRow(
-                label: "Tax number",
-                text: $model.taxNumberText,
-                field: .taxNumber,
-                focus: $focusedField,
-                isUnreviewed: model.isUnreviewed(.taxNumber)
-            )
-        }
-    }
-
-    // MARK: - Business / personal (§10A.1: required, never pre-selected)
-
-    private var businessPersonalSection: some View {
-        Section {
-            BusinessPersonalPicker(
-                choice: model.businessChoice,
-                choose: { model.chooseBusiness($0) }
-            )
-        } header: {
-            Text("Business or personal?")
         }
     }
 
@@ -239,16 +220,20 @@ struct ConfirmReceiptView: View {
             // still take a focus value: the toolbar decides what to offer
             // from the focused field, and a field outside that enum would
             // read as "nothing is focused" while its keyboard was up.
-            LabeledContent("Category") {
-                TextField("None", text: $model.categoryText)
-                    .multilineTextAlignment(.trailing)
-                    .focused($focusedField, equals: .category)
-            }
-            LabeledContent("Payment") {
-                TextField("None", text: $model.paymentMethodText)
-                    .multilineTextAlignment(.trailing)
-                    .focused($focusedField, equals: .paymentMethod)
-            }
+            ReusableValueFieldRow(
+                label: "Category",
+                text: $model.categoryText,
+                field: .category,
+                focus: $focusedField,
+                pastValues: options.options.categories
+            )
+            ReusableValueFieldRow(
+                label: "Payment",
+                text: $model.paymentMethodText,
+                field: .paymentMethod,
+                focus: $focusedField,
+                pastValues: options.options.paymentMethods
+            )
             TextField("Notes", text: $model.notesText, axis: .vertical)
                 .lineLimit(2...5)
                 .focused($focusedField, equals: .notes)

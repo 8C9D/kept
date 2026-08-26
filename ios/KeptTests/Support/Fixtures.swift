@@ -8,12 +8,13 @@ enum Fixtures {
         id: UUID = UUID(),
         purchasedAt: String = "2026-03-20",
         vendor: String? = "Synthetic Vendor",
-        vendorTaxNumber: String? = nil,
         subtotalCents: Int? = nil,
         hstCents: Int? = nil,
         totalCents: Int? = 2925,
         currency: String = "CAD",
-        isBusiness: Bool? = true,
+        category: String? = nil,
+        paymentMethod: String? = nil,
+        notes: String? = nil,
         status: ReceiptStatus = .confirmed,
         suggestions: MergedSuggestions? = nil
     ) -> Receipt {
@@ -22,16 +23,13 @@ enum Fixtures {
             purchasedAt: purchasedAt,
             capturedAt: Date(timeIntervalSince1970: 1_774_000_000),
             vendor: vendor,
-            vendorTaxNumber: vendorTaxNumber,
             subtotalCents: subtotalCents,
             hstCents: hstCents,
-            otherTaxCents: nil,
             totalCents: totalCents,
             currency: currency,
-            category: nil,
-            paymentMethod: nil,
-            isBusiness: isBusiness,
-            notes: nil,
+            category: category,
+            paymentMethod: paymentMethod,
+            notes: notes,
             status: status,
             suggestions: suggestions,
             createdAt: Date(timeIntervalSince1970: 1_774_000_000),
@@ -58,16 +56,14 @@ enum Fixtures {
         dateDisagreement: Bool = false,
         totalCents: Int? = nil,
         hstCents: Int? = nil,
-        subtotalCents: Int? = nil,
-        vendorTaxNumber: String? = nil
+        subtotalCents: Int? = nil
     ) -> MergedSuggestions {
         MergedSuggestions(
             vendor: MergedSuggestion(value: vendor),
             purchasedAt: MergedDateSuggestion(value: purchasedAt, disagreement: dateDisagreement),
             totalCents: MergedSuggestion(value: totalCents),
             hstCents: MergedSuggestion(value: hstCents),
-            subtotalCents: MergedSuggestion(value: subtotalCents),
-            vendorTaxNumber: MergedSuggestion(value: vendorTaxNumber)
+            subtotalCents: MergedSuggestion(value: subtotalCents)
         )
     }
 

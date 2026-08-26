@@ -204,9 +204,9 @@ actor FileOutboxStore: OutboxStore {
     /// ⚠ These two are the reason the outbox is not a plaintext copy of the
     /// user's tax records sitting on the disk.
     ///
-    /// `item.json` carries the vendor, the tax number, every amount, the
-    /// payment method, the notes and the full OCR text; `image.jpg` is the
-    /// receipt itself. Without an explicit class they inherit iOS's default,
+    /// `item.json` carries the vendor, every amount, the payment method,
+    /// the notes and the full OCR text; `image.jpg` is the receipt
+    /// itself. Without an explicit class they inherit iOS's default,
     /// `completeUntilFirstUserAuthentication`, which stops protecting the
     /// moment the phone is unlocked once after a boot - that is, essentially
     /// always. `.complete` keeps them encrypted whenever the phone is

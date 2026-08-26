@@ -26,7 +26,6 @@ enum ReceiptParser {
             totalCents: total(in: lines),
             hstCents: hst(in: lines),
             subtotalCents: subtotal(in: lines),
-            vendorTaxNumber: vendorTaxNumber(in: lines),
             purchasedAt: purchaseDate(in: lines),
             vendor: vendor(in: lines)
         )
@@ -122,34 +121,6 @@ enum ReceiptParser {
         return ReceiptAmount.lastAmount(in: line.text)
     }
 
-    // MARK: - Vendor tax number
-
-    /// A Canadian business number with its GST/HST program identifier:
-    /// nine digits, "RT", four digits, spaces optional. Falls back to a
-    /// bare nine-digit number on a line that labels itself GST/HST/BN.
-    /// nonisolated(unsafe) on the cached patterns in this file: Regex is
-    /// not (yet) marked Sendable, but these are immutable after
-    /// initialization and matching does not mutate the value.
-    private nonisolated(unsafe) static let businessNumberPattern = #/(\d{9})\s?[Rr][Tt]\s?(\d{4})/#
-    private nonisolated(unsafe) static let bareNineDigitsPattern = #/(?:^|\D)(\d{9})(?:\D|$)/#
-
-    private static func vendorTaxNumber(in lines: [RecognizedLine]) -> String? {
-        for line in lines {
-            if let match = line.text.firstMatch(of: businessNumberPattern) {
-                return "\(match.1)RT\(match.2)"
-            }
-        }
-        for line in lines
-        where containsWord("gst", in: line.text)
-            || containsWord("hst", in: line.text)
-            || containsWord("bn", in: line.text) {
-            if let match = line.text.firstMatch(of: bareNineDigitsPattern) {
-                return String(match.1)
-            }
-        }
-        return nil
-    }
-
     // MARK: - Date
 
     /// The first parseable date, preferring the top third of the receipt,
@@ -196,9 +167,12 @@ enum ReceiptParser {
     /// matches "TOTAL:" but not "totally" or "subtotal"; "tax" matches
     /// "Tax 13%" but not "taxable". Compiled per word rather than per call
     /// because the parser runs these over every line of every scan.
+    /// nonisolated(unsafe) on the cached patterns in this file: Regex is
+    /// not (yet) marked Sendable, but these are immutable after
+    /// initialization and matching does not mutate the value.
     private nonisolated(unsafe) static let wordPatterns: [String: Regex<Substring>] = {
         var patterns: [String: Regex<Substring>] = [:]
-        for word in ["total", "hst", "gst", "tax", "bn"] {
+        for word in ["total", "hst", "gst", "tax"] {
             // The words are literal constants, so compilation cannot fail;
             // try! here would still be a crash in a capture path, and a
             // missing entry already degrades to "not found" below.
@@ -217,7 +191,7 @@ enum ReceiptParser {
     /// lookbehind, same as ReceiptDateParser and for the same reason.
     private nonisolated(unsafe) static let despacedWordPatterns: [String: Regex<AnyRegexOutput>] = {
         var patterns: [String: Regex<AnyRegexOutput>] = [:]
-        for word in ["total", "hst", "gst", "tax", "bn"] {
+        for word in ["total", "hst", "gst", "tax"] {
             if let pattern = try? Regex("(?:^|[^A-Za-z])\(word)(?![A-Za-z])").ignoresCase() {
                 patterns[word] = pattern
             }
@@ -230,7 +204,7 @@ enum ReceiptParser {
             let pattern = wordPatterns[word],
             let despacedPattern = despacedWordPatterns[word]
         else {
-            // Every caller passes one of the five words above; asking for
+            // Every caller passes one of the four words above; asking for
             // another is a programmer error, surfaced in debug builds and
             // degraded to "not found" in a capture path.
             assertionFailure("No compiled pattern for word: \(word)")
