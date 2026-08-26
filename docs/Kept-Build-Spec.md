@@ -30,12 +30,11 @@ Every design decision in this document is subordinate to that sentence. If a fea
 
 ## 3 · Constraints that do not move
 
-These four came out of the requirements work and are not preferences. A change to any of them is a spec change, not an implementation decision.
+These came out of the requirements work and are not preferences. A change to any of them is a spec change, not an implementation decision — which is exactly what the 2026-08-26 product-feedback ruling was: the original four became three (constraint 1 lost its registration-number clause, and the old constraint 3, business-vs-personal at capture time, was retired outright). Record: `docs/DECISIONS.md` 2026-08-26.
 
-1. **HST is its own field**, never folded into the total, and the **supplier's GST/HST registration number** is captured alongside it. Input tax credits are claimed on the HST portion specifically, and CRA requires the supplier's registration number on supporting documentation above roughly $30 (more above roughly $150 — confirm the thresholds with the accountant). "Photo plus total" is not sufficient documentation.
+1. **HST is its own field**, never folded into the total. Input tax credits are claimed on the HST portion specifically. *(Amended 2026-08-26: the supplier's GST/HST registration number is no longer captured as a field — it stays printed on the stored receipt image, which is the actual supporting document; the field was a per-capture transcription of what the image already holds.)*
 2. **No OCR value ever saves without a human confirming it.** Extracted fields are *suggestions* in an editable form. A receipt is not "done" until a person has looked at the amount. A tool that silently guesses a total is worse than a shoebox, because the error stays invisible until the accountant finds it.
-3. **Business-vs-personal is set at capture time**, never as cleanup. If it is cleanup, it will not happen.
-4. **Full per-user isolation.** Each user sees only their own receipts. Year-end sharing is an exported file, not a standing permission.
+3. **Full per-user isolation.** Each user sees only their own receipts. Year-end sharing is an exported file, not a standing permission.
 
 > **Design note on constraint 2.** It is what makes weak OCR acceptable. The parser in §7.3 is heuristic and *will* be wrong sometimes. That is fine by design, because a human reads every number before it saves. Do not let a later "improve accuracy" impulse turn into "skip the confirmation step for high-confidence extractions" — that trade destroys the guarantee.
 
@@ -196,15 +195,12 @@ Deliberately small. No household, organization, or team entity — that was remo
 | `purchased_at` | date | The date on the receipt, not the capture date |
 | `captured_at` | timestamptz | |
 | `vendor` | text **nullable** | An illegible vendor is a real outcome; forcing a placeholder string corrupts the field for everyone reading it later. |
-| `vendor_tax_number` | text nullable | GST/HST registration number |
 | `subtotal_cents` | integer nullable | |
 | `hst_cents` | integer nullable | **Own field. Never derived from total.** |
-| `other_tax_cents` | integer nullable | Tips, non-HST amounts — keeps them out of the HST field |
-| `total_cents` | integer **nullable while `pending`** | *(Wave 4)* A batch-scanned receipt whose total the parser could not read stores the absence — never a fabricated amount. A CHECK constraint (`receipts_confirmed_complete_ck`) guarantees every `confirmed` row has a total, and the confirm screen cannot save without one. |
+| `total_cents` | integer **nullable while `pending`** | *(Wave 4)* A batch-scanned receipt whose total the parser could not read stores the absence — never a fabricated amount. A CHECK constraint (`receipts_confirmed_complete_ck`) guarantees every `confirmed` row has a total, and the confirm screen cannot save without one. *(2026-08-26: the total is the CHECK's only requirement — the business-choice half left with `is_business`.)* |
 | `currency` | char(3) default 'CAD' | |
-| `category` | text nullable | **Free text.** No enum, no FK, no taxonomy |
-| `payment_method` | text nullable | |
-| `is_business` | boolean **nullable while `pending`, no default** | **See §5.2.** *(Wave 4)* Null means "not chosen yet", which only a pending receipt may be; the same CHECK constraint forbids a confirmed row without the choice, and the confirm screen's save stays disabled until it is made. There is still no default at any layer. |
+| `category` | text nullable | **Free text.** No enum, no FK, no taxonomy. *(2026-08-26: previously-used values are served back as pickable suggestions — `GET /api/receipts/options` — which is a convenience over the user's own history, not a vocabulary.)* |
+| `payment_method` | text nullable | Same free-text-plus-reuse treatment as `category` *(2026-08-26)* |
 | `notes` | text nullable | |
 | `deleted_at` | timestamptz nullable | **Soft delete.** Non-null rows are excluded from every list, count, and export. |
 | `status` | enum `pending` \| `confirmed`, **default `pending`** | **See §5.3.** A receipt is `pending` until a human has confirmed its numbers. **Exports include `confirmed` only.** |
@@ -215,7 +211,9 @@ Deliberately small. No household, organization, or team entity — that was remo
 
 **Money is stored as integer cents.** Never floats. The HST figure is a tax claim.
 
-**Indexes:** `(user_id, purchased_at)`, `(user_id, is_business)`, `(user_id, status)`.
+**Removed 2026-08-26** (migration 0005, product-feedback ruling — `docs/DECISIONS.md` 2026-08-26): `vendor_tax_number` (the GST/HST registration number — the stored image carries the printed number), `other_tax_cents` (tips and non-HST amounts; the arithmetic check became `subtotal + hst = total`, still advisory), and `is_business` (business-vs-personal, with the old constraint 3). The API tolerates the shipped 1.0 (1) client still sending these keys, discarding them; see §6.
+
+**Indexes:** `(user_id, purchased_at)`, `(user_id, status)`.
 
 ### `receipt_images`
 
@@ -271,9 +269,9 @@ Constraint 2 says no OCR value saves without human confirmation. A backlog pass 
 
 **The UI must make the pending count visible and slightly annoying** — a badge on Home, a banner on the web table. A pending queue that is easy to ignore recreates the shoebox inside the app.
 
-### 5.2 `is_business` has no default
+### 5.2 `is_business` has no default — retired 2026-08-26
 
-Not `false`, not `null`. The confirm form cannot be submitted without an explicit choice. A default is how this field silently becomes cleanup work in March.
+This section required an explicit business-or-personal choice with no default at any layer. The field itself was removed by the 2026-08-26 ruling, and the rule went with it. Kept as a heading so old cross-references resolve to the retirement rather than to nothing.
 
 ---
 
@@ -286,9 +284,10 @@ All routes require a valid session JWT. **Every handler derives `user_id` from t
 | `POST` | `/api/auth/apple` | Exchange Apple identity token for a session JWT |
 | `POST` | `/api/receipts/upload-url` | Returns a presigned R2 PUT URL + object key |
 | `POST` | `/api/receipts` | Create a receipt (after the image is uploaded) |
-| `GET` | `/api/receipts` | List own receipts; filters: date range, `is_business`, `status`, text search. **Paged**: keyset cursor + limit (default 50, max 200), because the backlog import makes lists large on day one. *(Wave-1 gate review)* The response also carries **`pendingCount`** - the user's total pending, non-deleted receipts, deliberately independent of the request's filters and paging - so both clients' §5.2a badges read one number from the list they already fetch. *(Wave-3 gate review; replaces the iOS client's 200-row probe.)* |
+| `GET` | `/api/receipts` | List own receipts; filters: date range, `status`, `category`, `paymentMethod`, text search (`q` over vendor, category, notes). **Sorted** *(2026-08-26)*: `sort` = `purchasedAt` (default — the receipt's own date, newest first, as it has been since wave 1) \| `capturedAt` \| `total` \| `vendor`, with `order` `asc`\|`desc` (default `desc`); null sort keys order last either way. **Paged**: keyset cursor + limit (default 50, max 200), because the backlog import makes lists large on day one. *(Wave-1 gate review)* The cursor encodes the sort it was minted under and is refused with any other — a cursor is a position in one specific ordering. The response also carries **`pendingCount`** - the user's total pending, non-deleted receipts, deliberately independent of the request's filters and paging - so both clients' §5.2a badges read one number from the list they already fetch. *(Wave-3 gate review; replaces the iOS client's 200-row probe.)* The `is_business` filter left with its column *(2026-08-26)*. |
+| `GET` | `/api/receipts/options` | The user's own distinct `category` and `payment_method` values (non-deleted receipts, pending included), most recently used first, capped at 100 each — what both clients' pick-or-type fields offer. Registered above the `:id` route so the literal path is not shadowed. *(2026-08-26)* |
 | `GET` | `/api/receipts/:id` | Detail + presigned GET for the image |
-| `PATCH` | `/api/receipts/:id` | Edit fields |
+| `PATCH` | `/api/receipts/:id` | Edit fields — **pending or confirmed** *(stated 2026-08-26: editing after confirmation is deliberate, exposed by both clients; it has been permitted here since wave 1)*. The one refusal: a confirmed receipt may not end up without a total. |
 | `DELETE` | `/api/receipts/:id` | Soft delete |
 | `POST` | `/api/export` | Kick off an export; body is either `{fiscalYearEndingIn}` (dates derived from the user's settings at request time, §5.1) or an explicit `{periodStart, periodEnd}` — the seam a quarterly picker would use (§12). Returns the job. **409 `export_already_running` when this user already has a live one** - one at a time, refused rather than queued, because an export at the budget peaks near 890 MB against a 2 GB origin (§4.2). *(Wave 2; serialization Aug 7, 2026)* |
 | `GET` | `/api/export` | The caller's own jobs, newest first — the web export screen's history list. *(Wave-2 gate review)* |
@@ -304,6 +303,8 @@ All routes require a valid session JWT. **Every handler derives `user_id` from t
 Clients render it; neither client implements the merge (§4.1).
 The detail route additionally keeps the raw `ocrSuggestions` record, which the shipped iOS confirm screen reads today.
 
+**Two transitional shims for the shipped 1.0 (1) client** *(2026-08-26)*: the strict create/update schemas **accept and discard** `vendorTaxNumber`, `otherTaxCents` and `isBusiness` (the installed build still sends them), and every `suggestions` object keeps a null-valued `vendorTaxNumber` key (`{value: null, source: null}` — that build decodes the key non-optionally). Both are commented and pinned by test; both are removed when no installed build sends or decodes them. `docs/DECISIONS.md` 2026-08-26.
+
 ---
 
 ## 7 · The iOS client
@@ -311,10 +312,10 @@ The detail route additionally keeps the raw `ocrSuggestions` record, which the s
 ### 7.1 Screens — the whole iOS app in v1
 
 1. **Sign in** — one Sign in with Apple button.
-2. **Home** — a large **Capture** button and a reverse-chronological list of recent receipts. Any pending outbox items show at the top with their status. Capture must be reachable in one tap from cold launch. *(Wave-3 gate review: "recent" is ordering, not a cutoff — the list is every receipt, newest purchase first, paged.)*
+2. **Home** — a large **Capture** button and a reverse-chronological list of recent receipts. Any pending outbox items show at the top with their status. Capture must be reachable in one tap from cold launch. *(Wave-3 gate review: "recent" is ordering, not a cutoff — the list is every receipt, newest purchase first, paged.)* *(2026-08-26: the list gains search, sort (receipt date default, capture date, total, vendor) and filters (status, category) — all server-driven through §6's list params; changing any of them restarts paging.)*
 3. **Capture** — opens `VNDocumentCameraViewController` immediately. No intermediate screen, no mode picker.
 4. **Confirm** — the heart of the app. See §7.2.
-5. **Receipt detail** — the record plus the image; every field editable.
+5. **Receipt detail** — the record plus the image; every field editable. *(2026-08-26: "every field editable" now holds for confirmed receipts too — an Edit affordance opens the same form, prefilled from the row with no amber, because amber marks unconfirmed suggestions and these values are the human's own confirmed data. Pending receipts keep "Confirm this receipt" and the amber semantics.)*
 That is five screens. **Export is deliberately absent — it lives on the web client (§7A).** Resist adding a sixth.
 
 **Home's overflow menu carries Sign out and, below it, Delete account** *(Aug 25, 2026)* — destructive role, behind a confirmation dialog that names what goes (the account, every receipt, the images), says it cannot be undone, and points at the web export as the way to keep a copy first. Choosing it re-authorizes with Apple for a revocable code; **dismissing that sheet cancels the deletion**, because it is the last point at which a person can change their mind. On success the keychain is cleared, the outbox discards that user's queued receipts (they could never upload — signing in again mints a new user id), and the app returns to Sign in with the outcome stated. This is not a sixth screen: it is two controls in a menu that already existed, and it is required by App Store Guideline 5.1.1(v).
@@ -326,13 +327,12 @@ A confirmed receipt renders its row - the human's values - everywhere; the merge
 ### 7.2 The confirm screen — get this right or nothing else matters
 
 - Scanned image at the top, tappable to zoom. The person is checking numbers against the paper; they must be able to see the paper.
-- Fields in this order, all pre-filled with OCR suggestions and all editable: **total · date · vendor · HST · subtotal · other tax · vendor tax number · business/personal · category · payment method · notes.**
+- Fields in this order, all pre-filled with OCR suggestions and all editable: **total · date · vendor · HST · subtotal · category · payment method · notes.** *(2026-08-26: other tax, vendor tax number and business/personal removed; category and payment method offer the user's past values beside free entry — §6's options route.)*
 - **Total first** because it is the field most likely to be checked and least likely to be skipped.
 - **Every prefilled field is visually marked as a suggestion** until the person has looked at it. Touching a field clears the marking. This is what makes constraint 2 real in the UI rather than just in the schema.
 - *(Aug 8, 2026 - §7.3's merge rule; the server computes and serves the merge, provenance, and flag on every receipt response, and this screen renders them.)* **LLM-sourced values are suggestions like any other - amber until touched, no trust shortcut** - and **when the heuristic and the LLM disagree on the date, the field stays amber and carries an inline note saying the two reads differ**, with the arithmetic warning's exact treatment (same amber, inside the field, never red - §10A.1): disagreement between two independent parsers over the same text is free signal, and the date is the field that decides the fiscal year. Touching the field clears the tint and the note together. Provenance is served but not rendered - amber already means unverified, and a source badge would ask the user to adjudicate parser internals; it stays in the API for diagnostics.
-- **Inline arithmetic check:** if `subtotal + hst + other_tax` does not equal `total`, show a non-blocking warning next to the total. Do not auto-correct, do not block saving — plenty of legitimate receipts will not reconcile. It is a prompt to look, not a rule.
-- **Business/personal is a required two-button choice**, prominent, never pre-selected.
-- Save is one tap and returns to Home. No confirmation dialog, no success modal.
+- **Inline arithmetic check:** if `subtotal + hst` does not equal `total`, show a non-blocking warning next to the total. Do not auto-correct, do not block saving — plenty of legitimate receipts will not reconcile *(2026-08-26: with `other_tax` removed, a tipped or foreign receipt is now among them by design — the warning is a prompt to look, not a rule, and that is it working)*.
+- Save is one tap and returns to Home. No confirmation dialog, no success modal. *(2026-08-26: save gates on a valid total only — the required business/personal choice left with its field.)*
 
 ### 7.3 OCR parsing — heuristic on purpose
 
@@ -341,8 +341,8 @@ Vision returns text lines with bounding boxes, not structured fields. The parser
 - **Total** — the largest currency amount on a line containing "total" (case-insensitive), excluding "subtotal"; fall back to the largest currency amount in the lower third of the image.
 - **HST/GST** — a currency amount on a tax-labelled line, with the labels **ranked, never lumped** *(wave-5 device step 1: a receipt printing "GST $0.00" above "HST $2.05" put the GST zero into the HST field - the input tax credit, where a wrong-but-plausible 0.00 is more dangerous than an absence)*: non-zero HST > non-zero GST > non-zero TAX > zero HST > zero GST > zero TAX, topmost within a tier. HST outranks GST as the more specific label; a lone GST row still suggests here (one CRA program); zeros are demoted below any non-zero sibling because an explicit 0.00 beside a charged sibling label is a shadow, while an all-zero tax block is a genuinely exempt receipt. Bare `TAX` lines that mention a total stay excluded.
 - **Subtotal** — a currency amount on the **bottom-most** line matching `SUBTOTAL|SUB TOTAL` *(wave-5 audit: section subtotals print above the summary block; single-subtotal receipts unaffected; no real multi-subtotal receipt seen yet - the accuracy table arbitrates)*.
-- **Vendor tax number** — regex `\b\d{9}\s?RT\s?\d{4}\b` (Canadian business number plus GST/HST program identifier), falling back to a bare 9-digit number adjacent to a `GST|HST|BN` label.
 - **Date** — first parseable date; prefer the top third of the image.
+- *(Removed 2026-08-26 with its field: the vendor-tax-number heuristic — regex `\b\d{9}\s?RT\s?\d{4}\b` with a labelled-9-digit fallback.)*
 - **Vendor** — the largest-font text block in the top quarter.
 
 **The upgrade path - taken, Aug 7-8, 2026.**
@@ -352,18 +352,18 @@ The trigger it defined - per-field accuracy measured on real receipts - fired ac
 
 **What the LLM path is.** A server-side parse by **Claude Haiku 4.5** over the **assembled `ocr_raw_text`** the client already stores - **text only; the image never leaves the phone**, and on-device Vision stays the only OCR, so capture stays instant and offline.
 The request is the raw text and nothing else - never a field a person typed - built by a pure function so a test can assert what leaves the building.
-The model gets a system prompt of Canadian-receipt domain facts (HST/GST are one program; cross-check multiply-printed dates; tax numbers carry letter prefixes) plus a structured-output JSON schema, and the reply is validated before anything stores it: a non-calendar date or an unstorable amount is refused loudly, never quietly corrected.
+The model gets a system prompt of Canadian-receipt domain facts (HST/GST are one program; cross-check multiply-printed dates; until prompt v3 also the tax number's letter-prefix rule, retired with its field 2026-08-26) plus a structured-output JSON schema, and the reply is validated before anything stores it: a non-calendar date or an unstorable amount is refused loudly, never quietly corrected.
 The result lands on the receipt as `llm_suggestions` (§5), immutable beside `ocr_suggestions`, stamped with the exact model and a `promptVersion`; `npm run parse-accuracy` scores both paths against what the human confirmed and lists every disagreement and which side the human took.
 
 **The field-level merge rule** *(ruled Aug 8, 2026, on the n=3 reparse evidence)*:
 - **Amounts - total, HST, subtotal - come from the heuristic, and only the heuristic: no fallthrough** *(amended Aug 8, 2026, on the first wild misparse)*. If the heuristic has no value, the field is served absent - never filled from `llm_suggestions`. The original ruling rested on both paths scoring 100% on money, which only covers cases where both produced a value and says nothing about the LLM on amounts the heuristic misses - exactly when a fallthrough fires; the first wild instance, on clean input, was a digit transposition ("SUBTOTAL 43.49" served as 3449 cents with `llm` provenance). §7.2's arithmetic check is only a partial net - it needs all three of subtotal, HST and total present, so a receipt missing two of them gets no check at all. An absent amount is visible and costs one keystroke; a wrong amount that passes unflagged reaches an accountant. The LLM's money values are still **stored** in `llm_suggestions` and still scored by `parse-accuracy` - the rule governs what the merge serves, not what is recorded, and that comparison is how the ruling gets revisited on more data.
-- **Vendor and tax number come from the LLM.** 15/15 vendor matches under prompt v2, and 100% against the heuristics' 80% on the tax number.
+- **Vendor comes from the LLM.** 15/15 vendor matches under prompt v2. *(Until 2026-08-26 this bullet also ruled the tax number to the LLM — 100% against the heuristics' 80% — historical evidence for a field since removed.)*
 - **Date trusts neither source alone.** The heuristic is deterministically wrong on an ambiguous DateTime line, and the LLM is wrong on roughly 1 of 3 runs over the same line. When the two disagree, the confirm screen keeps the field amber and marks it as needing attention (§7.2, §10A.1) - disagreement between two independent parsers over the same text is free signal, and this is the field that decides the fiscal year.
 - **All LLM-sourced values stay amber until touched - no trust shortcut.** The corruption probe (`npm run parse-llm-probe`) is why: on deliberately degraded input the model returned a plausible invented date rather than null, so on bad input the LLM fails plausibly where the heuristic fails visibly.
 
 **Prompt discipline.** The verbatim-vendor rule lives in the **vendor field's schema description**, scoped to the one field that transcribes (prompt v2; branch and store numbers, addresses, and phone numbers excluded).
 Version 1 had no such rule and tidied "Noodle House (BCE)" down to "Noodle House" - a 40%-vs-80% vendor headline against the heuristics on the first run; a first v2 draft put the rule in the shared system prompt with "including store numbers" wording, which folded "Store #1234" into the vendor, and a date regression first read as a prompt effect re-ran as plain nondeterminism.
-`RECEIPT_PARSE_PROMPT_VERSION` is bumped whenever the request's meaning changes; stored v1 records stay untouched and are distinguishable by their absent `promptVersion`.
+`RECEIPT_PARSE_PROMPT_VERSION` is bumped whenever the request's meaning changes; stored v1 records stay untouched and are distinguishable by their absent `promptVersion`. *(2026-08-26: **v3** — the schema and prompt stop extracting the tax number, with its field; stored v2 records keep whatever they recorded, and `parse-accuracy` stops scoring the field.)*
 
 **Cost, measured rather than estimated:** the first real run parsed 6 receipts for **$0.0069** (5,281 input, 332 output tokens) - about a tenth of a cent per receipt.
 
@@ -376,7 +376,7 @@ The server kicks the sweep at startup, after any capture that lands OCR text (fi
 **The retry is capped**: a receipt whose parse fails 3 times gets a failure record written into `llm_suggestions` (§5) instead of another spot in the next sweep - every attempt bills the API, and an unbounded retry is fine at six receipts and a slow leak once the backlog lands.
 **Confirmed receipts are swept too**: they cannot benefit from the suggestions, but each parse grows the accuracy set - which is exactly what the n=5 caveat above needs.
 `ANTHROPIC_API_KEY` is **required at production boot** (`productionEnv.ts` - a missing key would be silent feature loss); in local dev a missing key just disables the sweep, stated at startup.
-**The merge is computed in the domain layer and served on every receipt response** as `suggestions` - per-field values with a provenance marker (`heuristic`, `llm`, or `both` for an agreed date) and the date-disagreement flag; for vendor, tax number and date, when the ruled source found nothing the other side's value is served with its provenance stated - the money fields have no such fallthrough (heuristic or absent, per the amended rule above) - and on a date disagreement the heuristic's value is the prefill (it is the deterministic side) while the flag carries the signal.
+**The merge is computed in the domain layer and served on every receipt response** as `suggestions` - per-field values with a provenance marker (`heuristic`, `llm`, or `both` for an agreed date) and the date-disagreement flag; for vendor and date *(and, until 2026-08-26, the tax number)*, when the ruled source found nothing the other side's value is served with its provenance stated - the money fields have no such fallthrough (heuristic or absent, per the amended rule above) - and on a date disagreement the heuristic's value is the prefill (it is the deterministic side) while the flag carries the signal.
 Both clients render this; neither decides it (§4.1).
 `npm run parse-llm-backfill` remains as a manual wrapper over the same sweep core (local-database-only, the same guard as `db:seed`, because pointing a laptop script at production should be a deliberate act - production's parsing is the server's own job).
 **The iOS confirm screen renders the served merge** *(built Aug 8, 2026 - §7.2, §10A.1)*: the suggestion set is injected into the one confirm form by whichever route opens it (the served merge for a stored receipt; the on-device parse alone at capture time, where no server row and so no merge exists yet), a served suggestion wins the prefill over the row's capture-time copy of the field, exactly the suggested fields start amber, a merge-absent money field renders as a stated absence, and the date-disagreement flag is an inline note in the field with the arithmetic warning's treatment. The raw `ocrSuggestions` record stays in the detail response for the shipped client; the current client no longer reads it.
@@ -418,7 +418,7 @@ Both the owner and a second user have an existing pile: **paper receipts and ema
 
 **Screens:**
 1. **Sign in** — Sign in with Apple for the web.
-2. **Table** — every receipt, sortable and filterable by date range, business/personal, vendor, and free-text search across vendor, category, and notes. Inline editing on every field. Row click opens the image.
+2. **Table** — every receipt, sortable *(2026-08-26: by receipt date — the default, newest first — capture date, total, or vendor, bound to §6's `sort`/`order`)* and filterable by date range, status, category, payment method, and free-text search across vendor, category, and notes *(the business/personal filter left with its field)*. Inline editing on every field, confirmed rows included. Row click opens the image.
 3. **Detail** — the image at full size beside its fields, for checking a number against the paper properly.
 4. **Export** — pick a period, generate, download the zip.
 
@@ -430,7 +430,7 @@ Both the owner and a second user have an existing pile: **paper receipts and ema
 
 **Deployment:** static build to Cloudflare Pages, free at this scale.
 
-✅ *(Aug 21, 2026)* **Built and gated against local dev** - all four screens, the §6A multi-file upload (per-batch business choice before anything uploads, upload-day date corrected at confirm, a duplicate reported as a duplicate) and the §6A confirm queue, prefilled by the served merge exactly as iOS renders it. The §9 gate scenario ran in a real browser: export generated, zip downloaded, XLSX opened, three rows clicked through to images, every image byte-identical to what was dropped. Server seams: a second Apple audience (`APPLE_WEB_CLIENT_ID`) and exact-origin CORS (`WEB_ORIGIN`), both inert until configured. **Production enablement is the owner's**: the Services ID, the two Fly secrets, the R2 bucket CORS rule for browser PUTs, and the Pages deploy - `web/README.md` has the ordered list; `docs/gates/wave-7.md` §4-5 has what remains unverified until then. Record: `docs/DECISIONS.md` 2026-08-21. *(Same evening, on the owner's instruction: the wave-7 server deployed to production as machine version 4, both secrets set, and the R2 CORS rule written and falsified live - wave-7 §4's correction has the artifacts. Still the owner's: the Services ID, the Pages deploy, and the production sign-in-and-export that closes the gate.)*
+✅ *(Aug 21, 2026)* **Built and gated against local dev** - all four screens, the §6A multi-file upload (per-batch business choice before anything uploads *(2026-08-26: that gate retired with `is_business` — the dropzone is enabled immediately)*, upload-day date corrected at confirm, a duplicate reported as a duplicate) and the §6A confirm queue, prefilled by the served merge exactly as iOS renders it. The §9 gate scenario ran in a real browser: export generated, zip downloaded, XLSX opened, three rows clicked through to images, every image byte-identical to what was dropped. Server seams: a second Apple audience (`APPLE_WEB_CLIENT_ID`) and exact-origin CORS (`WEB_ORIGIN`), both inert until configured. **Production enablement is the owner's**: the Services ID, the two Fly secrets, the R2 bucket CORS rule for browser PUTs, and the Pages deploy - `web/README.md` has the ordered list; `docs/gates/wave-7.md` §4-5 has what remains unverified until then. Record: `docs/DECISIONS.md` 2026-08-21. *(Same evening, on the owner's instruction: the wave-7 server deployed to production as machine version 4, both secrets set, and the R2 CORS rule written and falsified live - wave-7 §4's correction has the artifacts. Still the owner's: the Services ID, the Pages deploy, and the production sign-in-and-export that closes the gate.)*
 
 ## 8 · Export
 
@@ -440,21 +440,22 @@ Triggered from the app, generated server-side, delivered as a single zip.
 Receipts-2026.zip
   receipts-2026.xlsx
   receipts-2026.csv
+  receipts-2026.json      ← 2026-08-26
   images/
     2026/01/2026-01-14_Staples_00042.jpg
     2026/02/...
 ```
 
-**Columns, in this exact order, in both files:**
+**Columns, in this exact order, in all three files** *(2026-08-26: `vendor_gst_hst_number`, `other_tax` and `business_or_personal` left with their fields)*:
 
-`receipt_id · date · vendor · vendor_gst_hst_number · subtotal · hst · other_tax · total · currency · category · payment_method · business_or_personal · whose · image_filename · notes`
+`receipt_id · date · vendor · subtotal · hst · total · currency · category · payment_method · whose · image_filename · notes`
 
 - **`image_filename` must match the path in `images/`.** The point of the folder is that the accountant can click from a row to the paper. Verify this in a test rather than by eye.
-- **`whose` exists for accountant-side merging.** Each export is strictly one person's data (§3 constraint 4), so the column is constant within a file **by design** - and that constancy is exactly what makes a combined workbook of two people's exports unambiguous row by row. Do not "clean it up". *(Wave-2 gate review)*
+- **`whose` exists for accountant-side merging.** Each export is strictly one person's data (§3 constraint 3, isolation), so the column is constant within a file **by design** - and that constancy is exactly what makes a combined workbook of two people's exports unambiguous row by row. Do not "clean it up". *(Wave-2 gate review)*
 - **Generation refuses oversized exports rather than streaming them.** Assembly is in-memory, and with the backlog and six-year retention a year's zip can reach gigabytes; past a **byte budget** (default 256 MiB) the job **fails with a clear reason** ("export a shorter period"), which is a far better outcome than an OOM crash. Streaming is deliberately not built. Bytes are the only measure — a row count would be a worse-measured proxy for the same memory bound and could refuse an export that would have fit. *(Wave-2 gate review, revised)*
 - **A receipt whose image is missing fails the export by name, and the failure names a remedy this server can perform.** *(Prod-readiness sweep, Aug 10 2026.)* The create route validates an object key's **shape**, never its existence, so a presigned PUT that failed or was interrupted — followed by a create the client still sent — leaves a receipt pointing at bytes that are not there. One such row jams every export of its period. The job now fails naming **the receipt id** and telling the person to delete it and capture it again if they still have the paper (deleting first is required — the duplicate-image index refuses an identical photo while the old row is live), or to delete it to export without it. It leads with the remedy that keeps the receipt, because deleting takes the vendor, date, total and HST out of every future export. **Only a genuinely absent object is described as one**: a storage timeout or a refused credential reports as itself, since telling someone to delete a receipt over a network blip is the worst available trade here. Adding an existence check at create time was considered and **not** taken — it would convert a broken export into a refused capture, and the paper is usually already gone.
-- **XLSX is primary** (what an accountant opens); **CSV is the same data** (what imports into accounting software).
-- **Formula-shaped fields are exported unchanged, decided 2026-08-15.** A free-text field beginning `=`, `+`, `-` or `@` (vendor, category, payment method, whose, notes, the tax number) is written into the CSV byte-for-byte, with RFC 4180 quoting and nothing else. Every available defence mutates the record - the standard `'` prefix becomes the vendor's name in the accounting software the CSV exists to feed, silently and for the six-year life of the books - while the artifact this spec designates for humans is the XLSX, which stores such a field as a string cell, never a formula (measured against ExcelJS, and pinned by test alongside the CSV's fidelity). Constraint 2 is a real mitigating control here: every exported string passed a human's eyes on the confirm screen at capture time. The accepted residual, stated: a person who opens the CSV itself in a spreadsheet may see a formula-shaped field evaluated or refused (`#NAME?`); the remedy is the XLSX sitting beside it in the same zip.
+- **XLSX is primary** (what an accountant opens); **CSV is the same data** (what imports into accounting software); **JSON is the same data again, machine-readable** *(2026-08-26)* — one row source feeds all three writers, money rendered as decimal strings, so the three files can never disagree. There is deliberately **no format picker**: a job parameter and UI whose only effect would be subtracting files from a zip that already carries all three.
+- **Formula-shaped fields are exported unchanged, decided 2026-08-15.** A free-text field beginning `=`, `+`, `-` or `@` (vendor, category, payment method, whose, notes) is written into the CSV byte-for-byte, with RFC 4180 quoting and nothing else. Every available defence mutates the record - the standard `'` prefix becomes the vendor's name in the accounting software the CSV exists to feed, silently and for the six-year life of the books - while the artifact this spec designates for humans is the XLSX, which stores such a field as a string cell, never a formula (measured against ExcelJS, and pinned by test alongside the CSV's fidelity). Constraint 2 is a real mitigating control here: every exported string passed a human's eyes on the confirm screen at capture time. The accepted residual, stated: a person who opens the CSV itself in a spreadsheet may see a formula-shaped field evaluated or refused (`#NAME?`); the remedy is the XLSX sitting beside it in the same zip.
 - Money renders as decimal currency in the export, even though it is cents in the database.
 - Filename pattern: `{date}_{vendor-slug}_{short-id}.jpg` — deterministic, sortable, no collisions. *(Wave 2: the short id is the receipt uuid's first 8 hex characters — deterministic with no counter state; a null vendor slugs to `unknown-vendor`.)*
 - The export period is derived from the user's fiscal year settings at request time (§5.1).
@@ -485,7 +486,7 @@ Each wave ends at a gate. **A gate is passed by inspecting an artifact, not by r
 
 ### 10.1 What goes in `CLAUDE.md`
 
-- The success test from §1 and the four constraints from §3, verbatim. These are the things most likely to be quietly eroded across many small sessions.
+- The success test from §1 and the constraints from §3 (three since 2026-08-26), verbatim. These are the things most likely to be quietly eroded across many small sessions.
 - The rule that `user_id` comes from the token, never from a request parameter.
 - Money is integer cents; never floats.
 - Category is free text; never introduce an enum, taxonomy, or CRA mapping.
@@ -541,12 +542,12 @@ These decisions close §10A's "visual design is an open gap" for the confirm scr
 - **Touching a field clears its tint permanently**, and a header counter tracks how many remain unchecked.
 - **Total is a card, not a row** - largest type on screen, so the eye lands there first every time. It is the field most likely to matter and least likely to be checked carefully.
 - **The arithmetic warning sits inside the total card, in the same amber**, not in red. Plenty of legitimate receipts do not reconcile; a red error trains people to dismiss it.
-- **Save is disabled until business or personal is chosen**, with the reason stated below the button rather than left to be inferred. This is the one place a disabled control is correct, because it is what enforces `is_business` having no default (§5.2).
-- **Absent values state their absence** - a missing tax number reads "Not found", not an empty field. A blank looks like a bug; a stated absence looks like a fact.
+- **Save is disabled until the total is a valid amount**, with the reason stated below the button rather than left to be inferred. *(2026-08-26: this bullet used to gate on the business-or-personal choice, enforcing §5.2's no-default rule; both retired with `is_business`. The disabled-control pattern itself stands — a confirmed receipt without a total is the one thing the CHECK still refuses.)*
+- **Absent values state their absence** - a missing subtotal reads "Not found", not an empty field. A blank looks like a bug; a stated absence looks like a fact.
 - **No success modal after saving.** Return straight to Home. A confirmation step on a five-second task is friction pretending to be care.
 - *(Aug 8, 2026 - device pass.)* **The keyboard has three ways out, and Save is never under it.**
 **No field may raise a keyboard the person cannot put away without knowing a gesture** - editing a money field last was leaving the Save button covered with no obvious way back, on a screen whose whole brief is a five-second task ending in one tap.
-**(1) Every keyboard with no exit of its own carries a toolbar with a Done button**: the four money fields (total, HST, subtotal, other tax), whose decimal pad has no return key, and notes, whose return key inserts a newline.
+**(1) Every keyboard with no exit of its own carries a toolbar with a Done button**: the money fields (total, HST, subtotal — other tax until 2026-08-26 removed it), whose decimal pad has no return key, and notes, whose return key inserts a newline.
 The single-line text fields are left without one - their return key already dismisses, and an accessory bar they do not need costs form height.
 *(Aug 9, 2026 - device pass.)* **Which fields those are is read off the keyboard the field raises, not listed per field**: a numeric pad has no return key and a text view's return key inserts a newline, both properties of the keyboard. The hand-maintained list drifted once already and shipped a decimal pad nothing could close.
 **The bar is installed on the first responder in UIKit, not requested from `ToolbarItemGroup(placement: .keyboard)`**, which installs nothing at all through this screen's `fullScreenCover` presentation - proven on device three ways, and non-deterministic across sessions as to whether it installs even an empty collapsed host. The bar is re-asserted on focus, text and keyboard-frame changes, because SwiftUI overwrites the accessory property on every body update.
@@ -670,13 +671,14 @@ It is also required. App Store Guideline 5.1.1(v) makes in-app account deletion 
 - **Accountant questions** — preferred format/software · her category list · who produces originals in an audit · fiscal year end. All useful, none gating.
 - **CRA documentation thresholds** (~$30 / ~$150) — confirm with the accountant.
 - **HST filing frequency — assumed ANNUAL** (the owner, Aug 5), which is the normal reporting period for a business of this size. ⚠ It matters less than it first appeared: **the export takes a date range**, so quarterly filing would be a UI affordance on the period picker, not an architecture change. If the assumption is wrong, the cost is one dropdown.
-- **Multi-page receipts and foreign-currency purchases** — **explicitly non-blocking.** The `receipt_images` table (§5) already makes multi-page a feature addition rather than a migration, and `currency` plus `other_tax_cents` already carry a US receipt with no HST line. Answer whenever convenient.
+- **Multi-page receipts and foreign-currency purchases** — **explicitly non-blocking.** The `receipt_images` table (§5) already makes multi-page a feature addition rather than a migration, and `currency` still carries a US receipt with no HST line *(2026-08-26: `other_tax_cents` used to hold such a receipt's sales tax; with it removed, the unbroken-out tax simply lives in the total and the §7.2 arithmetic prompt flags the receipt as unreconciled — non-blocking by design)*. Answer whenever convenient.
 - **Retention** — CRA requires six years. The schema and storage plan already assume it; no deletion policy is built in v1.
 
 ---
 
 ## Update log
 
+- **August 26, 2026 (first-use product feedback: the receipt slims to eight fields; list and export grow)** - The owner's feedback after first real use, ruled and built across all three surfaces: `vendor_tax_number`, `other_tax_cents` and `is_business` are **removed** (migration 0005 — §3's four constraints become three; the registration number stays printed on the stored image, which is the actual supporting document), categories and payment methods become **reusable by derivation** (`GET /api/receipts/options` — free text stands, no table, no normalization), the export zip gains **`receipts-{label}.json`** beside the XLSX and CSV (12 columns now, no format picker), the list gains **`sort`/`order`** plus `category`/`paymentMethod` filters (default sort stays the receipt's own date, now pinned rather than incidental; iOS gains the search/sort/filter UI, the web table the sort controls), and **editing after confirmation** is exposed by both clients (the server always allowed it; amber stays the mark of unconfirmed suggestions only). Two commented, tested, trigger-bound shims keep the shipped 1.0 (1) build working: tolerated legacy body keys, and a null-valued `suggestions.vendorTaxNumber`. Amended: §3, §5, §5.2 (retired), §6, §7.1, §7.2, §7.3 (prompt v3), §7A, §8, §10A.1, §12; `CLAUDE.md` alongside. **Not deployed** — the production deploy and migration are the owner's, and the migration will discard the tax number and business flag on production's one existing receipt (stated in the decision entry). Record: `docs/DECISIONS.md` 2026-08-26.
 - **August 26, 2026 (the second user on TestFlight, ahead of App Store approval)** - TestFlight internal testing needs no Beta App Review and runs independently of the App Store listing, so the second user was invited to App Store Connect (Marketing role, scoped to Kept Receipts), added to the Internal Testers group already carrying build 1.0 (1), and installed Kept on her iPhone via TestFlight - ahead of, not instead of, the pending rejection-response resubmission. She captured a receipt; production read back **`users 2, receipts 1, receipt_images 1, export_jobs 0`**, up from `users 1, receipts 0`. Isolation held on the system's first real second user; the server-side LLM parse sweep ran against a real production receipt for the first time. Left open: the R2 `kept-backups` token is still unminted, so her data currently survives nothing worse than Neon's 6-hour PITR window, and the restore drill's image leg - deferred 2026-08-20 "until the first receipt with an image lands in production" - has had its trigger fire and not yet re-run. §11's distribution checklist status line is annotated in place rather than rewritten. Record: `docs/DECISIONS.md` 2026-08-26.
 - **August 25, 2026 (rejection response: in-app account deletion, at every layer)** - Apple rejected build 1.0 (1) under **Guideline 2.1 Information Needed**: the review's screen recording must show the account-deletion flow, and Kept had none - which put it on the wrong side of **Guideline 5.1.1(v)** as well, since Sign in with Apple is the only way in. Built: **`DELETE /api/me`** (§6), the system's only hard delete, transactional over rows and best-effort over objects (§10B); **Sign in with Apple token revocation** through Apple's REST API, fed by a fresh single-use authorization code the iOS client mints at deletion time, best-effort by Apple's own instruction and loudly logged every way it can fail; a destructive **Delete account** in Home's menu behind a confirmation that names what goes (§7.1), which also discards that user's queued outbox receipts; and the same action in the web topbar, codeless (§7A). Verified against the running dev server, not just the suite. ⚠ **the owner's, before the next production deploy:** a Sign in with Apple key in the developer portal and three Fly secrets - unset, revocation is disabled and says so at boot. Record: `docs/DECISIONS.md` 2026-08-25.
 - **August 22, 2026 (ship day: submitted for review, unlisted request filed)** - After the pre-ship security pass (`docs/security/pass-2026-08-22.md`, verdict: nothing blocks) and the web deploy that made the privacy URL real, wave-6 §3 step 18 executed from the owner's signed-in sessions: the remaining App Store Connect gaps were filled (Content Rights: no third-party content; Copyright; privacy policy URL; availability restricted to **Canada only**, which also sidesteps the EU DSA trader declaration; **manual release**, so nothing sits publicly searchable between approval and the unlisted conversion), build 1.0 (1) went to **Waiting for Review**, and the unlisted app distribution request was filed and acknowledged. The owner's visibility question was ruled: **unlisted, not paid** - a price does not hide an app, and the Paid Applications Agreement would delay shipping. Remaining: Apple's two approvals, then Release, then the link to the second user. Record: `docs/DECISIONS.md` 2026-08-22.

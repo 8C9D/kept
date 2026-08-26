@@ -42,6 +42,7 @@ HST arithmetic, export generation, filename derivation, fiscal-period slicing, a
 - **The web client and privacy page are live at `https://keptapp.net`** (Pages project `keptapp-web`, `_headers` CSP; contact is the owner's email by his identity ruling). Production web sign-in end-to-end is still unexercised - it needs a person's Apple credentials.
 - **the second user is on TestFlight (2026-08-26), ahead of App Store approval** - invited to App Store Connect (Marketing role, scoped to Kept Receipts only), added to the Internal Testers group carrying build 1.0 (1); she installed via TestFlight and captured a receipt. TestFlight is a separate track from the App Store listing and unaffected by the 2026-08-22 rejection. Production now reads `users 2, receipts 1, receipt_images 1, export_jobs 0` - isolation held on the system's first real second user. Left open: the R2 `kept-backups` token is still unminted (her data survives nothing worse than Neon's 6-hour PITR window), and the restore drill's image leg - deferred until "the first receipt with an image lands in production" - has had its trigger fire and not yet re-run. Record: `docs/DECISIONS.md` 2026-08-26.
 
+- **2026-08-26, product-feedback pass (same day as the second user's TestFlight entry, later):** receipts reduced to Date/Vendor/Subtotal/HST/Total/Category/Payment/Notes — `vendor_tax_number`, `other_tax_cents` and `is_business` removed at every layer (migration 0005; constraints 4→3); reusable category/payment values (`GET /api/receipts/options`); export zip gains JSON (12 columns); list gains `sort`/`order` + category/payment filters (default stays receipt date); editing after confirmation exposed on both clients. Two trigger-bound shims keep the shipped 1.0 (1) build working (tolerated legacy body keys; null-valued `suggestions.vendorTaxNumber`). **Committed, not deployed** — the production deploy + migration are the owner's, the migration discards the tax number and business flag on production's one receipt, and the Pages redeploy must travel with the API deploy (the old web bundle's business filter would 400). Record: `docs/DECISIONS.md` 2026-08-26.
 - The first production deploy happened 2026-08-16 (`docs/gates/wave-6.md` §3 steps 1-13); steps 14-16 completed 2026-08-18: privacy label published, build 1.0 (1) on TestFlight, the owner's phone signed into production and verified end to end (`users 1, receipts 0` - re-read 2026-08-20, unchanged; superseded 2026-08-26, see above).
 - The App Store record is "Kept Receipts" (app id 6802835941) because "Kept" was taken as a store name; the home-screen name stays Kept via `CFBundleDisplayName`. The Fly app is `keptapp-api`, not `kept-api`, for the same reason on that platform.
 - **Production-readiness round 4 (the post-deploy pass) ran 2026-08-20**: nine of the eleven carried findings closed and deployed - ledger `PROD-READINESS-ROUND-4.md`. R2-3 and PR-9(b) stay deferred on their 2026-08-15 triggers (both need a realistic production export to measure; production holds zero receipts). Round 4's §4a residuals were closed 2026-08-21 except the pg-9 note, which waits on the pg major bump.
@@ -78,13 +79,14 @@ On a fresh clone run `git config core.hooksPath .githooks` once to enable the gi
 A receipt is captured in under a minute and never thought about again.
 Every design decision is subordinate to this sentence.
 
-## The four constraints that do not move
+## The three constraints that do not move
 
-1. HST is its own field, never folded into the total, plus the supplier's GST/HST registration number.
+Four until 2026-08-26, when the owner's product-feedback ruling retired the business-vs-personal constraint and constraint 1's registration-number clause (`docs/DECISIONS.md` 2026-08-26).
+
+1. HST is its own field, never folded into the total.
 2. No OCR value saves without a human confirming it.
    Extracted fields are suggestions in an editable form.
-3. Business-vs-personal is set at capture time, never as cleanup.
-4. Full per-user isolation.
+3. Full per-user isolation.
    Each user sees only their own receipts.
 
 ## Engineering rules
@@ -95,7 +97,7 @@ Every design decision is subordinate to this sentence.
   Never floats.
 - `category` is free text.
   Never introduce an enum, taxonomy, or CRA line mapping.
-- `is_business` has no default value at any layer.
+  (Reuse of a user's own past values via `GET /api/receipts/options` is a convenience, not a vocabulary — 2026-08-26.)
 - Nothing with `status = 'pending'` may appear in an export.
 - No secrets in the repo.
   `.env.local` is gitignored and the owner handles its contents.
