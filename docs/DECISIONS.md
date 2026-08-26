@@ -4,6 +4,16 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-08-26 - The field reduction is deployed: migration 0005 ran from a laptop, and production held five receipts, not one
+
+*Recorded 2026-08-26, as `CLAUDE.md`'s status section was slimmed into this log. Same day as, and later than, the two entries below.*
+
+**Done, recorded rather than decided.** `fly deploy` rolled the API to **machine v6** and the Cloudflare Pages redeploy went out in the same session, which is what the field-reduction entry below required of them - the old web bundle's `isBusiness` filter would have 400ed against the new API. A manual `pg_dump` preceded the migration and sits at `~/.kept/backups/kept-prod-20260826.dump`.
+
+**The migration did not run the documented way, and the reason is recorded rather than smoothed over.** `fly ssh console -C "npm run db:migrate"` established its tunnel and then timed out probing the internal API - suspected UDP/51820 blocked on the network the owner was on, never conclusively diagnosed. Migration 0005 instead ran from the owner's laptop against Neon's **direct** (non-`-pooler`) endpoint - the same `DATABASE_URL` the backup had just proven could reach production. Post-migration read: the three columns dropped, the CHECK constraint down from four terms to three, every core field intact.
+
+**Production held five receipts, not one.** Four confirmed and one pending across the two users, ahead of the `users 2, receipts 1` the TestFlight entry below recorded that morning: real use continued between the two readings and nothing logged it. The honest lesson is that a row count in a status doc is a reading with a timestamp, never a state. The migration discarded the supplier tax number and the business flag on all five; the stored images keep the printed numbers, as the field-reduction entry said they would.
+
 ## 2026-08-26 - First-use product feedback: the receipt slims to the fields a person actually fills, and the list and export grow the conveniences
 
 **The ruling, from the owner's product feedback after the first real use.** A receipt is **Date, Vendor, Subtotal, HST, Total, Category, Payment, Notes** (plus image, currency, status, and the immutable suggestion records). Removed at every layer - schema, API, export, both clients: the **supplier's GST/HST registration number** (`vendor_tax_number`), **`other_tax_cents`**, and **business-vs-personal** (`is_business`). This knowingly amends §3, which is exactly what §3 says such a change is: a spec change, not an implementation decision. Constraint 1 keeps its core - **HST is its own field, never folded into the total** - and loses the registration-number clause; constraint 3 (business-vs-personal at capture time) is retired outright, and the constraints renumber from four to three. The trade, stated: the export loses the `vendor_gst_hst_number` and `business_or_personal` columns, and the CRA-documentation role the registration number played is carried by the stored receipt image, where the number stays printed - the field was a per-capture transcription cost duplicating what the image already holds, weighed against the success test's "captured in under a minute".
@@ -131,6 +141,12 @@ No OCR runs on web uploads, deliberately: they carry no suggestions, the sweep n
 Flagged as the likeliest gate failure before any browser started; MinIO's permissive default let the gate pass, and the R2 difference became `web/README.md` deploy step 3 instead of a production incident. iOS never sees this (URLSession sends no Origin), which is exactly why it would have been found in production otherwise.
 
 **Spec amended in this commit:** §7A (built-and-gated status), §4.2 (web stack line), the update log. Production enablement - Services ID, the two Fly secrets, the R2 CORS rule, the Pages deploy - is the owner's, listed in `web/README.md` and wave-7 §4.
+
+## 2026-08-21 - CI's first run never started: GitHub refused the job on account billing
+
+*Recorded 2026-08-26, filed under the date it happened. The fact was measured on 2026-08-21 and had lived only in `CLAUDE.md`'s status section until that section was slimmed.*
+
+**What happened, recorded rather than decided.** The push that landed `.github/workflows/server.yml` triggered the workflow and GitHub refused to start the job: *"recent account payments have failed or your spending limit needs to be increased."* The entry below closes on the sentence that the first real run "is the artifact that closes this entry's loop" - that artifact does not exist. The workflow is still verified only by YAML parse and by the local rehearsal of its exact steps, and stays **unvalidated on GitHub's runners** until the billing state is fixed and a run actually executes. Recorded rather than left implicit because a CI that has never run and a CI that runs green look identical from inside the repository.
 
 ## 2026-08-21 - CI exists: the backend suite on push, run against the same compose file dev runs
 
