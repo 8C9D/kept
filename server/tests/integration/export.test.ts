@@ -82,11 +82,11 @@ describe("the export pipeline", () => {
     const included = await createReceiptWithImage(token, userId, "a1".repeat(32), {
       purchasedAt: "2026-01-14",
       vendor: "Café Dépôt",
-      vendorTaxNumber: "000000000RT0001",
       subtotalCents: 10000,
       hstCents: 1300,
       totalCents: 11300,
       category: "office supplies",
+      paymentMethod: "visa",
       status: "confirmed",
     });
     const nullFields = await createReceiptWithImage(token, userId, "a2".repeat(32), {
@@ -95,7 +95,6 @@ describe("the export pipeline", () => {
       subtotalCents: null,
       hstCents: null,
       totalCents: 4200,
-      isBusiness: false,
       status: "confirmed",
     });
     // Excluded rows: pending, soft-deleted, out of period, other user.
@@ -146,28 +145,68 @@ describe("the export pipeline", () => {
     const entryNames = zip.getEntries().map((entry) => entry.entryName);
     expect(entryNames).toContain("receipts-2026.xlsx");
     expect(entryNames).toContain("receipts-2026.csv");
+    expect(entryNames).toContain("receipts-2026.json");
 
     // CSV: exact header, only the two confirmed in-period rows, money as
     // decimal strings, nulls as empty cells.
     const csv = zip.readAsText("receipts-2026.csv");
     const lines = csv.trimEnd().split("\r\n");
     expect(lines[0]).toBe(
-      "receipt_id,date,vendor,vendor_gst_hst_number,subtotal,hst,other_tax,total,currency,category,payment_method,business_or_personal,whose,image_filename,notes",
+      "receipt_id,date,vendor,subtotal,hst,total,currency,category,payment_method,whose,image_filename,notes",
     );
     expect(lines).toHaveLength(3); // header + 2 rows
     const includedLine = lines.find((line) => line.startsWith(included.id));
     expect(includedLine).toBeDefined();
     expect(includedLine).toContain("Café Dépôt");
-    expect(includedLine).toContain("100.00,13.00,,113.00,CAD");
-    expect(includedLine).toContain("business,Synthetic User A,images/2026/01/");
+    expect(includedLine).toContain("100.00,13.00,113.00,CAD");
+    expect(includedLine).toContain("visa,Synthetic User A,images/2026/01/");
     const nullLine = lines.find((line) => line.startsWith(nullFields.id));
-    expect(nullLine).toContain(",,,,42.00,CAD");
-    expect(nullLine).toContain("personal");
+    expect(nullLine).toContain(",,,42.00,CAD");
     expect(nullLine).toContain("unknown-vendor");
     expect(csv).not.toContain("Pending Vendor");
     expect(csv).not.toContain("Deleted Vendor");
     expect(csv).not.toContain("Out Of Period");
     expect(csv).not.toContain("Someone Else");
+
+    // JSON: the same rows again, keyed by the same columns. Money stays a
+    // decimal string so nothing downstream turns integer cents into a
+    // float; an absent value is null rather than an empty string, which is
+    // the one thing this encoding can say that the CSV cannot.
+    const json = JSON.parse(zip.readAsText("receipts-2026.json")) as Record<
+      string,
+      unknown
+    >[];
+    expect(json).toHaveLength(2);
+    expect(Object.keys(json[0] ?? {})).toEqual(lines[0]?.split(","));
+    const includedJson = json.find((r) => r.receipt_id === included.id);
+    expect(includedJson).toMatchObject({
+      date: "2026-01-14",
+      vendor: "Café Dépôt",
+      subtotal: "100.00",
+      hst: "13.00",
+      total: "113.00",
+      currency: "CAD",
+      category: "office supplies",
+      payment_method: "visa",
+      whose: "Synthetic User A",
+      notes: null,
+    });
+    const nullJson = json.find((r) => r.receipt_id === nullFields.id);
+    expect(nullJson).toMatchObject({
+      vendor: null,
+      subtotal: null,
+      hst: null,
+      total: "42.00",
+    });
+    // The retired columns are gone from every encoding, not blanked.
+    for (const retired of [
+      "vendor_gst_hst_number",
+      "other_tax",
+      "business_or_personal",
+    ]) {
+      expect(lines[0]).not.toContain(retired);
+      expect(Object.keys(json[0] ?? {})).not.toContain(retired);
+    }
 
     // XLSX: same headers, numeric money with a two-decimal format.
     const workbook = new ExcelJS.Workbook();
@@ -185,8 +224,8 @@ describe("the export pipeline", () => {
     const headerValues = (sheet?.getRow(1).values as unknown[]).slice(1);
     expect(headerValues).toEqual(lines[0]?.split(","));
     const firstDataRow = sheet?.getRow(2);
-    expect(firstDataRow?.getCell(8).value).toBe(113); // total, numeric
-    expect(firstDataRow?.getCell(8).numFmt).toBe("0.00");
+    expect(firstDataRow?.getCell(6).value).toBe(113); // total, numeric
+    expect(firstDataRow?.getCell(6).numFmt).toBe("0.00");
 
     // Every image_filename cell resolves to a real entry in images/, and
     // the bytes are the ones uploaded for that receipt.

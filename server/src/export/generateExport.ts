@@ -15,7 +15,7 @@ import {
   type ObjectStorage,
 } from "../storage/objectStorage.js";
 import type { ExportRow } from "./exportRows.js";
-import { writeCsv, writeXlsx } from "./writeFiles.js";
+import { writeCsv, writeJson, writeXlsx } from "./writeFiles.js";
 
 export interface ExportPeriod {
   start: string; // ISO yyyy-mm-dd, inclusive
@@ -54,6 +54,7 @@ interface GenerateExportDependencies {
  * it in object storage. Returns where it landed.
  *
  * Contents: the XLSX (what the accountant opens), the CSV (what imports),
+ * the JSON (the same rows for anything that would rather parse than guess),
  * and every image under images/yyyy/mm/ with filenames the spreadsheets'
  * image_filename column points at - the click-through from row to paper is
  * the point of the folder.
@@ -119,29 +120,23 @@ export async function generateExport(
     // leaves the server and lands in an accountant's inbox.
     assertIssuedObjectKey(imageObjectKey, input.userId);
     // Only confirmed receipts export, and the receipts_confirmed_complete_ck
-    // constraint guarantees a confirmed receipt has both values. Null here
-    // means that guarantee broke, and the job must fail loudly rather than
-    // hand an accountant an invented amount.
-    if (receipt.totalCents === null || receipt.isBusiness === null) {
-      throw new Error(
-        `Confirmed receipt ${receipt.id} is missing its total or business flag`,
-      );
+    // constraint guarantees a confirmed receipt has a total. Null here means
+    // that guarantee broke, and the job must fail loudly rather than hand an
+    // accountant an invented amount.
+    if (receipt.totalCents === null) {
+      throw new Error(`Confirmed receipt ${receipt.id} is missing its total`);
     }
     const row: ExportRow = {
       receiptId: receipt.id,
       date: receipt.purchasedAt,
       vendor: receipt.vendor,
-      vendorGstHstNumber: receipt.vendorTaxNumber,
       subtotalCents:
         receipt.subtotalCents === null ? null : cents(receipt.subtotalCents),
       hstCents: receipt.hstCents === null ? null : cents(receipt.hstCents),
-      otherTaxCents:
-        receipt.otherTaxCents === null ? null : cents(receipt.otherTaxCents),
       totalCents: cents(receipt.totalCents),
       currency: receipt.currency,
       category: receipt.category,
       paymentMethod: receipt.paymentMethod,
-      businessOrPersonal: receipt.isBusiness ? "business" : "personal",
       whose: user.displayName,
       imageFilename: `images/${exportImagePath({
         purchasedAt: receipt.purchasedAt,
@@ -158,13 +153,17 @@ export async function generateExport(
   const label = periodLabel(input.period);
   const xlsx = await writeXlsx(rows);
   const csv = writeCsv(rows);
+  const json = writeJson(rows);
 
   // The budget is checked before each append, so the refusal lands before
-  // the memory is spent, not after.
-  let totalBytes = xlsx.byteLength + csv.length;
+  // the memory is spent, not after. Measured in bytes rather than in
+  // JavaScript string length, which undercounts every non-ASCII vendor name.
+  let totalBytes =
+    xlsx.byteLength + Buffer.byteLength(csv) + Buffer.byteLength(json);
   const zip = await buildZip(async (archive) => {
     archive.append(Buffer.from(xlsx), { name: `receipts-${label}.xlsx` });
     archive.append(csv, { name: `receipts-${label}.csv` });
+    archive.append(json, { name: `receipts-${label}.json` });
     for (const { row, imageObjectKey } of bundle) {
       // Named, because the storage layer's own answer is not actionable. A
       // receipt can point at an object that was never uploaded - the create

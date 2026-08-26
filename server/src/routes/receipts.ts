@@ -1,6 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
-import { and, desc, eq, gte, ilike, isNull, lte, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  ilike,
+  isNotNull,
+  isNull,
+  lte,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
+import type { PgColumn } from "drizzle-orm/pg-core";
 import type { SessionTokens } from "../auth/session.js";
 import type { Db } from "../db/client.js";
 import { isUniqueViolation } from "../db/errors.js";
@@ -12,7 +26,9 @@ import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
 import {
   createReceiptSchema,
   listCursorSchema,
+  listOrderSchema,
   listReceiptsQuerySchema,
+  listSortSchema,
   ocrSuggestionsSchema,
   updateReceiptSchema,
   uploadUrlSchema,
@@ -23,7 +39,10 @@ import {
   uuidParamOrNotFound,
 } from "../http/validate.js";
 import { sessionAuth, type AuthedEnv } from "../http/sessionAuth.js";
-import { mergeSuggestions } from "../domain/mergedSuggestions.js";
+import {
+  mergeSuggestions,
+  type MergedSuggestions,
+} from "../domain/mergedSuggestions.js";
 import type { LlmParseSweepHandle } from "../parse/llmParseSweep.js";
 import {
   assertIssuedObjectKey,
@@ -98,6 +117,10 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     // failure for an invisible one. Omitted nullable fields become null;
     // omitted currency/status stay absent so the column defaults apply.
     // userId only ever comes from the session.
+    //
+    // It is also what discards the retired keys the shipped iOS 1.0 (1)
+    // build still sends (schemas.ts, `retiredReceiptFields`): they are named
+    // nowhere below, so they reach no column.
     let created;
     try {
       created = await deps.db.transaction(async (tx) => {
@@ -108,19 +131,16 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
             purchasedAt: body.purchasedAt,
             capturedAt: new Date(body.capturedAt),
             vendor: body.vendor ?? null,
-            vendorTaxNumber: body.vendorTaxNumber ?? null,
             subtotalCents: body.subtotalCents ?? null,
             hstCents: body.hstCents ?? null,
-            otherTaxCents: body.otherTaxCents ?? null,
-            // Null while pending means "not read / not chosen yet" - stated
-            // absences, never fabricated values. The schema has already
-            // rejected a confirmed create missing either.
+            // Null while pending means "not read yet" - a stated absence,
+            // never a fabricated value. The schema has already rejected a
+            // confirmed create missing it.
             totalCents: body.totalCents ?? null,
             ...(body.currency !== undefined && { currency: body.currency }),
             ...(body.status !== undefined && { status: body.status }),
             category: body.category ?? null,
             paymentMethod: body.paymentMethod ?? null,
-            isBusiness: body.isBusiness ?? null,
             notes: body.notes ?? null,
             ocrRawText: body.ocrRawText ?? null,
             ocrSuggestions: normalizeOcrSuggestions(body.ocrSuggestions),
@@ -163,25 +183,36 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
   });
 
   /**
-   * GET /api/receipts - the user's receipts, newest purchase first, in
-   * pages. Keyset pagination on (purchased_at, created_at, id) descending:
-   * stable under concurrent inserts, unlike offsets, which matters during a
-   * backlog import.
+   * GET /api/receipts - the user's receipts in pages, newest purchase first
+   * unless `sort`/`order` say otherwise. Keyset pagination on (sort key,
+   * created_at, id): stable under concurrent inserts, unlike offsets, which
+   * matters during a backlog import.
    */
   router.get("/", async (c) => {
     const query = parseOrThrow(listReceiptsQuerySchema, c.req.query());
     const userId = c.get("userId");
     const limit = query.limit ?? DEFAULT_PAGE_SIZE;
+    const sort = query.sort ?? DEFAULT_SORT;
+    const order = query.order ?? DEFAULT_ORDER;
+    const spec = LIST_SORTS[sort];
 
     const conditions = [visibleTo(userId)];
     if (query.cursor !== undefined) {
       const cursor = decodeListCursor(query.cursor);
-      conditions.push(
-        // Row-wise comparison: strictly after the cursor row in the
-        // descending sort order below.
-        sql`(${receipts.purchasedAt}, ${receipts.createdAt}, ${receipts.id})
-            < (${cursor.purchasedAt}::date, ${cursor.createdAt}::timestamptz, ${cursor.id}::uuid)`,
-      );
+      // A cursor is a position inside one specific ordering. Replaying it
+      // against another would hand back a slice of a list nobody asked for,
+      // silently; refusing is the only honest answer.
+      if (cursor.sort !== sort || cursor.order !== order) {
+        throw new ApiError(
+          400,
+          "invalid_request",
+          "cursor was issued for a different sort order",
+        );
+      }
+      if (cursor.sortKeyNull && !sortKeyCanBeNull(spec)) {
+        throw new ApiError(400, "invalid_request", "cursor is not valid");
+      }
+      conditions.push(afterCursorInSort(spec, order, cursor));
     }
     if (query.from !== undefined) {
       conditions.push(gte(receipts.purchasedAt, query.from));
@@ -189,11 +220,17 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     if (query.to !== undefined) {
       conditions.push(lte(receipts.purchasedAt, query.to));
     }
-    if (query.isBusiness !== undefined) {
-      conditions.push(eq(receipts.isBusiness, query.isBusiness));
-    }
     if (query.status !== undefined) {
       conditions.push(eq(receipts.status, query.status));
+    }
+    // Exact match, deliberately: these pair with /options, which serves the
+    // user's own stored strings verbatim. Normalizing here would refuse to
+    // match a value this same server offered.
+    if (query.category !== undefined) {
+      conditions.push(eq(receipts.category, query.category));
+    }
+    if (query.paymentMethod !== undefined) {
+      conditions.push(eq(receipts.paymentMethod, query.paymentMethod));
     }
     if (query.q !== undefined) {
       const pattern = `%${escapeLikePattern(query.q)}%`;
@@ -212,17 +249,13 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
       .select()
       .from(receipts)
       .where(and(...conditions))
-      .orderBy(
-        desc(receipts.purchasedAt),
-        desc(receipts.createdAt),
-        desc(receipts.id),
-      )
+      .orderBy(...listOrderBy(spec, order))
       .limit(limit + 1);
     const page = rows.slice(0, limit);
     const lastRow = page[page.length - 1];
     const nextCursor =
       rows.length > limit && lastRow !== undefined
-        ? encodeListCursor(lastRow)
+        ? encodeListCursor(lastRow, sort, order)
         : null;
 
     // The §5.2a pending badge on both clients reads this from the list
@@ -245,6 +278,30 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     // The list omits ocr_raw_text: it can run to 100 KB per receipt and
     // only the detail view has a use for it.
     return c.json({ receipts: page.map(receiptResponse), nextCursor, pendingCount });
+  });
+
+  /**
+   * GET /api/receipts/options - the category and payment-method values this
+   * user has used before, most recently used first, so both clients can
+   * offer them for reuse instead of asking someone to retype "office
+   * supplies" for the fortieth time.
+   *
+   * Registered ABOVE /:id: that handler 404s a non-uuid, so a literal path
+   * declared after it would be shadowed into a 404 by whichever router Hono
+   * picks.
+   *
+   * Free text in, free text out. Nothing is trimmed, case-folded or merged -
+   * these are the person's own values (2026-08-26 ruling), and an options
+   * list that quietly rewrote them would offer a string the exact-match
+   * filter then fails to find.
+   */
+  router.get("/options", async (c) => {
+    const userId = c.get("userId");
+    const [categories, paymentMethods] = await Promise.all([
+      recentDistinctValues(deps.db, userId, receipts.category),
+      recentDistinctValues(deps.db, userId, receipts.paymentMethod),
+    ]);
+    return c.json({ categories, paymentMethods });
   });
 
   /** GET /api/receipts/:id - one receipt plus presigned image downloads. */
@@ -301,33 +358,37 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     });
   });
 
-  /** PATCH /api/receipts/:id - edit fields; only provided keys change. */
+  /**
+   * PATCH /api/receipts/:id - edit fields; only provided keys change.
+   *
+   * A confirmed receipt is editable, deliberately and not incidentally: a
+   * human corrects a typed total or a mis-keyed vendor after confirming it,
+   * and nothing in the spec makes confirmation a lock. What confirming does
+   * mean is that the row can no longer become incomplete - see the gate
+   * below.
+   */
   router.patch("/:id", async (c) => {
     const id = uuidParamOrNotFound(c.req.param("id"));
     const body = parseOrThrow(updateReceiptSchema, await readJsonBody(c));
     const userId = c.get("userId");
 
     // Explicit field map, same reasoning as the create handler: only keys
-    // the client sent change, and every field named here is one the
-    // compiler checks against its column.
+    // the client sent change, every field named here is one the compiler
+    // checks against its column, and the retired keys the shipped iOS
+    // 1.0 (1) build still sends are discarded by being named nowhere.
     const changes: Partial<typeof receipts.$inferInsert> = {};
     if (body.purchasedAt !== undefined) changes.purchasedAt = body.purchasedAt;
     if (body.capturedAt !== undefined)
       changes.capturedAt = new Date(body.capturedAt);
     if (body.vendor !== undefined) changes.vendor = body.vendor;
-    if (body.vendorTaxNumber !== undefined)
-      changes.vendorTaxNumber = body.vendorTaxNumber;
     if (body.subtotalCents !== undefined)
       changes.subtotalCents = body.subtotalCents;
     if (body.hstCents !== undefined) changes.hstCents = body.hstCents;
-    if (body.otherTaxCents !== undefined)
-      changes.otherTaxCents = body.otherTaxCents;
     if (body.totalCents !== undefined) changes.totalCents = body.totalCents;
     if (body.currency !== undefined) changes.currency = body.currency;
     if (body.category !== undefined) changes.category = body.category;
     if (body.paymentMethod !== undefined)
       changes.paymentMethod = body.paymentMethod;
-    if (body.isBusiness !== undefined) changes.isBusiness = body.isBusiness;
     if (body.notes !== undefined) changes.notes = body.notes;
     if (body.status !== undefined) changes.status = body.status;
     if (body.ocrRawText !== undefined) changes.ocrRawText = body.ocrRawText;
@@ -351,24 +412,21 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
         status: body.status ?? existing.status,
         totalCents:
           body.totalCents !== undefined ? body.totalCents : existing.totalCents,
-        isBusiness:
-          body.isBusiness !== undefined ? body.isBusiness : existing.isBusiness,
       };
-      if (resulting.status === "confirmed") {
-        if (resulting.totalCents === null) {
-          throw new ApiError(
-            400,
-            "invalid_request",
-            "a confirmed receipt requires a total",
-          );
-        }
-        if (resulting.isBusiness === null) {
-          throw new ApiError(
-            400,
-            "invalid_request",
-            "a confirmed receipt requires a business-or-personal choice",
-          );
-        }
+      if (resulting.status === "confirmed" && resulting.totalCents === null) {
+        throw new ApiError(
+          400,
+          "invalid_request",
+          "a confirmed receipt requires a total",
+        );
+      }
+
+      // A body carrying nothing but the retired keys above asks for no
+      // change to any column. The shipped client's patch is answered with
+      // the row as it stands rather than with an empty UPDATE (which the
+      // driver refuses) or a 400 (which would break that client's save).
+      if (Object.keys(changes).length === 0) {
+        return existing;
       }
 
       const updated = await tx
@@ -449,44 +507,163 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
  * ocr_raw_text is added by the detail route only.
  */
 function receiptResponse(row: typeof receipts.$inferSelect) {
+  const suggestions = mergeSuggestions(
+    row.ocrSuggestions,
+    row.llmSuggestions?.suggestions ?? null,
+  );
   return {
     id: row.id,
     purchasedAt: row.purchasedAt,
     capturedAt: row.capturedAt,
     vendor: row.vendor,
-    vendorTaxNumber: row.vendorTaxNumber,
     subtotalCents: row.subtotalCents,
     hstCents: row.hstCents,
-    otherTaxCents: row.otherTaxCents,
     totalCents: row.totalCents,
     currency: row.currency,
     category: row.category,
     paymentMethod: row.paymentMethod,
-    isBusiness: row.isBusiness,
     notes: row.notes,
     status: row.status,
     // The two parse paths merged under §7.3's field-level rule, with
     // per-field provenance and the date-disagreement flag. Computed by the
     // domain layer on every read path: both clients render it, neither
     // decides it (spec §4.1).
-    suggestions: mergeSuggestions(
-      row.ocrSuggestions,
-      row.llmSuggestions?.suggestions ?? null,
-    ),
+    suggestions: suggestions === null ? null : servedSuggestions(suggestions),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
 }
 
-const DEFAULT_PAGE_SIZE = 50;
+/**
+ * ⚠ TRANSITIONAL (2026-08-26 field reduction). The merge no longer computes
+ * a tax-number suggestion - the domain type dropped it with the column - but
+ * the shipped iOS build 1.0 (1) decodes `suggestions.vendorTaxNumber` with a
+ * NON-optional key, so omitting it from the wire breaks list and detail
+ * decoding on the second user's installed build. The key is served as a stated absence,
+ * in the same `{value, source}` shape every merge-absent field has.
+ *
+ * Removal trigger: when no installed build decodes the key. Deleting this
+ * function and inlining the merge is the whole removal.
+ */
+function servedSuggestions(merged: MergedSuggestions) {
+  return { ...merged, vendorTaxNumber: { value: null, source: null } };
+}
 
-function encodeListCursor(row: {
-  purchasedAt: string;
-  createdAt: Date;
-  id: string;
-}): string {
-  const cursor = {
-    purchasedAt: row.purchasedAt,
+const DEFAULT_PAGE_SIZE = 50;
+const DEFAULT_SORT: ListSort = "purchasedAt";
+const DEFAULT_ORDER: ListOrder = "desc";
+
+type ListSort = z.infer<typeof listSortSchema>;
+type ListOrder = z.infer<typeof listOrderSchema>;
+type ListCursor = z.infer<typeof listCursorSchema>;
+
+/**
+ * What one sortable column needs: the column itself, how a row's value is
+ * written into a cursor, and how that string is cast back to the column's
+ * own type for comparison.
+ */
+interface ListSortSpec {
+  column: PgColumn;
+  encodeKey(row: typeof receipts.$inferSelect): string | null;
+  bindKey(value: string): SQL;
+}
+
+const LIST_SORTS = {
+  purchasedAt: {
+    column: receipts.purchasedAt,
+    encodeKey: (row) => row.purchasedAt,
+    bindKey: (value) => sql`${value}::date`,
+  },
+  capturedAt: {
+    column: receipts.capturedAt,
+    encodeKey: (row) => row.capturedAt.toISOString(),
+    bindKey: (value) => sql`${value}::timestamptz`,
+  },
+  total: {
+    column: receipts.totalCents,
+    encodeKey: (row) =>
+      row.totalCents === null ? null : String(row.totalCents),
+    bindKey: (value) => sql`${value}::integer`,
+  },
+  vendor: {
+    column: receipts.vendor,
+    encodeKey: (row) => row.vendor,
+    bindKey: (value) => sql`${value}::text`,
+  },
+} as const satisfies Record<ListSort, ListSortSpec>;
+
+/**
+ * Whether a sort key can be absent, and so whether the null-rank term and
+ * the keyset's null branch are needed at all. Read off the column rather
+ * than restated beside it: a restated flag is one schema change away from
+ * quietly putting absent values first again.
+ */
+function sortKeyCanBeNull(spec: ListSortSpec): boolean {
+  return !spec.column.notNull;
+}
+
+/**
+ * A total order for every sort, so a page boundary can never fall inside a
+ * group of rows the database is free to shuffle between queries.
+ *
+ * Rows with no sort key come LAST in both directions: an absent total is not
+ * a small one, and Postgres's own default (nulls first under DESC, last
+ * under ASC) would move them when the direction flipped. Ties break on
+ * (created_at, id) descending, which is the tiebreak keyset paging has
+ * always used.
+ *
+ * A NOT NULL column's null-rank term would be a constant, so it is left out
+ * - which is what keeps the default sort's plan, and its index, exactly what
+ * it was before sorting became a parameter.
+ */
+function listOrderBy(spec: ListSortSpec, order: ListOrder): SQL[] {
+  const byKey = order === "asc" ? asc(spec.column) : desc(spec.column);
+  const tiebreak = [desc(receipts.createdAt), desc(receipts.id)];
+  return sortKeyCanBeNull(spec)
+    ? [sql`(${spec.column} IS NULL) ASC`, byKey, ...tiebreak]
+    : [byKey, ...tiebreak];
+}
+
+/**
+ * The keyset predicate matching `listOrderBy`: rows strictly after the
+ * cursor row in that same order. Written out rather than as a row-wise
+ * tuple comparison because the terms do not share a direction - the null
+ * rank ascends while the tiebreak descends, whatever the key does.
+ */
+function afterCursorInSort(
+  spec: ListSortSpec,
+  order: ListOrder,
+  cursor: ListCursor,
+): SQL {
+  const afterTiebreak = sql`(${receipts.createdAt}, ${receipts.id}) < (${cursor.createdAt}::timestamptz, ${cursor.id}::uuid)`;
+  if (cursor.sortKey === null) {
+    // The cursor row had no key, so it is already in the trailing null
+    // group: every keyed row is behind us, and the remaining null-keyed
+    // rows are separated by the tiebreak alone.
+    return sql`(${spec.column} IS NULL AND ${afterTiebreak})`;
+  }
+  const key = spec.bindKey(cursor.sortKey);
+  const afterKey =
+    order === "asc" ? sql`${spec.column} > ${key}` : sql`${spec.column} < ${key}`;
+  // A null-keyed row sorts last in both directions, so it is after every
+  // cursor row that had a key.
+  const nullRowsFollow = sortKeyCanBeNull(spec)
+    ? sql`${spec.column} IS NULL OR `
+    : sql``;
+  return sql`(${nullRowsFollow}${afterKey} OR (${spec.column} = ${key} AND ${afterTiebreak}))`;
+}
+
+function encodeListCursor(
+  row: typeof receipts.$inferSelect,
+  sort: ListSort,
+  order: ListOrder,
+): string {
+  const sortKey = LIST_SORTS[sort].encodeKey(row);
+  const cursor: ListCursor = {
+    sort,
+    order,
+    sortKeyNull: sortKey === null,
+    sortKey,
     createdAt: row.createdAt.toISOString(),
     id: row.id,
   };
@@ -494,7 +671,7 @@ function encodeListCursor(row: {
 }
 
 /** A cursor is client input like any other: parsed strictly, 400 on junk. */
-function decodeListCursor(encoded: string) {
+function decodeListCursor(encoded: string): ListCursor {
   let parsed: unknown;
   try {
     parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
@@ -506,6 +683,40 @@ function decodeListCursor(encoded: string) {
     throw new ApiError(400, "invalid_request", "cursor is not valid");
   }
   return result.data;
+}
+
+/** How many past values /options offers per field. */
+const MAX_REUSABLE_OPTIONS = 100;
+
+/**
+ * One field's distinct non-null values for one user, most recently used
+ * first. Recency is `max(created_at)` over the receipts carrying the value:
+ * what someone used yesterday is what they are most likely to use again,
+ * and alphabetical order would bury it under a year of one-offs.
+ *
+ * Pending receipts count - a value typed at capture is still a value the
+ * person chose - and soft-deleted ones do not, via `visibleTo`.
+ */
+async function recentDistinctValues(
+  db: Db,
+  userId: string,
+  column: PgColumn,
+): Promise<string[]> {
+  const rows = await db
+    .select({ value: column })
+    .from(receipts)
+    .where(and(visibleTo(userId), isNotNull(column)))
+    .groupBy(column)
+    .orderBy(desc(sql`max(${receipts.createdAt})`))
+    .limit(MAX_REUSABLE_OPTIONS);
+  return rows.map((row) => {
+    if (typeof row.value !== "string") {
+      // Filtered to non-null above, and every column this runs over is
+      // text; anything else means the query broke.
+      throw new Error("Reusable-options query returned a non-string value");
+    }
+    return row.value;
+  });
 }
 
 /**

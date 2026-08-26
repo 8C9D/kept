@@ -1,7 +1,4 @@
-import {
-  OCR_SUGGESTION_FIELDS,
-  type OcrFieldSuggestions,
-} from "./ocrSuggestions.js";
+import type { OcrFieldSuggestions } from "./ocrSuggestions.js";
 
 /**
  * Per-field parse accuracy (spec §7.3: "decide this with data, not taste").
@@ -26,15 +23,29 @@ export type FieldVerdict =
   /** Parser found nothing and the human confirmed there was nothing. */
   | "correctlyAbsent";
 
-/** The confirmed receipt fields the parser suggests, as the row stores them. */
-export interface ConfirmedFields {
-  vendor: string | null;
-  purchasedAt: string | null;
-  totalCents: number | null;
-  hstCents: number | null;
-  subtotalCents: number | null;
-  vendorTaxNumber: string | null;
-}
+/**
+ * The suggestion fields this scores. Not every key of a stored suggestion
+ * record: `vendorTaxNumber` lives on in those records - they are immutable,
+ * and old clients still report one - but the 2026-08-26 field reduction took
+ * away the confirmed column it was scored against, and a measurement with no
+ * ground truth is not a measurement.
+ */
+export const SCORED_SUGGESTION_FIELDS = [
+  "vendor",
+  "purchasedAt",
+  "totalCents",
+  "hstCents",
+  "subtotalCents",
+] as const satisfies readonly (keyof OcrFieldSuggestions)[];
+
+export type ScoredField = (typeof SCORED_SUGGESTION_FIELDS)[number];
+
+/**
+ * The confirmed receipt fields the parser suggests, as the row stores them.
+ * Derived from the suggestion shape so the two cannot drift: a field with no
+ * confirmed counterpart cannot be scored.
+ */
+export type ConfirmedFields = Pick<OcrFieldSuggestions, ScoredField>;
 
 export interface MeasuredReceipt {
   id: string;
@@ -43,7 +54,7 @@ export interface MeasuredReceipt {
 }
 
 export interface FieldTally {
-  field: keyof OcrFieldSuggestions;
+  field: ScoredField;
   match: number;
   mismatch: number;
   missed: number;
@@ -52,7 +63,7 @@ export interface FieldTally {
 
 export interface Mismatch {
   receiptId: string;
-  field: keyof OcrFieldSuggestions;
+  field: ScoredField;
   verdict: Exclude<FieldVerdict, "match" | "correctlyAbsent">;
   suggested: string | number | null;
   confirmed: string | number | null;
@@ -82,7 +93,7 @@ export function accuracyPercent(tally: FieldTally): number | null {
 }
 
 export function classifyField(
-  field: keyof OcrFieldSuggestions,
+  field: ScoredField,
   suggested: string | number | null,
   confirmed: string | number | null,
 ): FieldVerdict {
@@ -99,8 +110,8 @@ export function classifyField(
 }
 
 export function measureAccuracy(receipts: MeasuredReceipt[]): AccuracyReport {
-  const tallies = new Map<keyof OcrFieldSuggestions, FieldTally>(
-    OCR_SUGGESTION_FIELDS.map((field) => [
+  const tallies = new Map<ScoredField, FieldTally>(
+    SCORED_SUGGESTION_FIELDS.map((field) => [
       field,
       { field, match: 0, mismatch: 0, missed: 0, correctlyAbsent: 0 },
     ]),
@@ -108,7 +119,7 @@ export function measureAccuracy(receipts: MeasuredReceipt[]): AccuracyReport {
   const mismatches: Mismatch[] = [];
 
   for (const receipt of receipts) {
-    for (const field of OCR_SUGGESTION_FIELDS) {
+    for (const field of SCORED_SUGGESTION_FIELDS) {
       const suggested = receipt.suggestions[field];
       const confirmed = receipt.confirmed[field];
       const verdict = classifyField(field, suggested, confirmed);
@@ -150,7 +161,7 @@ export interface TwoPathReceipt {
 
 export interface PathDisagreement {
   receiptId: string;
-  field: keyof OcrFieldSuggestions;
+  field: ScoredField;
   heuristicSuggested: string | number | null;
   llmSuggested: string | number | null;
   confirmed: string | number | null;
@@ -168,7 +179,7 @@ export interface PathDisagreement {
  * same normalization the accuracy tallies use.
  */
 export function suggestionValuesAgree(
-  field: keyof OcrFieldSuggestions,
+  field: ScoredField,
   a: string | number | null,
   b: string | number | null,
 ): boolean {
@@ -189,7 +200,7 @@ export function compareSuggestionPaths(
 ): PathDisagreement[] {
   const disagreements: PathDisagreement[] = [];
   for (const receipt of receipts) {
-    for (const field of OCR_SUGGESTION_FIELDS) {
+    for (const field of SCORED_SUGGESTION_FIELDS) {
       const heuristicSuggested = receipt.heuristic[field];
       const llmSuggested = receipt.llm[field];
       if (suggestionValuesAgree(field, heuristicSuggested, llmSuggested)) {
@@ -219,24 +230,17 @@ export function compareSuggestionPaths(
 }
 
 /**
- * Money and dates compare exactly. Text fields compare after normalizing
- * case and whitespace (and, for the tax number, its internal spaces):
- * "staples #123" versus "STAPLES #123" is the human adjusting styling,
- * not correcting the parser.
+ * Money and dates compare exactly. The vendor compares after normalizing
+ * case and whitespace: "staples #123" versus "STAPLES #123" is the human
+ * adjusting styling, not correcting the parser.
  */
 function valuesAgree(
-  field: keyof OcrFieldSuggestions,
+  field: ScoredField,
   suggested: string | number,
   confirmed: string | number,
 ): boolean {
   if (field === "vendor") {
     return normalizeText(String(suggested)) === normalizeText(String(confirmed));
-  }
-  if (field === "vendorTaxNumber") {
-    return (
-      normalizeText(String(suggested)).replaceAll(" ", "") ===
-      normalizeText(String(confirmed)).replaceAll(" ", "")
-    );
   }
   return suggested === confirmed;
 }

@@ -15,7 +15,7 @@ import {
 const VENDOR = "Dr Smith Psychiatry Clinic";
 const TAX_NUMBER = "123456789RT0001";
 const PRIVATE_NOTE = "PRIVATE: therapy session, do not disclose";
-const SQL = 'insert into "receipts" ("vendor", "vendor_tax_number", "notes") values ($1, $2, $3)';
+const SQL = 'insert into "receipts" ("vendor", "ocr_raw_text", "notes") values ($1, $2, $3)';
 
 /**
  * The real drizzle error class, wrapping a node-postgres-shaped cause -

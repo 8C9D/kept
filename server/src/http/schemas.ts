@@ -56,20 +56,42 @@ const receiptStatusSchema = z.enum(receiptStatus.enumValues);
  */
 const purchasedAt = isoDateSchema;
 const capturedAt = z.iso.datetime({ offset: true });
-const vendor = z.string().min(1).max(200).nullable();
-const vendorTaxNumber = z.string().min(1).max(50).nullable();
+const vendorText = z.string().min(1).max(200);
+const vendor = vendorText.nullable();
 const subtotalCents = centsSchema.nullable();
 const hstCents = centsSchema.nullable();
-const otherTaxCents = centsSchema.nullable();
 const totalCents = centsSchema;
 const currency = z.string().regex(/^[A-Z]{3}$/, {
   error: "must be a three-letter currency code like CAD",
 });
 const category = z.string().min(1).max(200).nullable();
 const paymentMethod = z.string().min(1).max(100).nullable();
-const isBusiness = z.boolean();
 const notes = z.string().max(5000).nullable();
 const ocrRawText = z.string().max(100_000).nullable();
+
+/**
+ * Still a stored field on `ocr_suggestions`, which is an immutable record of
+ * what a parser said and keeps whatever keys the client of the day sent -
+ * see `ocrSuggestionsSchema` below. No receipt column carries it any more.
+ */
+const vendorTaxNumber = z.string().min(1).max(50).nullable();
+
+/**
+ * ⚠ TRANSITIONAL (2026-08-26 field reduction). The shipped iOS build
+ * 1.0 (1) sends `vendorTaxNumber`, `otherTaxCents` and `isBusiness` on both
+ * create and PATCH - the PATCH with explicit nulls - and every schema here
+ * is strict, so refusing the keys would 400 every save the second user's installed build
+ * makes. They are accepted with their old value types and DISCARDED: no
+ * column exists for them and neither route's field map names them.
+ *
+ * Removal trigger: when no installed build sends them. Deleting these three
+ * lines from both schemas is the whole removal.
+ */
+const retiredReceiptFields = {
+  vendorTaxNumber: vendorTaxNumber.optional(),
+  otherTaxCents: centsSchema.nullable().optional(),
+  isBusiness: z.boolean().nullable().optional(),
+};
 
 export const appleSignInSchema = z.strictObject({
   identityToken: z.string().min(1),
@@ -87,6 +109,10 @@ export const uploadUrlSchema = z.strictObject({
  * accuracy measurement. Absent and null both mean "the parser found
  * nothing" - the client sends what it has. Deliberately not strict about
  * having every key so a client with fewer heuristics can still report.
+ *
+ * `vendorTaxNumber` outlived the receipt column it used to feed (2026-08-26):
+ * this is a verbatim record of what a parser said, old clients still extract
+ * one, and rewriting what they reported would corrupt the §7.3 measurement.
  */
 export const ocrSuggestionsSchema = z.strictObject({
   vendor: vendor.optional(),
@@ -101,31 +127,27 @@ export const ocrSuggestionsSchema = z.strictObject({
  * Creation. Omitting a nullable field means null; omitting `currency` or
  * `status` means the column default (CAD, pending).
  *
- * `totalCents` and `isBusiness` may be omitted only while the receipt is
- * `pending` (wave 4): a batch-scanned receipt stores what the parser found
- * and states what it did not, and `is_business` still carries no default
- * anywhere (spec §5.2) - a confirmed receipt cannot exist without an
- * explicit choice, which the superRefine below and the database's check
- * constraint both enforce.
+ * `totalCents` may be omitted only while the receipt is `pending` (wave 4):
+ * a batch-scanned receipt stores what the parser found and states what it
+ * did not. A confirmed receipt cannot exist without a total, which the
+ * superRefine below and the database's check constraint both enforce.
  */
 export const createReceiptSchema = z
   .strictObject({
     purchasedAt,
     capturedAt,
     vendor: vendor.optional(),
-    vendorTaxNumber: vendorTaxNumber.optional(),
     subtotalCents: subtotalCents.optional(),
     hstCents: hstCents.optional(),
-    otherTaxCents: otherTaxCents.optional(),
     totalCents: totalCents.nullable().optional(),
     currency: currency.optional(),
     category: category.optional(),
     paymentMethod: paymentMethod.optional(),
-    isBusiness: isBusiness.nullable().optional(),
     notes: notes.optional(),
     status: receiptStatusSchema.optional(),
     ocrRawText: ocrRawText.optional(),
     ocrSuggestions: ocrSuggestionsSchema.optional(),
+    ...retiredReceiptFields,
     // The image is uploaded to storage first (spec §6); creating the receipt
     // records where it landed and what it hashed to.
     image: z.strictObject({
@@ -146,55 +168,61 @@ export const createReceiptSchema = z
         message: "a confirmed receipt requires a total",
       });
     }
-    if (body.isBusiness === undefined || body.isBusiness === null) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["isBusiness"],
-        message: "a confirmed receipt requires a business-or-personal choice",
-      });
-    }
   });
 
 /**
  * Update. Every field is optional; an omitted field is left unchanged, an
- * explicit null clears a nullable field. `totalCents` and `isBusiness`
- * accept null only insofar as the receipt stays pending - the route
- * enforces that a receipt ending up confirmed has both, since the rule
- * depends on the row's current values, which a schema cannot see.
- * `ocrSuggestions` is deliberately absent: what the parser said is an
- * immutable record, or the accuracy measurement measures nothing.
+ * explicit null clears a nullable field. `totalCents` accepts null only
+ * insofar as the receipt stays pending - the route enforces that a receipt
+ * ending up confirmed has one, since the rule depends on the row's current
+ * values, which a schema cannot see. `ocrSuggestions` is deliberately
+ * absent: what the parser said is an immutable record, or the accuracy
+ * measurement measures nothing.
  */
 export const updateReceiptSchema = z
   .strictObject({
     purchasedAt: purchasedAt.optional(),
     capturedAt: capturedAt.optional(),
     vendor: vendor.optional(),
-    vendorTaxNumber: vendorTaxNumber.optional(),
     subtotalCents: subtotalCents.optional(),
     hstCents: hstCents.optional(),
-    otherTaxCents: otherTaxCents.optional(),
     totalCents: totalCents.nullable().optional(),
     currency: currency.optional(),
     category: category.optional(),
     paymentMethod: paymentMethod.optional(),
-    isBusiness: isBusiness.nullable().optional(),
     notes: notes.optional(),
     status: receiptStatusSchema.optional(),
     ocrRawText: ocrRawText.optional(),
+    ...retiredReceiptFields,
   })
   .refine((fields) => Object.keys(fields).length > 0, {
     error: "at least one field must be provided",
   });
 
+/**
+ * How a list page is ordered. `purchasedAt` is the receipt date and the
+ * default: a list of receipts is a list of purchases, not of scans.
+ */
+export const listSortSchema = z.enum([
+  "purchasedAt",
+  "capturedAt",
+  "total",
+  "vendor",
+]);
+export const listOrderSchema = z.enum(["asc", "desc"]);
+
 export const listReceiptsQuerySchema = z.strictObject({
   from: isoDateSchema.optional(),
   to: isoDateSchema.optional(),
-  isBusiness: z
-    .enum(["true", "false"])
-    .transform((value) => value === "true")
-    .optional(),
   status: receiptStatusSchema.optional(),
+  // Exact-match over the stored free text, case-sensitive and unnormalized:
+  // these pair with GET /api/receipts/options, which serves the user's own
+  // values verbatim, so anything else would refuse to match what it offered.
+  category: z.string().min(1).max(200).optional(),
+  paymentMethod: z.string().min(1).max(100).optional(),
   q: z.string().min(1).max(200).optional(),
+  sort: listSortSchema.optional(),
+  order: listOrderSchema.optional(),
   // Backlog imports make lists large on day one; pages are mandatory, with
   // an opaque keyset cursor from the previous page's response.
   limit: z.coerce.number().int().min(1).max(200).optional(),
@@ -202,15 +230,78 @@ export const listReceiptsQuerySchema = z.strictObject({
 });
 
 /**
- * The decoded shape of a list cursor: the sort key of the last row of the
- * previous page. Opaque to clients; validated on the way back in because a
- * cursor is still client input.
+ * The decoded shape of a list cursor: everything needed to resume the same
+ * total order after the last row of the previous page. Opaque to clients;
+ * validated on the way back in because a cursor is still client input.
+ *
+ * It carries the sort it was minted under so a cursor cannot be replayed
+ * against a different ordering - the keyset comparison would silently
+ * return the wrong slice, which is worse than refusing.
+ *
+ * `sortKey` is the value of the sorted column on that last row, rendered as
+ * the string Postgres compares it as (a date, an ISO timestamp, an integer's
+ * digits, a vendor name); `sortKeyNull` records that the row had none, since
+ * null-keyed rows sort last and are compared by the tiebreak alone.
  */
-export const listCursorSchema = z.strictObject({
+/**
+ * What a cursor's `sortKey` must look like for each sort, because the route
+ * casts it back to the sorted column's own type inside the query
+ * (`::date`, `::timestamptz`, `::integer`). Postgres is where an uncastable
+ * string would otherwise be caught, and it catches it as a failed SELECT
+ * mid-request - a 500 for what is client input. The bounds are the
+ * columns' own, reused rather than restated.
+ */
+const cursorSortKeyFormats = {
   purchasedAt: isoDateSchema,
-  createdAt: z.iso.datetime({ offset: true }),
-  id: z.uuid(),
-});
+  capturedAt: z.iso.datetime({ offset: true }),
+  // Digits first so `Number()` cannot quietly accept "1e9", " 12" or "0x10",
+  // then the same storable-cents range every money field is held to.
+  total: z
+    .string()
+    .regex(/^-?\d+$/, { error: "must be an integer number of cents" })
+    .transform(Number)
+    .pipe(centsSchema),
+  vendor: vendorText,
+} as const satisfies Record<z.infer<typeof listSortSchema>, z.ZodType>;
+
+export const listCursorSchema = z
+  .strictObject({
+    sort: listSortSchema,
+    order: listOrderSchema,
+    sortKeyNull: z.boolean(),
+    sortKey: z.string().nullable(),
+    createdAt: z.iso.datetime({ offset: true }),
+    id: z.uuid(),
+  })
+  .superRefine((cursor, ctx) => {
+    // The null rank is stated as well as implied by the key, so the encoded
+    // cursor describes its own place in the ordering. A hand-crafted one
+    // that answered "did that row have a value?" twice, differently, would
+    // reach the keyset comparison as a contradiction.
+    if (cursor.sortKeyNull !== (cursor.sortKey === null)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["sortKeyNull"],
+        message: "must agree with sortKey",
+      });
+      return;
+    }
+    if (cursor.sortKey === null) {
+      return;
+    }
+    // A cursor is client input like any other, and "opaque" is a promise to
+    // the client, not an exemption from validation: the key is parsed to
+    // the shape its own sort will cast it to, here, where the answer is a
+    // 400 rather than a failed statement.
+    const format = cursorSortKeyFormats[cursor.sort].safeParse(cursor.sortKey);
+    if (!format.success) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["sortKey"],
+        message: `is not a valid ${cursor.sort} sort key`,
+      });
+    }
+  });
 
 /**
  * Two ways to name an export period (spec §8, §12): a fiscal year - the

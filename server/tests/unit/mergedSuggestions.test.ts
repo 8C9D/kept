@@ -38,17 +38,20 @@ describe("mergeSuggestions", () => {
     expect(mergeSuggestions(null, null)).toBeNull();
   });
 
-  it("takes amounts from the heuristic and vendor/tax number from the LLM when both are present", () => {
+  it("takes amounts from the heuristic and the vendor from the LLM when both are present", () => {
     const merged = mergeSuggestions(ocr(), llm());
     expect(merged).not.toBeNull();
     expect(merged?.totalCents).toEqual({ value: 4554, source: "heuristic" });
     expect(merged?.hstCents).toEqual({ value: 205, source: "heuristic" });
     expect(merged?.subtotalCents).toEqual({ value: 4349, source: "heuristic" });
     expect(merged?.vendor).toEqual({ value: "Llm Vendor (BCE)", source: "llm" });
-    expect(merged?.vendorTaxNumber).toEqual({
-      value: "R105216170",
-      source: "llm",
-    });
+  });
+
+  it("merges no tax number at all - the field it fed is gone (2026-08-26)", () => {
+    // Both records still CARRY one: they are immutable, and the shipped
+    // client still extracts it. The merge is what stopped reading it.
+    const merged = mergeSuggestions(ocr(), llm());
+    expect(merged).not.toHaveProperty("vendorTaxNumber");
   });
 
   it("serves heuristic-only suggestions when there is no LLM record - the offline degradation", () => {
@@ -65,7 +68,7 @@ describe("mergeSuggestions", () => {
     });
   });
 
-  it("serves LLM-only vendor, date and tax number - but no money - when the client sent no heuristic record", () => {
+  it("serves LLM-only vendor and date - but no money - when the client sent no heuristic record", () => {
     const merged = mergeSuggestions(null, llm());
     expect(merged?.vendor).toEqual({ value: "Llm Vendor (BCE)", source: "llm" });
     expect(merged?.purchasedAt).toEqual({
@@ -80,19 +83,12 @@ describe("mergeSuggestions", () => {
     expect(merged?.subtotalCents).toEqual({ value: null, source: null });
   });
 
-  it("falls back to the other parser for vendor and tax number when the ruled source found nothing", () => {
-    const merged = mergeSuggestions(
-      ocr({ vendorTaxNumber: "105216170RT0001" }),
-      llm({ vendor: null, vendorTaxNumber: null }),
-    );
+  it("falls back to the other parser for the vendor when the ruled source found nothing", () => {
+    const merged = mergeSuggestions(ocr(), llm({ vendor: null }));
     // Ruled source (LLM) empty, heuristic has a value: the value is served
     // and its provenance says so.
     expect(merged?.vendor).toEqual({
       value: "HEURISTIC VENDOR",
-      source: "heuristic",
-    });
-    expect(merged?.vendorTaxNumber).toEqual({
-      value: "105216170RT0001",
       source: "heuristic",
     });
   });
@@ -151,7 +147,6 @@ describe("mergeSuggestions", () => {
       totalCents: { value: null, source: null },
       hstCents: { value: null, source: null },
       subtotalCents: { value: null, source: null },
-      vendorTaxNumber: { value: null, source: null },
     });
   });
 

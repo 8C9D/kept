@@ -36,6 +36,13 @@
       "when": 1786154628154,
       "tag": "0004_llm-suggestions",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787753485255,
+      "tag": "0005_field-reduction",
+      "breakpoints": true
     }
   ]
 }

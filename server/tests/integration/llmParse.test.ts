@@ -106,7 +106,6 @@ describe("runLlmParseSweep", () => {
       ocrRawText: "confirmed text",
       status: "confirmed",
       totalCents: 4554,
-      isBusiness: true,
     });
     const withoutText = await insertReceipt({});
     const deleted = await insertReceipt({
@@ -270,10 +269,6 @@ describe("runLlmParseSweep", () => {
       value: "SCANNED VENDOR",
       source: "heuristic",
     });
-    expect(body.suggestions.vendorTaxNumber).toEqual({
-      value: null,
-      source: null,
-    });
   });
 
   it("does not cap attempts when no failure counter is supplied - the backfill's single pass", async () => {
@@ -391,8 +386,7 @@ describe("the capture routes kick the sweep", () => {
       ocrSuggestions: Record<string, unknown>;
     };
     // The §7.3 merge, rendered by the domain layer: amounts from the
-    // heuristic only, vendor and tax number LLM, the disagreeing date
-    // flagged.
+    // heuristic only, vendor from the LLM, the disagreeing date flagged.
     expect(detailBody.suggestions.vendor).toEqual({
       value: "Fancy Vendor (BCE)",
       source: "llm",
@@ -411,9 +405,14 @@ describe("the capture routes kick the sweep", () => {
       value: null,
       source: null,
     });
+    // ⚠ TRANSITIONAL: the merge computes no tax number any more, but the
+    // response still carries the key as a stated absence, because the
+    // shipped iOS 1.0 (1) build decodes it with a non-optional key and
+    // would fail to decode the whole receipt without it. Removed when no
+    // installed build decodes it.
     expect(detailBody.suggestions.vendorTaxNumber).toEqual({
-      value: "R105216170",
-      source: "llm",
+      value: null,
+      source: null,
     });
     expect(detailBody.suggestions.purchasedAt).toEqual({
       value: "2011-07-26",
@@ -434,6 +433,12 @@ describe("the capture routes kick the sweep", () => {
     expect(listed?.suggestions.vendor).toEqual({
       value: "Fancy Vendor (BCE)",
       source: "llm",
+    });
+    // The shim rides the list response too - it is the response the shipped
+    // client decodes on every launch.
+    expect(listed?.suggestions.vendorTaxNumber).toEqual({
+      value: null,
+      source: null,
     });
   });
 });

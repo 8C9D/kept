@@ -82,7 +82,6 @@ export const RECEIPT_PARSE_JSON_SCHEMA = {
     totalCents: { type: ["integer", "null"] },
     hstCents: { type: ["integer", "null"] },
     subtotalCents: { type: ["integer", "null"] },
-    vendorTaxNumber: { type: ["string", "null"] },
   },
   required: [
     "vendor",
@@ -90,7 +89,6 @@ export const RECEIPT_PARSE_JSON_SCHEMA = {
     "totalCents",
     "hstCents",
     "subtotalCents",
-    "vendorTaxNumber",
   ],
   additionalProperties: false,
 } as const;
@@ -107,8 +105,11 @@ export const RECEIPT_PARSE_JSON_SCHEMA = {
  * system prompt: a first draft that put it in the system prompt coincided
  * with a date regression, consistent with a verbatim instruction reaching a
  * field that must interpret rather than transcribe.
+ * Version 3 stopped asking for the supplier's tax number at all
+ * (2026-08-26): the field is gone from the receipt, so the request asks for
+ * one fewer thing and its answers are not comparable with version 2's.
  */
-export const RECEIPT_PARSE_PROMPT_VERSION = 2;
+export const RECEIPT_PARSE_PROMPT_VERSION = 3;
 
 /**
  * Domain rules for the extraction, stated as facts about Canadian receipts
@@ -116,10 +117,9 @@ export const RECEIPT_PARSE_PROMPT_VERSION = 2;
  * is the whole point (the on-device heuristics already do rule-following).
  *
  * The rules encode the wave-5 and Food Basics lessons: HST/GST are one CRA
- * program; multiple date representations must be cross-checked; tax numbers
- * may carry a letter prefix. Vendor guidance lives in the schema's vendor
- * field description, scoped to that field alone - see the prompt-version
- * comment above for why.
+ * program, and multiple date representations must be cross-checked. Vendor
+ * guidance lives in the schema's vendor field description, scoped to that
+ * field alone - see the prompt-version comment above for why.
  */
 export const RECEIPT_PARSE_SYSTEM_PROMPT = `You extract fields from the OCR text of a Canadian retail receipt.
 
@@ -129,7 +129,6 @@ Rules:
 - totalCents is the final amount paid, hstCents is the HST or GST amount, subtotalCents is the pre-tax subtotal.
 - HST and GST are the same federal program. If both are printed, the non-zero amount charged is the tax; an explicit $0.00 beside a charged sibling line is not.
 - purchasedAt is the purchase date as yyyy-mm-dd. Receipts often print a date more than once in different formats; cross-check them against each other (a printed time can disambiguate), and prefer an unambiguous representation over an ambiguous one. A purchase date is in the recent past, never in the future.
-- vendorTaxNumber is the supplier's GST/HST registration number, exactly as printed including any letter prefix or suffix (for example R105216170 or 123456789RT0001). Card numbers, phone numbers, and transaction references are not tax numbers.
 - The text comes from OCR of a photograph: words may be split mid-word, columns may be misaligned, and characters may be misread. Read through such noise, but do not invent what is not there.`;
 
 const parsedCents = z
@@ -170,9 +169,16 @@ export const llmParseResponseSchema = z.strictObject({
   totalCents: parsedCents,
   hstCents: parsedCents,
   subtotalCents: parsedCents,
-  vendorTaxNumber: z.string().min(1).max(50).nullable(),
 });
 
 export function validateLlmParseResponse(value: unknown): OcrFieldSuggestions {
-  return llmParseResponseSchema.parse(value);
+  return {
+    ...llmParseResponseSchema.parse(value),
+    // The stored record carries every suggestion field, so a later reader
+    // never has to tell "key absent" from "parser found nothing". Since
+    // version 3 of the prompt this path is not asked for a tax number, so
+    // null is the literal truth about what it produced - not a default
+    // standing in for an answer.
+    vendorTaxNumber: null,
+  };
 }

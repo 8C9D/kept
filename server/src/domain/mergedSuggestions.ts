@@ -14,17 +14,23 @@ import type { OcrFieldSuggestions } from "./ocrSuggestions.js";
  *   that passes unflagged reaches an accountant. This governs what is
  *   served, not what is recorded - the LLM's amounts stay in
  *   llm_suggestions for parse-accuracy to score.
- * - Vendor and tax number come from the LLM.
+ * - Vendor comes from the LLM.
  * - Date trusts neither source alone: when the two disagree, the value is
  *   flagged and the confirm screen keeps the field amber and marked as
  *   needing attention.
  *
- * For vendor, tax number and date, when the ruled source has nothing and
- * the other does, the other side's value is served with its provenance
- * stated: a suggestion the human can reject beats an empty field, and
- * constraint 2 (nothing saves unconfirmed) is what makes that safe.
- * Provenance is per field, never implied, so a client can render "where
- * this came from" without re-deriving the rule.
+ * For vendor and date, when the ruled source has nothing and the other
+ * does, the other side's value is served with its provenance stated: a
+ * suggestion the human can reject beats an empty field, and constraint 2
+ * (nothing saves unconfirmed) is what makes that safe. Provenance is per
+ * field, never implied, so a client can render "where this came from"
+ * without re-deriving the rule.
+ *
+ * The tax-number merge was deleted with the column it fed (2026-08-26).
+ * Stored suggestion records still carry whatever the parsers said - they are
+ * immutable - and nothing reads it any more. The response layer still serves
+ * the key as a stated absence for the shipped iOS build; that shim lives at
+ * the HTTP boundary (routes/receipts.ts), not here.
  */
 
 export type SuggestionSource = "heuristic" | "llm" | "both";
@@ -50,7 +56,6 @@ export interface MergedSuggestions {
   totalCents: MergedSuggestion<number>;
   hstCents: MergedSuggestion<number>;
   subtotalCents: MergedSuggestion<number>;
-  vendorTaxNumber: MergedSuggestion<string>;
 }
 
 /**
@@ -71,12 +76,6 @@ export function mergeSuggestions(
     totalCents: heuristicOnly(ocr?.totalCents ?? null),
     hstCents: heuristicOnly(ocr?.hstCents ?? null),
     subtotalCents: heuristicOnly(ocr?.subtotalCents ?? null),
-    vendorTaxNumber: prefer(
-      "llm",
-      llm?.vendorTaxNumber ?? null,
-      "heuristic",
-      ocr?.vendorTaxNumber ?? null,
-    ),
   };
 }
 

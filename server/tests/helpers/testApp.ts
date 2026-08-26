@@ -163,7 +163,6 @@ export function receiptBody(overrides: Record<string, unknown> = {}) {
     totalCents: 11300,
     subtotalCents: 10000,
     hstCents: 1300,
-    isBusiness: true,
     image: {
       objectKey: "OVERRIDE-ME/2026/03/image.jpg",
       sha256: "a".repeat(64),

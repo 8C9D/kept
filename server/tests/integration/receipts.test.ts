@@ -61,7 +61,6 @@ describe("POST /api/receipts", () => {
       bodyWithImage({
         subtotalCents: 999999999,
         hstCents: 1,
-        otherTaxCents: 0,
         totalCents: 1000000000,
       }),
     );
@@ -76,7 +75,6 @@ describe("POST /api/receipts", () => {
     const body = (await fetched.json()) as Record<string, unknown>;
     expect(body.subtotalCents).toBe(999999999);
     expect(body.hstCents).toBe(1);
-    expect(body.otherTaxCents).toBe(0);
     expect(body.totalCents).toBe(1000000000);
 
     // ...and in the database itself, still integers.
@@ -114,14 +112,13 @@ describe("POST /api/receipts", () => {
   // Every money column is a Postgres integer, so an amount above int4 is
   // unstorable. Before this bound it passed validation and failed inside
   // the insert instead: a 500, and an unhandled-error log carrying every
-  // bound parameter of the statement - vendor, tax number, notes, OCR text.
+  // bound parameter of the statement - vendor, notes, OCR text.
   // Each money field is checked, because one shared schema definition is
   // exactly the thing that can be edited to cover only some of them.
   it.each([
     ["totalCents", 2_147_483_648],
     ["subtotalCents", 2_147_483_648],
     ["hstCents", 2_147_483_648],
-    ["otherTaxCents", 2_147_483_648],
     ["totalCents", -2_147_483_649],
   ])("rejects %s of %d as unstorable, with a 400 not a 500", async (field, value) => {
     const response = await harness.request(token, "POST", "/api/receipts",
@@ -151,15 +148,9 @@ describe("POST /api/receipts", () => {
   });
 
   // Wave 4: a batch-scanned receipt is created pending with whatever the
-  // parser found, so total and the business choice may be absent - but only
-  // while pending. Confirmed always requires both (schema + DB constraint).
-
-  it("rejects a confirmed receipt with no explicit isBusiness choice", async () => {
-    const body = bodyWithImage({ status: "confirmed" });
-    delete (body as Record<string, unknown>).isBusiness;
-    const response = await harness.request(token, "POST", "/api/receipts", body);
-    expect(response.status).toBe(400);
-  });
+  // parser found, so its total may be absent - but only while pending. A
+  // confirmed receipt always has one (schema + DB constraint). Since the
+  // 2026-08-26 field reduction the total is the whole of "complete".
 
   it("rejects a confirmed receipt with no total", async () => {
     const body = bodyWithImage({ status: "confirmed" });
@@ -168,16 +159,27 @@ describe("POST /api/receipts", () => {
     expect(response.status).toBe(400);
   });
 
-  it("accepts a pending receipt with no total and no business choice", async () => {
+  it("accepts a confirmed receipt carrying nothing but a total - no business choice exists to make", async () => {
+    const response = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ status: "confirmed" }),
+    );
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as Record<string, unknown>;
+    expect(created.status).toBe("confirmed");
+    // The three retired fields are gone from the wire, not nulled.
+    expect(created).not.toHaveProperty("isBusiness");
+    expect(created).not.toHaveProperty("vendorTaxNumber");
+    expect(created).not.toHaveProperty("otherTaxCents");
+  });
+
+  it("accepts a pending receipt with no total", async () => {
     const body = bodyWithImage();
     delete (body as Record<string, unknown>).totalCents;
-    delete (body as Record<string, unknown>).isBusiness;
     const response = await harness.request(token, "POST", "/api/receipts", body);
     expect(response.status).toBe(201);
     const created = (await response.json()) as Record<string, unknown>;
     expect(created.status).toBe("pending");
     expect(created.totalCents).toBeNull();
-    expect(created.isBusiness).toBeNull();
   });
 
   it("stores the parser's suggestions verbatim, absent keys as null", async () => {
@@ -223,7 +225,6 @@ describe("POST /api/receipts", () => {
         purchasedAt: "2026-03-15",
         capturedAt: new Date(),
         totalCents: null,
-        isBusiness: true,
         status: "confirmed",
       })
       .then(
@@ -291,9 +292,9 @@ describe("POST /api/receipts", () => {
 describe("GET /api/receipts filters", () => {
   beforeEach(async () => {
     const fixtures = [
-      { purchasedAt: "2026-01-10", vendor: "Staples", isBusiness: true, sha: "01" },
-      { purchasedAt: "2026-02-10", vendor: "Loblaws", isBusiness: false, sha: "02" },
-      { purchasedAt: "2026-03-10", vendor: "Shell", isBusiness: true, notes: "client trip", sha: "03" },
+      { purchasedAt: "2026-01-10", vendor: "Staples", category: "office supplies", paymentMethod: "visa", sha: "01" },
+      { purchasedAt: "2026-02-10", vendor: "Loblaws", category: "groceries", paymentMethod: "debit", sha: "02" },
+      { purchasedAt: "2026-03-10", vendor: "Shell", category: "fuel", paymentMethod: "visa", notes: "client trip", sha: "03" },
     ];
     for (const fixture of fixtures) {
       const { sha, ...fields } = fixture;
@@ -317,14 +318,42 @@ describe("GET /api/receipts filters", () => {
     ]);
   });
 
-  it("filters by business vs personal", async () => {
+  it("filters by category, matching the stored free text exactly", async () => {
     const response = await harness.request(
       token,
       "GET",
-      "/api/receipts?isBusiness=false",
+      `/api/receipts?category=${encodeURIComponent("office supplies")}`,
     );
     const body = (await response.json()) as { receipts: { vendor: string }[] };
-    expect(body.receipts.map((r) => r.vendor)).toEqual(["Loblaws"]);
+    expect(body.receipts.map((r) => r.vendor)).toEqual(["Staples"]);
+  });
+
+  it("filters by payment method", async () => {
+    const response = await harness.request(token, "GET", "/api/receipts?paymentMethod=visa");
+    const body = (await response.json()) as { receipts: { vendor: string }[] };
+    expect(body.receipts.map((r) => r.vendor)).toEqual(["Shell", "Staples"]);
+  });
+
+  it("does not case-fold the category filter: the value is the user's own text", async () => {
+    // The 2026-08-26 ruling. /options offers these strings back verbatim,
+    // so a filter that normalized would answer differently from what it
+    // offered - and "Office Supplies" is a value the person did not use.
+    const response = await harness.request(
+      token,
+      "GET",
+      `/api/receipts?category=${encodeURIComponent("Office Supplies")}`,
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { receipts: unknown[] };
+    expect(body.receipts).toHaveLength(0);
+  });
+
+  it("rejects the retired isBusiness filter rather than ignoring it", async () => {
+    // Deliberate (2026-08-26): silently accepting a filter and returning
+    // rows it asked to exclude is worse than refusing. The deployed web
+    // bundle sends this until Pages is redeployed.
+    const response = await harness.request(token, "GET", "/api/receipts?isBusiness=false");
+    expect(response.status).toBe(400);
   });
 
   it("searches vendor, category, and notes together", async () => {
@@ -498,22 +527,20 @@ describe("PATCH /api/receipts/:id", () => {
   // Wave 4: the confirm screen's save is a PATCH to status=confirmed, and
   // confirming an incomplete receipt must fail with the missing field named.
 
-  it("confirms a bare pending receipt once total and the choice arrive", async () => {
+  it("confirms a bare pending receipt once the total arrives - nothing else is required", async () => {
     const body = bodyWithImage();
     delete (body as Record<string, unknown>).totalCents;
-    delete (body as Record<string, unknown>).isBusiness;
     const created = await harness.request(token, "POST", "/api/receipts", body);
     const receipt = (await created.json()) as { id: string };
 
     const response = await harness.request(token, "PATCH",
       `/api/receipts/${receipt.id}`,
-      { status: "confirmed", totalCents: 4520, isBusiness: false },
+      { status: "confirmed", totalCents: 4520 },
     );
     expect(response.status).toBe(200);
     const updated = (await response.json()) as Record<string, unknown>;
     expect(updated.status).toBe("confirmed");
     expect(updated.totalCents).toBe(4520);
-    expect(updated.isBusiness).toBe(false);
   });
 
   it("refuses to confirm a receipt that would end up with no total", async () => {
@@ -533,21 +560,23 @@ describe("PATCH /api/receipts/:id", () => {
     expect(failure.error.message).toMatch(/total/);
   });
 
-  it("refuses to confirm a receipt with no business-or-personal choice", async () => {
-    const body = bodyWithImage();
-    delete (body as Record<string, unknown>).isBusiness;
-    const created = await harness.request(token, "POST", "/api/receipts", body);
+  it("edits a receipt that is already confirmed, deliberately", async () => {
+    // Confirming is not a lock: a human who mistyped a total fixes it here,
+    // and the row stays confirmed. Stated rather than incidental (spec §7).
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ status: "confirmed" }),
+    );
     const receipt = (await created.json()) as { id: string };
 
     const response = await harness.request(token, "PATCH",
       `/api/receipts/${receipt.id}`,
-      { status: "confirmed" },
+      { totalCents: 4520, vendor: "Corrected Vendor" },
     );
-    expect(response.status).toBe(400);
-    const failure = (await response.json()) as {
-      error: { message: string };
-    };
-    expect(failure.error.message).toMatch(/business-or-personal/);
+    expect(response.status).toBe(200);
+    const updated = (await response.json()) as Record<string, unknown>;
+    expect(updated.status).toBe("confirmed");
+    expect(updated.totalCents).toBe(4520);
+    expect(updated.vendor).toBe("Corrected Vendor");
   });
 
   it("refuses to null the total out of a confirmed receipt", async () => {
@@ -575,5 +604,176 @@ describe("PATCH /api/receipts/:id", () => {
       { ocrSuggestions: { totalCents: 1 } },
     );
     expect(response.status).toBe(400);
+  });
+});
+
+/**
+ * ⚠ TRANSITIONAL (2026-08-26 field reduction). Build 1.0 (1) is installed on
+ * the second user's phone and cannot be updated from here: it sends three fields this
+ * server no longer has columns for, and it decodes one suggestion key this
+ * server no longer computes. Both shims exist so her installed app keeps
+ * working, and both are pinned here so removing either is a deliberate act
+ * with a failing test attached.
+ *
+ * Removal trigger for all of it: no installed build sends or decodes them.
+ */
+describe("the shipped iOS 1.0 (1) compatibility shims", () => {
+  const legacyFields = {
+    vendorTaxNumber: "123456789RT0001",
+    otherTaxCents: 250,
+    isBusiness: true,
+  };
+
+  it("accepts a create carrying the retired fields and stores none of them", async () => {
+    const response = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ ...legacyFields, status: "confirmed" }),
+    );
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as Record<string, unknown>;
+    expect(created).not.toHaveProperty("vendorTaxNumber");
+    expect(created).not.toHaveProperty("otherTaxCents");
+    expect(created).not.toHaveProperty("isBusiness");
+
+    // Not merely absent from the response: absent from the row. Read back
+    // through the driver, which returns every column the table has.
+    const rows = await harness.db
+      .select()
+      .from(receipts)
+      .where(eq(receipts.id, created.id as string));
+    const stored = rows[0] as unknown as Record<string, unknown>;
+    expect(stored).not.toHaveProperty("vendor_tax_number");
+    expect(stored).not.toHaveProperty("vendorTaxNumber");
+    expect(stored).not.toHaveProperty("otherTaxCents");
+    expect(stored).not.toHaveProperty("isBusiness");
+  });
+
+  it("accepts a PATCH carrying the retired fields, including the explicit nulls that client sends", async () => {
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ sha: "c1".repeat(32) }),
+    );
+    const receipt = (await created.json()) as { id: string };
+
+    const response = await harness.request(token, "PATCH",
+      `/api/receipts/${receipt.id}`,
+      {
+        status: "confirmed",
+        totalCents: 4520,
+        vendorTaxNumber: null,
+        otherTaxCents: null,
+        isBusiness: null,
+      },
+    );
+    expect(response.status).toBe(200);
+    const updated = (await response.json()) as Record<string, unknown>;
+    // The real fields still applied; the retired ones changed nothing.
+    expect(updated.status).toBe("confirmed");
+    expect(updated.totalCents).toBe(4520);
+    expect(updated).not.toHaveProperty("isBusiness");
+  });
+
+  it("answers a PATCH of nothing but retired fields with the row as it stands", async () => {
+    // The degenerate shape: an old client saving only the business choice.
+    // An empty UPDATE is a driver error and a 400 would break that save, so
+    // the honest answer is the unchanged receipt.
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ sha: "c2".repeat(32), vendor: "Unchanged Vendor" }),
+    );
+    const receipt = (await created.json()) as { id: string; updatedAt: string };
+
+    const response = await harness.request(token, "PATCH",
+      `/api/receipts/${receipt.id}`,
+      { isBusiness: false },
+    );
+    expect(response.status).toBe(200);
+    const updated = (await response.json()) as Record<string, unknown>;
+    expect(updated.vendor).toBe("Unchanged Vendor");
+    // Nothing changed, so nothing moved updated_at either.
+    expect(updated.updatedAt).toBe(receipt.updatedAt);
+  });
+
+  it("still refuses a key that is genuinely unknown", async () => {
+    // The tolerance is three named fields, not a hole in the strict schema.
+    // A user id is the key this refusal exists for (spec §6).
+    const create = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ sha: "c3".repeat(32), userId: "smuggled" }),
+    );
+    expect(create.status).toBe(400);
+
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ sha: "c4".repeat(32) }),
+    );
+    const receipt = (await created.json()) as { id: string };
+    const patch = await harness.request(token, "PATCH",
+      `/api/receipts/${receipt.id}`,
+      { userId: "smuggled" },
+    );
+    expect(patch.status).toBe(400);
+  });
+
+  it("still type-checks the retired fields rather than waving anything through", async () => {
+    const response = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ sha: "c5".repeat(32), otherTaxCents: 12.5 }),
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("serves suggestions.vendorTaxNumber as a stated absence on every read path", async () => {
+    // The shipped client decodes this key with a NON-optional struct field:
+    // omitting it fails the decode of the whole receipt, so the list and
+    // the detail screen would both come up empty on her phone.
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({
+        sha: "c6".repeat(32),
+        ocrSuggestions: {
+          vendor: "SCANNED VENDOR",
+          totalCents: 11300,
+          // The old client still extracts one, and the immutable record
+          // still stores what it said...
+          vendorTaxNumber: "123456789RT0001",
+        },
+      }),
+    );
+    expect(created.status).toBe(201);
+    const receipt = (await created.json()) as {
+      id: string;
+      suggestions: Record<string, unknown>;
+    };
+    // ...but the merge no longer reads it, so what is served is the shim.
+    expect(receipt.suggestions.vendorTaxNumber).toEqual({
+      value: null,
+      source: null,
+    });
+
+    const detail = await harness.request(token, "GET", `/api/receipts/${receipt.id}`);
+    const detailBody = (await detail.json()) as {
+      suggestions: Record<string, unknown>;
+      ocrSuggestions: Record<string, unknown>;
+    };
+    expect(detailBody.suggestions.vendorTaxNumber).toEqual({
+      value: null,
+      source: null,
+    });
+    // The verbatim parser record is untouched: it is what §7.3 measures.
+    expect(detailBody.ocrSuggestions.vendorTaxNumber).toBe("123456789RT0001");
+
+    const list = await harness.request(token, "GET", "/api/receipts");
+    const listBody = (await list.json()) as {
+      receipts: { id: string; suggestions: Record<string, unknown> }[];
+    };
+    const listed = listBody.receipts.find((r) => r.id === receipt.id);
+    expect(listed?.suggestions.vendorTaxNumber).toEqual({
+      value: null,
+      source: null,
+    });
+  });
+
+  it("serves no suggestions at all for a receipt neither parser ever saw", async () => {
+    // The shim must not manufacture a suggestion set: null in, null out is
+    // a different fact from "both parsers ran and found nothing".
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ sha: "c7".repeat(32) }),
+    );
+    const receipt = (await created.json()) as { suggestions: unknown };
+    expect(receipt.suggestions).toBeNull();
   });
 });

@@ -1,6 +1,5 @@
 import { sql } from "drizzle-orm";
 import {
-  boolean,
   char,
   check,
   date,
@@ -56,10 +55,8 @@ export const receipts = pgTable(
     // Nullable: an illegible vendor is a real outcome, and a forced
     // placeholder corrupts the field (spec §5).
     vendor: text("vendor"),
-    vendorTaxNumber: text("vendor_tax_number"),
     subtotalCents: integer("subtotal_cents"),
     hstCents: integer("hst_cents"),
-    otherTaxCents: integer("other_tax_cents"),
     // Nullable while pending (wave 4): a batch-scanned receipt whose total
     // the parser could not read is stored with the absence stated, never a
     // fabricated amount. The check constraint below guarantees a confirmed
@@ -68,11 +65,6 @@ export const receipts = pgTable(
     currency: char("currency", { length: 3 }).notNull().default("CAD"),
     category: text("category"),
     paymentMethod: text("payment_method"),
-    // No default at any layer: confirming requires an explicit choice.
-    // Nullable while pending (wave 4) for the same reason as total_cents -
-    // null is a stated "not chosen yet", which is exactly what a scanned
-    // but unconfirmed backlog receipt is (spec §5.2a).
-    isBusiness: boolean("is_business"),
     notes: text("notes"),
     // Soft delete: non-null rows are excluded from every list, count, and
     // export. CRA retention makes hard deletes off the table (spec §10B).
@@ -97,13 +89,14 @@ export const receipts = pgTable(
   },
   (t) => [
     index("receipts_user_id_purchased_at_idx").on(t.userId, t.purchasedAt),
-    index("receipts_user_id_is_business_idx").on(t.userId, t.isBusiness),
     index("receipts_user_id_status_idx").on(t.userId, t.status),
     // The database's own guarantee that confirming is never partial: the
     // route validates first for a clean 400, this backstops everything else.
+    // The total is all that remains of "complete" since the 2026-08-26 field
+    // reduction retired the business-or-personal choice.
     check(
       "receipts_confirmed_complete_ck",
-      sql`status <> 'confirmed' OR (total_cents IS NOT NULL AND is_business IS NOT NULL)`,
+      sql`status <> 'confirmed' OR total_cents IS NOT NULL`,
     ),
   ],
 );

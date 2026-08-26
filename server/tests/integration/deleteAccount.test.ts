@@ -98,7 +98,6 @@ describe("DELETE /api/me (account deletion)", () => {
     const pending = await captureReceipt(token, userId, "b".repeat(64), {
       status: "pending",
       totalCents: null,
-      isBusiness: null,
     });
     const tombstoned = await captureReceipt(token, userId, "c".repeat(64));
     expect(

@@ -56,6 +56,20 @@ describe("compareSuggestionPaths", () => {
     expect(compareSuggestionPaths([receipt({})])).toEqual([]);
   });
 
+  /**
+   * `vendorTaxNumber` is still a key of a stored suggestion record - old
+   * clients report one and the records are immutable - but it is no longer
+   * scored: the 2026-08-26 field reduction took away the confirmed column it
+   * was compared against, so a disagreement about it must not appear.
+   */
+  it("ignores a field with no confirmed counterpart left to score against", () => {
+    const r = receipt({
+      heuristic: suggestions({ vendorTaxNumber: null }),
+      llm: suggestions({ vendorTaxNumber: "R105216170" }),
+    });
+    expect(compareSuggestionPaths([r])).toEqual([]);
+  });
+
   it("does not report a case-only vendor difference as a disagreement", () => {
     const r = receipt({ llm: suggestions({ vendor: "FOOD BASICS" }) });
     expect(compareSuggestionPaths([r])).toEqual([]);
@@ -98,13 +112,13 @@ describe("compareSuggestionPaths", () => {
 
   it("treats one path finding a value the other missed as a disagreement", () => {
     const r = receipt({
-      heuristic: suggestions({ vendorTaxNumber: null }),
-      llm: suggestions({ vendorTaxNumber: "R105216170" }),
-      confirmed: suggestions({ vendorTaxNumber: "R105216170" }),
+      heuristic: suggestions({ hstCents: null }),
+      llm: suggestions({ hstCents: 89 }),
+      confirmed: suggestions({ hstCents: 89 }),
     });
     const [d] = compareSuggestionPaths([r]);
     expect(d).toMatchObject({
-      field: "vendorTaxNumber",
+      field: "hstCents",
       heuristicSuggested: null,
       matchedConfirmed: "llm",
     });

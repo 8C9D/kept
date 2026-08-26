@@ -9,6 +9,7 @@ import {
   type AccuracyReport,
   type MeasuredReceipt,
   type Mismatch,
+  type ScoredField,
   type TwoPathReceipt,
 } from "../domain/parseAccuracy.js";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
@@ -25,13 +26,12 @@ const { db, pool } = createDb(
   process.env.DATABASE_URL ?? LOCAL_DEV_DATABASE_URL,
 );
 
-const FIELD_LABELS: Record<keyof OcrFieldSuggestions, string> = {
+const FIELD_LABELS: Record<ScoredField, string> = {
   totalCents: "total",
   purchasedAt: "date",
   vendor: "vendor",
   hstCents: "hst",
   subtotalCents: "subtotal",
-  vendorTaxNumber: "tax number",
 };
 
 async function report() {
@@ -78,7 +78,6 @@ async function report() {
         totalCents: row.totalCents,
         hstCents: row.hstCents,
         subtotalCents: row.subtotalCents,
-        vendorTaxNumber: row.vendorTaxNumber,
       },
     };
   });
@@ -157,7 +156,6 @@ async function report() {
         totalCents: row.totalCents,
         hstCents: row.hstCents,
         subtotalCents: row.subtotalCents,
-        vendorTaxNumber: row.vendorTaxNumber,
       },
     };
   });

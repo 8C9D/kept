@@ -16,6 +16,14 @@ const emptySuggestions: OcrFieldSuggestions = {
   vendorTaxNumber: null,
 };
 
+const emptyConfirmed: MeasuredReceipt["confirmed"] = {
+  vendor: null,
+  purchasedAt: null,
+  totalCents: null,
+  hstCents: null,
+  subtotalCents: null,
+};
+
 function receipt(
   id: string,
   suggestions: Partial<OcrFieldSuggestions>,
@@ -24,7 +32,7 @@ function receipt(
   return {
     id,
     suggestions: { ...emptySuggestions, ...suggestions },
-    confirmed: { ...emptySuggestions, ...confirmed },
+    confirmed: { ...emptyConfirmed, ...confirmed },
   };
 }
 
@@ -46,7 +54,7 @@ describe("classifyField", () => {
   });
 
   it("is correctly absent when there was genuinely nothing to find", () => {
-    expect(classifyField("vendorTaxNumber", null, null)).toBe("correctlyAbsent");
+    expect(classifyField("hstCents", null, null)).toBe("correctlyAbsent");
   });
 
   it("compares money exactly - one cent off is a mismatch", () => {
@@ -56,12 +64,6 @@ describe("classifyField", () => {
   it("compares vendors ignoring case and whitespace styling", () => {
     expect(classifyField("vendor", "STAPLES  #123", "Staples #123")).toBe("match");
     expect(classifyField("vendor", "Staples", "Walmart")).toBe("mismatch");
-  });
-
-  it("compares tax numbers ignoring internal spacing", () => {
-    expect(
-      classifyField("vendorTaxNumber", "123456789 RT 0001", "123456789RT0001"),
-    ).toBe("match");
   });
 
   it("compares dates exactly", () => {
@@ -90,8 +92,8 @@ describe("measureAccuracy", () => {
     expect(byField.get("totalCents")).toMatchObject({ match: 1, mismatch: 1 });
     expect(byField.get("hstCents")).toMatchObject({ match: 1, correctlyAbsent: 1 });
     expect(byField.get("vendor")).toMatchObject({ match: 1, missed: 1 });
-    // Fields nobody suggested and nobody filled: correctly absent twice.
-    expect(byField.get("vendorTaxNumber")).toMatchObject({ correctlyAbsent: 2 });
+    // A field nobody suggested and nobody filled: correctly absent twice.
+    expect(byField.get("subtotalCents")).toMatchObject({ correctlyAbsent: 2 });
 
     // In field-declaration order within a receipt: vendor before total.
     expect(report.mismatches).toEqual([

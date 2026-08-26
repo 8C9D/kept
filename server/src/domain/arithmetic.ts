@@ -1,8 +1,9 @@
 import type { Cents } from "./money.js";
 
 /**
- * The confirm-screen arithmetic check (spec §7.2): does
- * subtotal + hst + other_tax equal total?
+ * The confirm-screen arithmetic check (spec §7.2): does subtotal + hst
+ * equal total? (Since 2026-08-26 those are the only two components a
+ * receipt records; the other-tax line went with the field reduction.)
  *
  * The result is a prompt to look at the paper, never a rule: plenty of
  * legitimate receipts do not reconcile, so a "mismatch" warns and nothing
@@ -15,18 +16,15 @@ export type ArithmeticCheck = "not-applicable" | "reconciles" | "mismatch";
 export function checkReceiptArithmetic(input: {
   subtotalCents: Cents | null;
   hstCents: Cents | null;
-  otherTaxCents: Cents | null;
   totalCents: Cents;
 }): ArithmeticCheck {
-  // Without a subtotal there is nothing to reconcile against: tax amounts
-  // alone are not expected to sum to the total.
+  // Without a subtotal there is nothing to reconcile against: a tax amount
+  // alone is not expected to sum to the total.
   if (input.subtotalCents === null) {
     return "not-applicable";
   }
-  // A missing tax field means "no such line on the receipt", so it
+  // A missing HST field means "no such line on the receipt", so it
   // contributes nothing to the sum.
-  const hst = input.hstCents ?? 0;
-  const otherTax = input.otherTaxCents ?? 0;
-  const sum = input.subtotalCents + hst + otherTax;
+  const sum = input.subtotalCents + (input.hstCents ?? 0);
   return sum === input.totalCents ? "reconciles" : "mismatch";
 }

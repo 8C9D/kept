@@ -105,7 +105,6 @@ async function createSensitiveReceipt(): Promise<string> {
     "/api/receipts",
     receiptBody({
       vendor: VENDOR,
-      vendorTaxNumber: TAX_NUMBER,
       notes: NOTE,
       ocrRawText: OCR_TEXT,
       image: imageFor(userId, "b".repeat(64)),
@@ -185,6 +184,10 @@ describe("the LLM parse sweep's failure log", () => {
       totalCents: 11300,
       hstCents: 1300,
       subtotalCents: 10000,
+      // The receipt row carries no tax number since 2026-08-26, but the
+      // immutable suggestion record still can - and this is the jsonb the
+      // failing UPDATE binds, so TAX_NUMBER really is in the statement
+      // whose text must not reach the log.
       vendorTaxNumber: TAX_NUMBER,
     }));
 
@@ -292,7 +295,6 @@ describe("the LLM parse sweep's failure log", () => {
       totalCents: "11300", // wrong type, so a field-level path is exercised too
       hstCents: 1300,
       subtotalCents: 10000,
-      vendorTaxNumber: null,
       [inventedKey]: 11300,
     });
     // The leak asserted at its source first: this is the ZodError the
