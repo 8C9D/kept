@@ -171,6 +171,16 @@ fly ssh console -C "npm run db:migrate"
 
 `drizzle-kit migrate` reads `DATABASE_URL` from the machine's environment, applies only what has not been applied, and records each one.
 
+⚠ **This command has not worked from the owner's Mac since 2026-08-26.** The WireGuard tunnel establishes and then times out probing the internal API; `fly doctor` reports the gateway ping failing with "no response from gateway received" while authentication and the agent pass. It is *not* simply blocked UDP - WireGuard-over-websockets on TCP/443 fails identically. The diagnosis is unfinished (`docs/DECISIONS.md`, 2026-08-26).
+Migration 0005 ran instead from the laptop, pointing `drizzle-kit` at Neon's **direct** (non-`-pooler`) endpoint - the same `DATABASE_URL` `~/.kept/backup.env` carries for `pg_dump`, and the one the backup had just proven reaches production:
+
+```sh
+# server/, with DATABASE_URL set to the direct Neon endpoint:
+npm run db:migrate
+```
+
+Prefer the `fly ssh console` form when it works - it runs inside the machine, against the environment the app itself uses, with no production URL on the laptop's shell. Use the fallback knowingly, and take the §4 backup first either way.
+
 Run it **after** `fly deploy` when a migration only adds things (a new nullable column, a new table, a new index), and **before** the deploy when new code cannot run without it.
 Wave 6 needs neither: the schema is unchanged since `0003_one-active-export-per-user`.
 
