@@ -5,9 +5,11 @@
 # service containers, which would be a second spelling of the same services
 # (and cannot carry MinIO's command line without switching images, which is
 # exactly the divergence). The suite needs no secrets: ANTHROPIC_API_KEY is
-# absent here by construction and the LLM tests run against fakes, the
-# integration tests create their own test database, and the storage tests
-# create their own bucket.
+# absent here by construction and the LLM tests run against fakes, and the
+# integration tests create their own test database. The storage tests create
+# their own bucket, but the startup-probe tests boot the real entrypoint
+# against the configured bucket and do not - hence the storage:init step,
+# which dev never needs because the bucket persists in a named volume.
 name: server
 
 on:
@@ -30,5 +32,7 @@ jobs:
           cache: npm
           cache-dependency-path: server/package-lock.json
       - run: npm ci
+      - name: Create the object-storage bucket the startup probes expect
+        run: npm run storage:init
       - run: npm run typecheck
       - run: npm test
