@@ -8,62 +8,30 @@ It is the authority for the entire project.
 Kept is a receipt-capture app for the owner and a second user's business: an iPhone client that scans a receipt, shows the OCR guesses in an editable form, and a backend that stores the record and generates the year-end export an accountant can import.
 There is no README; this file and `docs/` are the entry points.
 
-## Layout
-
-- `server/` - the API and all domain logic.
-- `ios/` - the SwiftUI client, a capture-and-confirm surface only.
-- `web/` - the web client (wave 7, built 2026-08-21): Vite + React + TypeScript SPA - table, detail, confirm queue, backlog upload, export - plus the static privacy page under `public/privacy/`. Gated locally; production enablement is the owner's (`web/README.md`).
-- `docs/` - spec, decisions, runbook, per-wave gate reports, and `app-review/` for what Apple said and what we sent back.
-- `reviews/`, `PROD-READINESS*.md`, `DEPLOY-PREP.md` - the hardening rounds and their ledgers.
-
 The iOS app is a capture-and-confirm client and all domain logic lives in the backend.
 HST arithmetic, export generation, filename derivation, fiscal-period slicing, and validation are the server's, deliberately, so a later Android or web client does not have to reimplement them.
 
-## Stack
+`web/` is gated locally; production enablement is the owner's (`web/README.md`).
 
-- Server: Node with TypeScript run through `tsx`, Hono, Drizzle ORM over Postgres, zod, jose for session JWTs, `@aws-sdk/client-s3` for object storage, exceljs plus archiver for the export zip, `@anthropic-ai/sdk` for the server-side LLM parse sweep.
-- iOS: SwiftUI, VisionKit scanning with on-device Vision OCR, XCTest, deployment target 17.0, bundle id `com.arthurzhang.kept`.
-- Web: Vite + React + TypeScript (strict), react/react-dom as the only runtime dependencies, vitest for the client's logic; static build for Cloudflare Pages; API origin baked per build (dev localhost:3000, production `https://api.keptapp.net`), session as the same bearer JWT iOS uses.
-- Deployed: one Fly.io machine (`keptapp-api`, region `yyz`, `shared-cpu-1x` at 2 GB), Neon Postgres, Cloudflare R2 bucket `kept`, Cloudflare proxying the zone `keptapp.net` and carrying the rate limiter, origin at `https://api.keptapp.net`.
-- Local development: `server/docker-compose.yml` brings up Postgres 16 on 5432 and MinIO on 9000/9001.
+## Production topology
 
-## Architecture landmarks
-
-- `server/src/index.ts` is the only place environment variables are read, and it refuses to bind the port until Postgres and object storage both answer.
-- `server/src/productionEnv.ts` holds the checks that run only under `NODE_ENV=production`.
-- `server/src/app.ts` builds the Hono app from injected dependencies; nothing inside it reads the environment, which is what keeps the test-mode Apple verifier out of production.
-- `GET /health` is liveness only and is registered above the edge-secret middleware, because Fly's checker probes the machine directly and cannot carry the Cloudflare header.
-- Images never transit the API: the client PUTs straight to object storage through a presigned URL.
-- `docs/Runbook.md` is the operations authority - deploy, migrate, roll back, back up, restore.
+The origin is `https://api.keptapp.net`.
+The Fly machine behind it is described by `server/fly.toml`; what is *not* in the repo is Neon Postgres, the Cloudflare R2 bucket `kept`, and Cloudflare proxying the zone `keptapp.net` and carrying the rate limiter.
+Images never transit the API: the client PUTs straight to object storage through a presigned URL.
+`docs/Runbook.md` is the operations authority - deploy, migrate, roll back, back up, restore.
 
 ## Status, as of 2026-08-26
 
 - The shipped build is **1.0 (1)** - on TestFlight, on the owner's and the second user's phones. App Review rejected it 2026-08-22 under Guideline 2.1; the verbatim rejection, the seven-item reply, the Notes-field text and the recording script are `docs/app-review/2026-08-25/`.
+- **1.0 (2) was uploaded to App Store Connect 2026-08-26** and carries the in-app account deletion Apple asked for. It is a TestFlight upload only - nothing has been submitted to App Review. Archived and distribution-signed from the CLI via `-allowProvisioningUpdates`, which mints cloud-managed signing and needs no App Store Connect API key; the org has none (`ios/CLAUDE.md`).
 - **Deployed:** everything through the 2026-08-26 field reduction - `fly deploy` to machine v6, migration 0005 run against production, the Pages redeploy in the same session. Production is real and in use: two users, five receipts.
-- **The blocking owner action:** build **1.0 (2)**, which carries the in-app account deletion Apple asked for; then the owner's demo recording on a physical device; then the Resolution Center reply and resubmission. Approval, the unlisted conversion and pressing Release all sit behind it.
+- **The blocking owner action:** The owner's demo recording on a physical device; then the Resolution Center reply and resubmission. Approval, the unlisted conversion and pressing Release all sit behind it. The Sign in with Apple `.p8` is to be minted **before** the resubmission, so account deletion revokes when the reviewer tests it (decided 2026-08-26).
 - **Two owner-held keys are still unminted**, and both are traps rather than status: the R2 `kept-backups` token, without which the nightly backup agent refuses every night and production data survives nothing worse than Neon's 6-hour PITR window; and the Sign in with Apple `.p8` with its three `APPLE_*` secrets, without which account deletion still deletes but revokes nothing (Runbook §0).
 - What was decided, what deployed when, and what stays deferred on which trigger live in `docs/DECISIONS.md` (newest-first), with the per-wave gate reports in `docs/gates/` and the hardening ledgers in `PROD-READINESS*.md`. This section does not restate them.
 
 ## Build and test
 
-From `server/`, with `docker compose up -d` running first:
-
-- `npm test` - vitest, unit and integration; the integration tests need Postgres and create their own test database.
-- `npm run typecheck` - `tsc --noEmit`.
-- `npm run dev` - the real entrypoint, loading `server/.env.local`.
-- `npm run db:migrate` - migrations are deliberate and never run on boot.
-
-From `ios/`:
-
-- `xcodebuild test -project Kept.xcodeproj -scheme Kept -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:KeptTests`
-- The same command with `-only-testing:KeptUITests` for the UI tests, which need a booted simulator and take about a minute.
-
-From `web/` (after `npm install`):
-
-- `npm test` - vitest over the client's logic (money, query assembly, upload outcomes, prefill/patch rules).
-- `npm run build` - typecheck plus the production bundle into `dist/`.
-- `npm run dev` - Vite on 5173, the origin the API's dev CORS default grants; sign in with a token from `npm run dev:session-token` (server/).
-
+Per-directory commands and the notes that make them work live in `server/CLAUDE.md`, `ios/CLAUDE.md`, and `web/CLAUDE.md`.
 On a fresh clone run `git config core.hooksPath .githooks` once to enable the gitleaks pre-commit secret scan.
 
 ## The success test
