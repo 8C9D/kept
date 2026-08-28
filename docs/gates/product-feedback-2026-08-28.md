@@ -4,8 +4,20 @@
 Scope: the owner's second round of product feedback after real use — tip and
 other-fees fields, an iOS export screen, a model change, split-HST parsing
 in both parsers, behavioural telemetry, and three web-client gap fixes.
-Built across `server/`, `ios/`, `web/` in one session. **Nothing deployed.
-Migrations `0006` and `0007` are applied to the local dev database only.**
+Built across `server/`, `ios/`, `web/` in one session.
+
+⚠ **Superseded in part, later the same day: this was deployed.** Sections 1-4
+below record the pre-deploy state and are left as written, because a gate
+report is evidence of what was checked before shipping, not a status page. On
+The owner's instruction the server then went to production - backup taken and
+**restore-verified** first, migrations `0006`/`0007` run from the laptop
+against Neon's direct endpoint (the deployed image did not yet carry the
+migration files, so §2's in-machine command could not have applied them),
+`fly deploy` to **machine v7**, and the Pages redeploy in the same session.
+Post-deploy verification, and the fact that production held **78 receipts
+rather than the 53** last recorded, are in `docs/DECISIONS.md` 2026-08-28.
+**What did not ship: any iOS build.** The phones remain on 1.0 (2), which
+predates every iOS change described here.
 
 **Suites:** server **500** green / 47 files (re-run in this documentation
 pass — matches the build session's own count), `tsc --noEmit` clean.
