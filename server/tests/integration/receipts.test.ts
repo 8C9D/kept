@@ -86,6 +86,40 @@ describe("POST /api/receipts", () => {
     expect(rows[0]?.subtotalCents).toBe(999999999);
   });
 
+  /**
+   * 2026-08-28 product feedback: tips and other fees are their own fields,
+   * finer-grained than the single `other_tax_cents` column the 2026-08-26
+   * reduction removed. Same round-trip guarantee as every other money field.
+   */
+  it("creates a receipt carrying tip and other fees, and round-trips both", async () => {
+    const response = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ tipCents: 2000, otherFeesCents: 500, totalCents: 13800 }),
+    );
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as Record<string, unknown>;
+    expect(created.tipCents).toBe(2000);
+    expect(created.otherFeesCents).toBe(500);
+
+    const detail = await harness.request(token, "GET", `/api/receipts/${created.id}`);
+    const body = (await detail.json()) as Record<string, unknown>;
+    expect(body.tipCents).toBe(2000);
+    expect(body.otherFeesCents).toBe(500);
+
+    const rows = await harness.db
+      .select()
+      .from(receipts)
+      .where(eq(receipts.id, created.id as string));
+    expect(rows[0]?.tipCents).toBe(2000);
+    expect(rows[0]?.otherFeesCents).toBe(500);
+  });
+
+  it("stores no tip or other fees when neither is sent - absent, not zero", async () => {
+    const response = await harness.request(token, "POST", "/api/receipts", bodyWithImage());
+    const created = (await response.json()) as Record<string, unknown>;
+    expect(created.tipCents).toBeNull();
+    expect(created.otherFeesCents).toBeNull();
+  });
+
   it("answers 400, not 500, to a body that is not JSON at all", async () => {
     const response = await harness.app.request("/api/receipts", {
       method: "POST",
@@ -197,6 +231,7 @@ describe("POST /api/receipts", () => {
       totalCents: 11300,
       hstCents: null,
       subtotalCents: null,
+      tipCents: null,
       vendorTaxNumber: null,
     };
     const rows = await harness.db
@@ -514,6 +549,58 @@ describe("PATCH /api/receipts/:id", () => {
       {},
     );
     expect(response.status).toBe(400);
+  });
+
+  it("sets tip and other fees via PATCH, then clears both with an explicit null", async () => {
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage(),
+    );
+    const receipt = (await created.json()) as { id: string };
+
+    const withValues = await harness.request(token, "PATCH",
+      `/api/receipts/${receipt.id}`,
+      { tipCents: 2000, otherFeesCents: 500 },
+    );
+    expect(withValues.status).toBe(200);
+    const updated = (await withValues.json()) as Record<string, unknown>;
+    expect(updated.tipCents).toBe(2000);
+    expect(updated.otherFeesCents).toBe(500);
+
+    // Explicit null clears; the field's own presence in the body is what
+    // distinguishes this from "omitted, leave unchanged" (same rule as
+    // every other nullable field on this route).
+    const cleared = await harness.request(token, "PATCH",
+      `/api/receipts/${receipt.id}`,
+      { tipCents: null, otherFeesCents: null },
+    );
+    expect(cleared.status).toBe(200);
+    const clearedBody = (await cleared.json()) as Record<string, unknown>;
+    expect(clearedBody.tipCents).toBeNull();
+    expect(clearedBody.otherFeesCents).toBeNull();
+
+    const rows = await harness.db
+      .select()
+      .from(receipts)
+      .where(eq(receipts.id, receipt.id));
+    expect(rows[0]?.tipCents).toBeNull();
+    expect(rows[0]?.otherFeesCents).toBeNull();
+  });
+
+  it("leaves tip and other fees unchanged when the PATCH omits them", async () => {
+    const created = await harness.request(token, "POST", "/api/receipts",
+      bodyWithImage({ tipCents: 2000, otherFeesCents: 500 }),
+    );
+    const receipt = (await created.json()) as { id: string };
+
+    const response = await harness.request(token, "PATCH",
+      `/api/receipts/${receipt.id}`,
+      { vendor: "Corrected Vendor" },
+    );
+    expect(response.status).toBe(200);
+    const updated = (await response.json()) as Record<string, unknown>;
+    expect(updated.vendor).toBe("Corrected Vendor");
+    expect(updated.tipCents).toBe(2000);
+    expect(updated.otherFeesCents).toBe(500);
   });
 
   it("404s on a malformed receipt id rather than erroring", async () => {

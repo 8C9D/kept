@@ -32,6 +32,7 @@ const FIELD_LABELS: Record<ScoredField, string> = {
   vendor: "vendor",
   hstCents: "hst",
   subtotalCents: "subtotal",
+  tipCents: "tip",
 };
 
 async function report() {
@@ -78,6 +79,7 @@ async function report() {
         totalCents: row.totalCents,
         hstCents: row.hstCents,
         subtotalCents: row.subtotalCents,
+        tipCents: row.tipCents,
       },
     };
   });
@@ -130,6 +132,7 @@ async function report() {
     totalCents: null,
     hstCents: null,
     subtotalCents: null,
+    tipCents: null,
     vendorTaxNumber: null,
   };
   const failureCount = llmRows.filter(
@@ -156,6 +159,7 @@ async function report() {
         totalCents: row.totalCents,
         hstCents: row.hstCents,
         subtotalCents: row.subtotalCents,
+        tipCents: row.tipCents,
       },
     };
   });

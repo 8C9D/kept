@@ -33,6 +33,8 @@ function exportValues(row: ExportRow): Record<ExportColumn, ExportValue> {
     vendor: text(row.vendor),
     subtotal: money(row.subtotalCents),
     hst: money(row.hstCents),
+    tip: money(row.tipCents),
+    other_fees: money(row.otherFeesCents),
     total: money(row.totalCents),
     currency: text(row.currency),
     category: text(row.category),

@@ -11,6 +11,11 @@ export interface ExportRow {
   vendor: string | null;
   subtotalCents: Cents | null;
   hstCents: Cents | null;
+  // Gratuity and every other non-HST, non-subtotal charge (2026-08-28); see
+  // the receipts table for what each carries. Nullable like every other
+  // money field here.
+  tipCents: Cents | null;
+  otherFeesCents: Cents | null;
   totalCents: Cents;
   currency: string;
   category: string | null;
@@ -20,13 +25,19 @@ export interface ExportRow {
   notes: string | null;
 }
 
-/** Spec §8, verbatim and in order. */
+/**
+ * Spec §8, verbatim and in order. `tip` and `other_fees` sit between `hst`
+ * and `total` so the row reads left to right in the order the arithmetic
+ * check sums them (subtotal + hst + tip + other_fees = total).
+ */
 export const EXPORT_COLUMN_HEADERS = [
   "receipt_id",
   "date",
   "vendor",
   "subtotal",
   "hst",
+  "tip",
+  "other_fees",
   "total",
   "currency",
   "category",

@@ -14,7 +14,10 @@ import {
   findPortListeners,
   formatPortInUseMessage,
 } from "./observability/portInUse.js";
-import { parseReceiptText } from "./parse/claudeReceiptParser.js";
+import {
+  parseReceiptText,
+  resolveReceiptParseModel,
+} from "./parse/claudeReceiptParser.js";
 import { createLlmParseSweep } from "./parse/llmParseSweep.js";
 import { assertProductionEnv } from "./productionEnv.js";
 import {
@@ -289,13 +292,19 @@ const SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 /** Held so the shutdown path below can clear it; see the note there. */
 let sweepTimer: NodeJS.Timeout | undefined;
 const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+// The one place the parse model is resolved; everything downstream is handed
+// the value, so the id recorded on a stored record is always the id that
+// produced it (2026-08-28).
+const receiptParseModel = resolveReceiptParseModel(process.env);
 const llmParseSweep =
   anthropicApiKey !== undefined && anthropicApiKey !== ""
     ? createLlmParseSweep({
         db,
+        model: receiptParseModel,
         parse: (() => {
           const client = new Anthropic({ apiKey: anthropicApiKey });
-          return (ocrRawText: string) => parseReceiptText(client, ocrRawText);
+          return (ocrRawText: string) =>
+            parseReceiptText(client, ocrRawText, receiptParseModel);
         })(),
       })
     : undefined;
@@ -306,6 +315,9 @@ if (llmParseSweep === undefined) {
     "ANTHROPIC_API_KEY is not set - LLM receipt parsing disabled, suggestions are heuristic-only",
   );
 } else {
+  // Printed at boot so a mistyped RECEIPT_PARSE_MODEL is visible before it
+  // bills a single receipt against an id that does not exist.
+  console.log(`Receipt parse model: ${receiptParseModel}`);
   llmParseSweep.kick();
   sweepTimer = setInterval(() => llmParseSweep.kick(), SWEEP_INTERVAL_MS);
   // Unref'd so this timer alone never keeps the process alive: an interval is

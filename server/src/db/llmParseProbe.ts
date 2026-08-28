@@ -3,9 +3,14 @@ import { LOCAL_DEV_DATABASE_URL, createDb } from "./client.js";
 import { assertLocalDatabase } from "./databaseUrl.js";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
 import {
-  RECEIPT_PARSE_MODEL,
+  resolveReceiptParseModel,
   parseReceiptText,
 } from "../parse/claudeReceiptParser.js";
+
+// Resolved once per run, and handed to every call, so a configured
+// RECEIPT_PARSE_MODEL cannot have one model do the work while another
+// name is recorded (2026-08-28).
+const receiptParseModel = resolveReceiptParseModel(process.env);
 
 /**
  * `npm run parse-llm-probe <receipt-id>` - a one-off check, not a test, that
@@ -49,6 +54,12 @@ const FIELDS = [
   "totalCents",
   "subtotalCents",
   "hstCents",
+  // Asked for since prompt v4 (2026-08-28) like every other amount here -
+  // stored and scored, never served (mergedSuggestions.ts stays
+  // heuristic-only for money), which is exactly why the corruption probe
+  // still wants to see it move: a tip that fails to change under digit
+  // rotation would be as suspicious as any other field.
+  "tipCents",
   "vendorTaxNumber",
 ] as const;
 
@@ -74,12 +85,12 @@ async function probe() {
 
   const corruptedText = rotateDigits(row.ocr_raw_text);
   console.log(
-    `Probing ${row.vendor ?? "no vendor"} · ${row.id.slice(0, 8)} with ${RECEIPT_PARSE_MODEL}`,
+    `Probing ${row.vendor ?? "no vendor"} · ${row.id.slice(0, 8)} with ${receiptParseModel}`,
   );
   console.log("Corruption: every digit rotated +1 (0->1 ... 9->0)\n");
 
-  const intact = await parseReceiptText(client, row.ocr_raw_text);
-  const corrupted = await parseReceiptText(client, corruptedText);
+  const intact = await parseReceiptText(client, row.ocr_raw_text, receiptParseModel);
+  const corrupted = await parseReceiptText(client, corruptedText, receiptParseModel);
 
   const width = Math.max(
     ...FIELDS.map((f) => String(intact[f] ?? "null").length),

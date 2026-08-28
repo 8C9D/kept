@@ -133,6 +133,8 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
             vendor: body.vendor ?? null,
             subtotalCents: body.subtotalCents ?? null,
             hstCents: body.hstCents ?? null,
+            tipCents: body.tipCents ?? null,
+            otherFeesCents: body.otherFeesCents ?? null,
             // Null while pending means "not read yet" - a stated absence,
             // never a fabricated value. The schema has already rejected a
             // confirmed create missing it.
@@ -281,10 +283,10 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
   });
 
   /**
-   * GET /api/receipts/options - the category and payment-method values this
-   * user has used before, most recently used first, so both clients can
-   * offer them for reuse instead of asking someone to retype "office
-   * supplies" for the fortieth time.
+   * GET /api/receipts/options - the category, payment-method and vendor
+   * values this user has used before, most recently used first, so both
+   * clients can offer them for reuse instead of asking someone to retype
+   * "office supplies" (or "Staples #4021") for the fortieth time.
    *
    * Registered ABOVE /:id: that handler 404s a non-uuid, so a literal path
    * declared after it would be shadowed into a 404 by whichever router Hono
@@ -294,14 +296,22 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
    * these are the person's own values (2026-08-26 ruling), and an options
    * list that quietly rewrote them would offer a string the exact-match
    * filter then fails to find.
+   *
+   * `vendors` (2026-08-28) belongs in this set even though it is a
+   * transcription rather than a chosen label like category or payment
+   * method: a person shops at the same handful of places, and the LLM's
+   * verbatim-vendor rule (spec §7.3) is what keeps the stored strings stable
+   * enough to match each other reuse after reuse. Existing clients ignore
+   * the new key - the response is additive.
    */
   router.get("/options", async (c) => {
     const userId = c.get("userId");
-    const [categories, paymentMethods] = await Promise.all([
+    const [categories, paymentMethods, vendors] = await Promise.all([
       recentDistinctValues(deps.db, userId, receipts.category),
       recentDistinctValues(deps.db, userId, receipts.paymentMethod),
+      recentDistinctValues(deps.db, userId, receipts.vendor),
     ]);
-    return c.json({ categories, paymentMethods });
+    return c.json({ categories, paymentMethods, vendors });
   });
 
   /** GET /api/receipts/:id - one receipt plus presigned image downloads. */
@@ -384,6 +394,9 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     if (body.subtotalCents !== undefined)
       changes.subtotalCents = body.subtotalCents;
     if (body.hstCents !== undefined) changes.hstCents = body.hstCents;
+    if (body.tipCents !== undefined) changes.tipCents = body.tipCents;
+    if (body.otherFeesCents !== undefined)
+      changes.otherFeesCents = body.otherFeesCents;
     if (body.totalCents !== undefined) changes.totalCents = body.totalCents;
     if (body.currency !== undefined) changes.currency = body.currency;
     if (body.category !== undefined) changes.category = body.category;
@@ -518,6 +531,8 @@ function receiptResponse(row: typeof receipts.$inferSelect) {
     vendor: row.vendor,
     subtotalCents: row.subtotalCents,
     hstCents: row.hstCents,
+    tipCents: row.tipCents,
+    otherFeesCents: row.otherFeesCents,
     totalCents: row.totalCents,
     currency: row.currency,
     category: row.category,
@@ -736,6 +751,7 @@ function normalizeOcrSuggestions(
     totalCents: suggestions.totalCents ?? null,
     hstCents: suggestions.hstCents ?? null,
     subtotalCents: suggestions.subtotalCents ?? null,
+    tipCents: suggestions.tipCents ?? null,
     vendorTaxNumber: suggestions.vendorTaxNumber ?? null,
   };
 }

@@ -17,6 +17,11 @@ import {
 } from "drizzle-orm/pg-core";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
 import type { LlmSuggestionRecord } from "../domain/llmSuggestions.js";
+import type {
+  EventAction,
+  EventClient,
+  EventField,
+} from "../domain/userEvents.js";
 
 export const receiptStatus = pgEnum("receipt_status", ["pending", "confirmed"]);
 
@@ -57,6 +62,20 @@ export const receipts = pgTable(
     vendor: text("vendor"),
     subtotalCents: integer("subtotal_cents"),
     hstCents: integer("hst_cents"),
+    // Gratuity: a printed or handwritten tip line. Nullable on the same rule
+    // every other money field follows - absent means "no such line on this
+    // receipt", never a fabricated zero. Brought back 2026-08-28 as its own
+    // field, finer-grained than the lumped other_tax_cents the 2026-08-26
+    // reduction removed (docs/DECISIONS.md that date, "First-use product
+    // feedback").
+    tipCents: integer("tip_cents"),
+    // Every non-HST charge that is neither subtotal nor tip: delivery fees,
+    // service charges, bottle deposits, environmental levies, and a foreign
+    // receipt's non-HST tax (a US receipt's state sales tax has no other
+    // home). Same nullability rule as tip. Restores what other_tax_cents
+    // used to carry for the arithmetic check, split out rather than
+    // relumped - see checkReceiptArithmetic.
+    otherFeesCents: integer("other_fees_cents"),
     // Nullable while pending (wave 4): a batch-scanned receipt whose total
     // the parser could not read is stored with the absence stated, never a
     // fabricated amount. The check constraint below guarantees a confirmed
@@ -181,4 +200,68 @@ export const receiptImages = pgTable(
       .on(t.userId, t.sha256)
       .where(sql`deleted_at IS NULL`),
   ],
+);
+
+/**
+ * Behavioural telemetry (the owner's 2026-08-28 ask, docs/DECISIONS.md that
+ * date): what people DID, never what they typed. See domain/userEvents.ts
+ * for the vocabularies, the privacy rule this table exists to enforce
+ * structurally, and why `action`/`field`/`client` are `text` rather than
+ * Postgres enums.
+ *
+ * No `meta`/`properties`/`payload` column, deliberately and permanently -
+ * see domain/userEvents.ts's file header. This is the one schema decision
+ * in this table that must never be "fixed" by a future patch that adds one
+ * back to unblock some one-off debugging need.
+ */
+export const userEvents = pgTable(
+  "user_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    // Not ON DELETE CASCADE, on the same reasoning as every other table
+    // here: DELETE /api/me states the deletion order in the route rather
+    // than leaving it to the database (routes/me.ts).
+    //
+    // When it happened ON THE CLIENT, which may be much earlier than
+    // received_at below: the iOS client is offline-first and batches, so a
+    // sync after a week in airplane mode arrives as a burst of old
+    // occurred_at values received in the same second. Bounded at the
+    // schema boundary (http/schemas.ts), not here - see
+    // domain/userEvents.ts's isOccurredAtInBounds.
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    // When the SERVER got it. Keeping both, rather than only occurred_at, is
+    // what makes an offline batch legible as a batch instead of a pile of
+    // events that all look like they happened simultaneously - and it is
+    // what events:prune keys retention off (domain/userEvents.ts,
+    // eventRetentionCutoff), for the same reason.
+    receivedAt: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    client: text("client").notNull().$type<EventClient>(),
+    // Which build produced the event; without this a behaviour change
+    // across app versions is invisible in the log.
+    appVersion: text("app_version"),
+    action: text("action").notNull().$type<EventAction>(),
+    field: text("field").$type<EventField>(),
+    // Deliberately NO foreign key. An event log must never refuse to record
+    // because the row it mentions is not there: the iOS client queues
+    // events offline alongside receipts that have not uploaded yet, so an
+    // event can legitimately name a receipt id the server has never seen
+    // (not yet synced) or will never see again (since deleted). A foreign
+    // key would turn either case into a 500 or a 400 on what is supposed to
+    // be a fire-and-forget write. This column is a weak reference, resolved
+    // by whoever reads the log later (action-report joins it only when it
+    // chooses to), and the log stays correctly scoped to one user by
+    // user_id regardless of whether receipt_id resolves to anything.
+    receiptId: uuid("receipt_id"),
+    durationMs: integer("duration_ms"),
+    // How many times a field was edited before save, for example - the
+    // signal the owner named ("a user editing the total amount repeatedly
+    // signals the total-extraction path is unreliable").
+    count: integer("count"),
+  },
+  (t) => [index("user_events_user_id_occurred_at_idx").on(t.userId, t.occurredAt)],
 );

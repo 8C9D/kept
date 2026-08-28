@@ -5,6 +5,7 @@ import {
   exportJobs,
   receiptImages,
   receipts,
+  userEvents,
   users,
 } from "../../src/db/schema.js";
 import { exportObjectKey } from "../../src/storage/objectKeys.js";
@@ -45,6 +46,29 @@ async function captureReceipt(
   const { id } = (await response.json()) as { id: string };
   harness.storage.objects.set(image.objectKey, IMAGE_BYTES);
   return { id, objectKey: image.objectKey };
+}
+
+/**
+ * Log one behavioural event through the real route (spec: "action logging
+ * for all user actions" - 2026-08-28). No field value is ever sent; this
+ * exists only to prove `DELETE /api/me` also destroys the log, not to
+ * exercise the logging endpoint itself (events.test.ts owns that).
+ */
+async function logEvent(token: string): Promise<void> {
+  const response = await harness.request(token, "POST", "/api/events", {
+    events: [
+      {
+        action: "field_edited",
+        occurredAt: new Date().toISOString(),
+        client: "ios",
+        field: "total",
+        count: 3,
+      },
+    ],
+  });
+  if (response.status !== 202) {
+    throw new Error(`Test event log failed with status ${response.status}`);
+  }
 }
 
 /** A completed export job with its zip in storage. */
@@ -105,6 +129,8 @@ describe("DELETE /api/me (account deletion)", () => {
         .status,
     ).toBe(204);
     const exportKey = await completedExport(userId);
+    await logEvent(token);
+    await logEvent(token);
 
     const response = await harness.request(token, "DELETE", "/api/me", {
       appleAuthorizationCode: "fresh-code-from-reauthorization",
@@ -117,6 +143,9 @@ describe("DELETE /api/me (account deletion)", () => {
     expect(await harness.db.select().from(receipts)).toHaveLength(0);
     expect(await harness.db.select().from(receiptImages)).toHaveLength(0);
     expect(await harness.db.select().from(exportJobs)).toHaveLength(0);
+    // The behavioural log, too: leaving it behind would be a broken promise
+    // to the person who asked to be deleted (2026-08-28 logging feature).
+    expect(await harness.db.select().from(userEvents)).toHaveLength(0);
 
     // And the bytes, read out of the store the same way.
     expect(harness.storage.objects.has(confirmed.objectKey)).toBe(false);
@@ -145,18 +174,22 @@ describe("DELETE /api/me (account deletion)", () => {
     );
     const theirExport = await completedExport(other.userId);
     const mine = await captureReceipt(token, userId, "e".repeat(64));
+    await logEvent(other.token);
+    await logEvent(token);
 
     expect(
       (await harness.request(token, "DELETE", "/api/me")).status,
     ).toBe(204);
 
-    // Theirs, entirely intact - row, image row, export job, and bytes.
+    // Theirs, entirely intact - row, image row, export job, event, and bytes.
     const survivingUsers = await harness.db.select().from(users);
     expect(survivingUsers.map((row) => row.id)).toEqual([other.userId]);
     const survivingReceipts = await harness.db.select().from(receipts);
     expect(survivingReceipts.map((row) => row.id)).toEqual([theirs.id]);
     expect(await harness.db.select().from(receiptImages)).toHaveLength(1);
     expect(await harness.db.select().from(exportJobs)).toHaveLength(1);
+    const survivingEvents = await harness.db.select().from(userEvents);
+    expect(survivingEvents.map((row) => row.userId)).toEqual([other.userId]);
     expect(harness.storage.objects.has(theirs.objectKey)).toBe(true);
     expect(harness.storage.objects.has(theirExport)).toBe(true);
     // Mine, gone.

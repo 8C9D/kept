@@ -5,6 +5,12 @@ import {
   MIN_STORABLE_CENTS,
   cents,
 } from "../domain/money.js";
+import {
+  EVENT_ACTIONS,
+  EVENT_CLIENTS,
+  EVENT_FIELDS,
+  isOccurredAtInBounds,
+} from "../domain/userEvents.js";
 import { receiptStatus } from "../db/schema.js";
 
 /**
@@ -60,6 +66,13 @@ const vendorText = z.string().min(1).max(200);
 const vendor = vendorText.nullable();
 const subtotalCents = centsSchema.nullable();
 const hstCents = centsSchema.nullable();
+// Gratuity and every other non-HST, non-subtotal charge (delivery, service
+// charges, bottle deposits, a foreign receipt's state sales tax), added
+// 2026-08-28 as two fields rather than the one lumped `other_tax_cents`
+// column the 2026-08-26 field reduction removed. Nullable like every other
+// money field: absent means "no such line on this receipt".
+const tipCents = centsSchema.nullable();
+const otherFeesCents = centsSchema.nullable();
 const totalCents = centsSchema;
 const currency = z.string().regex(/^[A-Z]{3}$/, {
   error: "must be a three-letter currency code like CAD",
@@ -86,6 +99,14 @@ const vendorTaxNumber = z.string().min(1).max(50).nullable();
  *
  * Removal trigger: when no installed build sends them. Deleting these three
  * lines from both schemas is the whole removal.
+ *
+ * ⚠ `otherTaxCents` is NOT the same field as the new `otherFeesCents` below,
+ * and must not be quietly routed into it (or into `tipCents`). This is a
+ * discarded legacy key from build 1.0 (1) with different, lumped semantics
+ * (tips and non-HST amounts folded into one number); `otherFeesCents` is a
+ * 2026-08-28 field with its own, narrower meaning (everything that is
+ * neither subtotal, HST, nor tip). Feeding one into the other would invent
+ * data no human confirmed - exactly what constraint 2 forbids.
  */
 const retiredReceiptFields = {
   vendorTaxNumber: vendorTaxNumber.optional(),
@@ -120,6 +141,10 @@ export const ocrSuggestionsSchema = z.strictObject({
   totalCents: centsSchema.nullable().optional(),
   hstCents: hstCents.optional(),
   subtotalCents: subtotalCents.optional(),
+  // An amount like the other three, so it gets a suggestion field on the
+  // same terms (2026-08-28: the on-device parser will start reporting one).
+  // `otherFeesCents` gets no suggestion field - see ocrSuggestions.ts.
+  tipCents: centsSchema.nullable().optional(),
   vendorTaxNumber: vendorTaxNumber.optional(),
 });
 
@@ -139,6 +164,8 @@ export const createReceiptSchema = z
     vendor: vendor.optional(),
     subtotalCents: subtotalCents.optional(),
     hstCents: hstCents.optional(),
+    tipCents: tipCents.optional(),
+    otherFeesCents: otherFeesCents.optional(),
     totalCents: totalCents.nullable().optional(),
     currency: currency.optional(),
     category: category.optional(),
@@ -186,6 +213,8 @@ export const updateReceiptSchema = z
     vendor: vendor.optional(),
     subtotalCents: subtotalCents.optional(),
     hstCents: hstCents.optional(),
+    tipCents: tipCents.optional(),
+    otherFeesCents: otherFeesCents.optional(),
     totalCents: totalCents.nullable().optional(),
     currency: currency.optional(),
     category: category.optional(),
@@ -354,4 +383,66 @@ export const updateMeSchema = z
  */
 export const deleteMeSchema = z.strictObject({
   appleAuthorizationCode: z.string().min(1).max(2000).optional(),
+});
+
+/**
+ * POST /api/events - fire-and-forget behavioural telemetry (the owner's
+ * 2026-08-28 ask; domain/userEvents.ts carries the full reasoning).
+ *
+ * `action` and `field` are validated against the fixed vocabularies with
+ * `z.enum`, never accepted as free strings - that is what makes "no field
+ * values, ever" a structural guarantee instead of a convention someone has
+ * to remember to keep. There is deliberately no payload/meta/properties key
+ * here, matching the column that stores it (schema.ts, user_events): a
+ * free-form bag is exactly where a value would leak in six months, and a
+ * schema that cannot express one cannot leak one.
+ *
+ * `userId` is named nowhere in this schema, on purpose - the most
+ * attractive place in the whole API to smuggle one in is a batch write, and
+ * `strictObject` refuses the key with a 400 rather than silently ignoring
+ * or trusting it (spec §6: "An endpoint that accepts a user id as a
+ * parameter is a bug").
+ */
+const eventOccurredAt = z.iso.datetime({ offset: true }).refine(
+  (value) => isOccurredAtInBounds(new Date(value)),
+  { error: "occurredAt is outside the accepted range" },
+);
+
+/**
+ * `durationMs` and `count` share a shape: non-negative, and bounded to what
+ * the `integer` (int4) columns that store them can hold - the same reason
+ * `centsSchema` above states the storable range as a zod check rather than
+ * letting an out-of-range insert fail as a 500.
+ */
+const nonNegativeStorableInt = z
+  .number()
+  .int({ error: "must be an integer" })
+  .min(0, { error: "must not be negative" })
+  .max(MAX_STORABLE_CENTS, { error: "is outside the storable range" });
+
+export const userEventSchema = z.strictObject({
+  action: z.enum(EVENT_ACTIONS),
+  occurredAt: eventOccurredAt,
+  client: z.enum(EVENT_CLIENTS),
+  appVersion: z.string().min(1).max(40).optional(),
+  field: z.enum(EVENT_FIELDS).optional(),
+  // No foreign key on the stored column (schema.ts) and none of the
+  // validation here either, beyond "is a uuid": a receipt id naming a
+  // receipt that never synced, or was since deleted, is accepted -
+  // refusing it would turn a fire-and-forget log write into a failure
+  // over a receipt the log does not even need to resolve.
+  receiptId: z.uuid().optional(),
+  durationMs: nonNegativeStorableInt.optional(),
+  count: nonNegativeStorableInt.optional(),
+});
+
+/**
+ * Batched: the iOS client is offline-first and syncs a queue, not one event
+ * at a time. 1-50 per request - at least one (an empty batch is not a
+ * request worth making), at most 50 (this is fire-and-forget telemetry, not
+ * a bulk-import endpoint; a client with more than 50 queued should send
+ * more than one request rather than one unbounded one).
+ */
+export const postEventsSchema = z.strictObject({
+  events: z.array(userEventSchema).min(1).max(50),
 });

@@ -6,18 +6,37 @@ import type { OcrFieldSuggestions } from "./ocrSuggestions.js";
  * answer and neither implements the rule (spec §4.1: domain logic lives in
  * the backend or it gets written twice).
  *
- * - Amounts (total, HST, subtotal) come from the heuristic, and only the
- *   heuristic - no fallthrough (amended Aug 8, 2026, after a live parse
+ * - Amounts (total, HST, subtotal, tip) come from the heuristic, and only
+ *   the heuristic - no fallthrough (amended Aug 8, 2026, after a live parse
  *   served "SUBTOTAL 43.49" as 3449 cents with llm provenance). A
  *   heuristic-absent amount is served absent, never filled from the LLM: an
  *   absent amount is visible and costs one keystroke, while a wrong amount
  *   that passes unflagged reaches an accountant. This governs what is
  *   served, not what is recorded - the LLM's amounts stay in
- *   llm_suggestions for parse-accuracy to score.
+ *   llm_suggestions for parse-accuracy to score. Tip (2026-08-28) is an
+ *   amount like the other three, so it gets no exception: `other_fees` has
+ *   no suggestion field at all (ocrSuggestions.ts) and so nothing to merge.
  * - Vendor comes from the LLM.
  * - Date trusts neither source alone: when the two disagree, the value is
  *   flagged and the confirm screen keeps the field amber and marked as
  *   needing attention.
+ * - HST carries the same disagreement flag as date (2026-08-28): when both
+ *   parsers produced an amount and they differ, `disagreement` is set. The
+ *   served value does not change - still heuristic-only, still no
+ *   fallthrough - only the flag is new. Why HST and not date's full
+ *   fallthrough-or-flag treatment: HST is the input tax credit, the one
+ *   amount with a direct tax consequence, and it is exactly the field the
+ *   split-HST failure corrupts - a heuristic that reads one component of a
+ *   printed 5%+8% split produces a wrong-but-entirely-plausible number that
+ *   no arithmetic check catches when the subtotal is also missing (the
+ *   check needs all three of subtotal, HST and total present, spec §7.3).
+ *   Disagreement between two independent parsers over the same text is free
+ *   signal, same reasoning as the date flag. Deliberately not extended to
+ *   total or subtotal in this pass: every extra inline note on the confirm
+ *   screen costs attention, and a note that fires on every receipt is
+ *   wallpaper rather than signal. Revisit once real usage shows how often
+ *   the HST flag actually fires - if it turns out to be most receipts, the
+ *   same argument that justifies it here argues against widening it further.
  *
  * For vendor and date, when the ruled source has nothing and the other
  * does, the other side's value is served with its provenance stated: a
@@ -50,12 +69,27 @@ export interface MergedDateSuggestion extends MergedSuggestion<string> {
   disagreement: boolean;
 }
 
+/**
+ * An amount suggestion that also carries the disagreement flag, without the
+ * date's fallthrough-when-one-side-empty behaviour: the served `value` and
+ * `source` still follow the plain money rule (heuristic or absent, never
+ * LLM), and `disagreement` is a read-only side channel computed from both
+ * sides. Introduced for HST (2026-08-28) rather than special-casing that one
+ * field's type inline, so a future amount that earns the same flag (see the
+ * revisit note above) reuses this instead of another one-off shape.
+ */
+export interface MergedAmountSuggestion extends MergedSuggestion<number> {
+  /** Both parsers produced a value for this amount and they differ. */
+  disagreement: boolean;
+}
+
 export interface MergedSuggestions {
   vendor: MergedSuggestion<string>;
   purchasedAt: MergedDateSuggestion;
   totalCents: MergedSuggestion<number>;
-  hstCents: MergedSuggestion<number>;
+  hstCents: MergedAmountSuggestion;
   subtotalCents: MergedSuggestion<number>;
+  tipCents: MergedSuggestion<number>;
 }
 
 /**
@@ -74,8 +108,12 @@ export function mergeSuggestions(
     vendor: prefer("llm", llm?.vendor ?? null, "heuristic", ocr?.vendor ?? null),
     purchasedAt: mergeDate(ocr?.purchasedAt ?? null, llm?.purchasedAt ?? null),
     totalCents: heuristicOnly(ocr?.totalCents ?? null),
-    hstCents: heuristicOnly(ocr?.hstCents ?? null),
+    hstCents: heuristicWithDisagreement(
+      ocr?.hstCents ?? null,
+      llm?.hstCents ?? null,
+    ),
     subtotalCents: heuristicOnly(ocr?.subtotalCents ?? null),
+    tipCents: heuristicOnly(ocr?.tipCents ?? null),
   };
 }
 
@@ -89,6 +127,26 @@ function heuristicOnly<T>(value: T | null): MergedSuggestion<T> {
   return value !== null
     ? { value, source: "heuristic" }
     : { value: null, source: null };
+}
+
+/**
+ * HST's merge (2026-08-28): the served value and source are exactly
+ * `heuristicOnly` - no fallthrough, same as every other amount - with one
+ * addition layered on top, never substituted in: `disagreement` is true
+ * only when both parsers produced a value and it differs from the
+ * heuristic's. A heuristic-only or LLM-only read is not a disagreement,
+ * it is an absence on one side, and carries the flag as false - exactly
+ * `mergeDate`'s reasoning for the analogous case, applied to an amount that
+ * still never takes the LLM's value.
+ */
+function heuristicWithDisagreement(
+  heuristic: number | null,
+  llm: number | null,
+): MergedAmountSuggestion {
+  return {
+    ...heuristicOnly(heuristic),
+    disagreement: heuristic !== null && llm !== null && heuristic !== llm,
+  };
 }
 
 function prefer<T>(

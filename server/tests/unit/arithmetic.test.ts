@@ -7,6 +7,8 @@ describe("checkReceiptArithmetic", () => {
     const result = checkReceiptArithmetic({
       subtotalCents: cents(10000),
       hstCents: cents(1300),
+      tipCents: null,
+      otherFeesCents: null,
       totalCents: cents(11300),
     });
     expect(result).toBe("reconciles");
@@ -16,6 +18,8 @@ describe("checkReceiptArithmetic", () => {
     const result = checkReceiptArithmetic({
       subtotalCents: cents(10000),
       hstCents: null,
+      tipCents: null,
+      otherFeesCents: null,
       totalCents: cents(10000),
     });
     expect(result).toBe("reconciles");
@@ -25,22 +29,70 @@ describe("checkReceiptArithmetic", () => {
     const result = checkReceiptArithmetic({
       subtotalCents: cents(10000),
       hstCents: cents(1300),
+      tipCents: null,
+      otherFeesCents: null,
       totalCents: cents(11400),
     });
     expect(result).toBe("mismatch");
   });
 
   /**
-   * The 2026-08-26 field reduction removed other_tax. A receipt whose paper
-   * carries a second tax line no longer reconciles, and that is the correct
-   * answer rather than a bug: the check has always been advisory, and the
-   * amount it cannot see is genuinely not in the record any more.
+   * The case that motivated bringing tip back (2026-08-28 product feedback):
+   * a restaurant receipt with a printed tip line now reconciles instead of
+   * showing the advisory amber warning the 2026-08-26 field reduction
+   * knowingly accepted.
    */
-  it("reports a mismatch when a tax the receipt no longer records is what closed the gap", () => {
+  it("reconciles a tipped restaurant receipt: subtotal + hst + tip = total", () => {
     const result = checkReceiptArithmetic({
       subtotalCents: cents(10000),
       hstCents: cents(1300),
-      totalCents: cents(11500),
+      tipCents: cents(2000),
+      otherFeesCents: null,
+      totalCents: cents(13300),
+    });
+    expect(result).toBe("reconciles");
+  });
+
+  it("treats a missing tip line as contributing nothing", () => {
+    const result = checkReceiptArithmetic({
+      subtotalCents: cents(10000),
+      hstCents: cents(1300),
+      tipCents: null,
+      otherFeesCents: null,
+      totalCents: cents(11300),
+    });
+    expect(result).toBe("reconciles");
+  });
+
+  it("reconciles other fees the same way tip does - a delivery fee or foreign tax line", () => {
+    const result = checkReceiptArithmetic({
+      subtotalCents: cents(10000),
+      hstCents: null,
+      tipCents: null,
+      otherFeesCents: cents(500),
+      totalCents: cents(10500),
+    });
+    expect(result).toBe("reconciles");
+  });
+
+  it("reconciles when subtotal, hst, tip and other fees all contribute", () => {
+    const result = checkReceiptArithmetic({
+      subtotalCents: cents(10000),
+      hstCents: cents(1300),
+      tipCents: cents(2000),
+      otherFeesCents: cents(500),
+      totalCents: cents(13800),
+    });
+    expect(result).toBe("reconciles");
+  });
+
+  it("reports a mismatch when tip or other fees do not close the gap", () => {
+    const result = checkReceiptArithmetic({
+      subtotalCents: cents(10000),
+      hstCents: cents(1300),
+      tipCents: cents(2000),
+      otherFeesCents: null,
+      totalCents: cents(13301),
     });
     expect(result).toBe("mismatch");
   });
@@ -49,6 +101,8 @@ describe("checkReceiptArithmetic", () => {
     const result = checkReceiptArithmetic({
       subtotalCents: null,
       hstCents: cents(1300),
+      tipCents: null,
+      otherFeesCents: null,
       totalCents: cents(11300),
     });
     expect(result).toBe("not-applicable");
@@ -58,6 +112,8 @@ describe("checkReceiptArithmetic", () => {
     const result = checkReceiptArithmetic({
       subtotalCents: cents(-10000),
       hstCents: cents(-1300),
+      tipCents: null,
+      otherFeesCents: null,
       totalCents: cents(-11300),
     });
     expect(result).toBe("reconciles");

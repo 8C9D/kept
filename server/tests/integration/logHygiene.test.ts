@@ -7,7 +7,10 @@ import { receipts } from "../../src/db/schema.js";
 import { llmParseResponseSchema } from "../../src/domain/llmSuggestions.js";
 import type { OcrFieldSuggestions } from "../../src/domain/ocrSuggestions.js";
 import { requestLog } from "../../src/observability/requestLog.js";
-import { parseReceiptText } from "../../src/parse/claudeReceiptParser.js";
+import {
+  DEFAULT_RECEIPT_PARSE_MODEL as RECEIPT_PARSE_MODEL,
+  parseReceiptText,
+} from "../../src/parse/claudeReceiptParser.js";
 import {
   MAX_PARSE_ATTEMPTS,
   createLlmParseSweep,
@@ -156,7 +159,11 @@ describe("the LLM parse sweep's failure log", () => {
     parse: (text: string) => Promise<OcrFieldSuggestions>,
   ): Promise<string> {
     captureConsole();
-    const sweep = createLlmParseSweep({ db: harness.db, parse });
+    const sweep = createLlmParseSweep({
+      db: harness.db,
+      model: RECEIPT_PARSE_MODEL,
+      parse,
+    });
     sweep.kick();
     // The drain never blocks its caller by contract (a capture must not wait
     // on the model), so its own output is the only thing to wait on.
@@ -184,6 +191,7 @@ describe("the LLM parse sweep's failure log", () => {
       totalCents: 11300,
       hstCents: 1300,
       subtotalCents: 10000,
+      tipCents: null,
       // The receipt row carries no tax number since 2026-08-26, but the
       // immutable suggestion record still can - and this is the jsonb the
       // failing UPDATE binds, so TAX_NUMBER really is in the statement
@@ -295,6 +303,7 @@ describe("the LLM parse sweep's failure log", () => {
       totalCents: "11300", // wrong type, so a field-level path is exercised too
       hstCents: 1300,
       subtotalCents: 10000,
+      tipCents: null,
       [inventedKey]: 11300,
     });
     // The leak asserted at its source first: this is the ZodError the
@@ -340,6 +349,7 @@ describe("the LLM parse sweep's failure log", () => {
 
     const result = await runLlmParseSweep({
       db: harness.db,
+      model: RECEIPT_PARSE_MODEL,
       parse: (text) => parseReceiptText(modelReplying(reply), text),
       failureCounts: new Map([[receiptId, MAX_PARSE_ATTEMPTS - 1]]),
     });
@@ -381,6 +391,7 @@ describe("the LLM parse sweep's failure log", () => {
     captureConsole();
     const sweep = createLlmParseSweep({
       db: brokenDb as unknown as Parameters<typeof createLlmParseSweep>[0]["db"],
+      model: RECEIPT_PARSE_MODEL,
       parse: async () => {
         throw new Error("never reached");
       },

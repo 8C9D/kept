@@ -8,7 +8,6 @@ import {
 } from "../domain/llmSuggestions.js";
 import { errorSummary, redactedMessage } from "../observability/errorSummary.js";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
-import { RECEIPT_PARSE_MODEL } from "./claudeReceiptParser.js";
 
 /**
  * The server-side LLM parse runs as a sweep over rows, not inline in the
@@ -66,6 +65,16 @@ export interface LlmParseSweepDependencies {
    * Anthropic key and no second implementation ever grows here.
    */
   parse: (ocrRawText: string) => Promise<OcrFieldSuggestions>;
+  /**
+   * The model id `parse` is bound to, recorded verbatim on every record
+   * this sweep writes. Required, not defaulted: the whole value of the
+   * stamp is that a stored record names the model that actually produced
+   * it, and a default here would let a configured model (2026-08-28's
+   * RECEIPT_PARSE_MODEL override) silently write records attributing its
+   * work to a different one - corrupting exactly the comparison
+   * `npm run parse-accuracy` exists to make.
+   */
+  model: string;
   /** Per-row progress, for the backfill script's console reporting. */
   onRow?: (row: SweepRow, outcome: SweepOutcome, error?: unknown) => void;
   /**
@@ -113,7 +122,7 @@ export async function runLlmParseSweep(
     try {
       const suggestions = await deps.parse(row.ocrRawText);
       const record: LlmParseSuccessRecord = {
-        model: RECEIPT_PARSE_MODEL,
+        model: deps.model,
         promptVersion: RECEIPT_PARSE_PROMPT_VERSION,
         requestedAt: new Date().toISOString(),
         suggestions,
@@ -141,7 +150,7 @@ export async function runLlmParseSweep(
         // the null-guard re-selecting (and re-billing) the row forever,
         // and parse-accuracy reads it as "the LLM produced nothing".
         const record: LlmParseFailureRecord = {
-          model: RECEIPT_PARSE_MODEL,
+          model: deps.model,
           promptVersion: RECEIPT_PARSE_PROMPT_VERSION,
           requestedAt: new Date().toISOString(),
           error: redactedMessage(error),

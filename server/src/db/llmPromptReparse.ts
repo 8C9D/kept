@@ -8,9 +8,14 @@ import {
 import { OCR_SUGGESTION_FIELDS } from "../domain/ocrSuggestions.js";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
 import {
-  RECEIPT_PARSE_MODEL,
+  resolveReceiptParseModel,
   parseReceiptText,
 } from "../parse/claudeReceiptParser.js";
+
+// Resolved once per run, and handed to every call, so a configured
+// RECEIPT_PARSE_MODEL cannot have one model do the work while another
+// name is recorded (2026-08-28).
+const receiptParseModel = resolveReceiptParseModel(process.env);
 
 /**
  * `npm run parse-llm-reparse [-- <runs>]` - a one-off check, not a test, of
@@ -78,7 +83,7 @@ async function reparse() {
 
   console.log(
     `Reparsing ${result.rows.length} confirmed receipt${result.rows.length === 1 ? "" : "s"} ` +
-      `x ${runs} run${runs === 1 ? "" : "s"} with ${RECEIPT_PARSE_MODEL} ` +
+      `x ${runs} run${runs === 1 ? "" : "s"} with ${receiptParseModel} ` +
       `under prompt v${RECEIPT_PARSE_PROMPT_VERSION} (read-only)\n`,
   );
 
@@ -97,7 +102,7 @@ async function reparse() {
     }
     const samples: OcrFieldSuggestions[] = [];
     for (let i = 0; i < runs; i += 1) {
-      samples.push(await parseReceiptText(client, row.ocr_raw_text));
+      samples.push(await parseReceiptText(client, row.ocr_raw_text, receiptParseModel));
     }
 
     const oldGen = oldRecord.promptVersion ?? 1;

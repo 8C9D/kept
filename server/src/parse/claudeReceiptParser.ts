@@ -11,12 +11,67 @@ import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
 /**
  * The LLM parse over a receipt's stored OCR text (ruled Aug 7, 2026).
  *
- * Haiku 4.5 deliberately: this is structured extraction over ~30 lines of
- * text, measured at roughly 0.12¢ per receipt on the first real run. The
- * accuracy table arbitrates whether a larger model is ever warranted - not
- * taste.
+ * **Moved to Sonnet 5, 2026-08-28, on the owner's field report, ahead of the
+ * evidence.** Haiku 4.5 was the original choice; the owner then reported real
+ * receipts coming back with wrong dates, wrong amounts, and wrong vendor
+ * names and asked for a smarter model. §7.3's own accuracy table cannot
+ * arbitrate that request - it says so in as many words: every number in it
+ * rests on 5 confirmed receipts from 2 vendors, "too few to distinguish a
+ * good model from a lucky one." So this change is not the accuracy table
+ * concluding Haiku is insufficient; it is an owner's field report acted on
+ * because waiting for enough data to be sure would mean shipping known-bad
+ * extractions in the meantime. The stored `model` stamp on every
+ * llm_suggestions record (LlmParseSuccessRecord.model) is what keeps
+ * Haiku-era and Sonnet-era rows distinguishable, and `npm run
+ * parse-accuracy` is what actually settles whether this was the right call,
+ * once real usage produces enough of them.
+ *
+ * **Cost, worked from the one measured run rather than guessed.** The first
+ * real Haiku run (Aug 7, 2026, docs/DECISIONS.md) parsed 6 receipts for
+ * $0.0069 total - 5,281 input and 332 output tokens - which checks out
+ * against Haiku 4.5's published per-token rate ($1/$5 per MTok in/out) to
+ * the tenth of a cent: 5281 x $1 + 332 x $5, per million, is $0.0069.
+ * Sonnet 5 prices at exactly double on both axes ($2/$10 per MTok), so
+ * holding the token counts fixed - the request text and schema are
+ * unchanged, only the model differs - the same 6 receipts would cost about
+ * $0.0138, or roughly $0.0023 (about a quarter of a cent) per receipt,
+ * versus about a tenth of a cent on Haiku. That is an order-of-magnitude
+ * statement, not a bill: it assumes Sonnet's replies run about the same
+ * length as Haiku's for this task, which is untested, and the per-token
+ * rates above come from this assistant's cached pricing reference (dated
+ * 2026-06-24) rather than a live lookup - confirm against Anthropic's
+ * current pricing before treating either number as exact.
  */
-export const RECEIPT_PARSE_MODEL = "claude-haiku-4-5";
+export const DEFAULT_RECEIPT_PARSE_MODEL = "claude-sonnet-5";
+
+/**
+ * The model id, overridable by `RECEIPT_PARSE_MODEL` (2026-08-28, the owner's
+ * ruling when the move to Sonnet 5 was made ahead of the accuracy
+ * evidence). The point is not configurability for its own sake - it is that
+ * this change was made on a field report rather than on the accuracy table,
+ * so the way to settle it is to be able to move the model against real
+ * production traffic without a deploy, and let `npm run parse-accuracy`
+ * compare the two populations afterwards.
+ *
+ * A pure function over an env bag rather than a `process.env` read, because
+ * `src/index.ts` is the only place this server reads the environment
+ * (server/CLAUDE.md); the scripts pass their own.
+ *
+ * Deliberately not validated against a list of known model ids: that list
+ * would need maintaining every time Anthropic ships one, and a stale
+ * allowlist would refuse the exact upgrade this variable exists to allow.
+ * A typo instead surfaces as parse failures with the bad id recorded in
+ * the failure record, and the entrypoint prints the resolved id at boot so
+ * it is visible before any receipt is billed against it.
+ */
+export function resolveReceiptParseModel(env: {
+  RECEIPT_PARSE_MODEL?: string | undefined;
+}): string {
+  const configured = env.RECEIPT_PARSE_MODEL?.trim();
+  return configured !== undefined && configured !== ""
+    ? configured
+    : DEFAULT_RECEIPT_PARSE_MODEL;
+}
 
 export class LlmParseError extends Error {
   constructor(message: string, options?: { cause: unknown }) {
@@ -35,9 +90,10 @@ export class LlmParseError extends Error {
  */
 export function buildParseRequest(
   ocrRawText: string,
+  model: string = DEFAULT_RECEIPT_PARSE_MODEL,
 ): Anthropic.MessageCreateParamsNonStreaming {
   return {
-    model: RECEIPT_PARSE_MODEL,
+    model,
     // The reply is one small JSON object; the ceiling is headroom, not a
     // target. A response that hits it is treated as a failed parse below.
     max_tokens: 1024,
@@ -62,8 +118,11 @@ export function buildParseRequest(
 export async function parseReceiptText(
   client: Anthropic,
   ocrRawText: string,
+  model: string = DEFAULT_RECEIPT_PARSE_MODEL,
 ): Promise<OcrFieldSuggestions> {
-  const response = await client.messages.create(buildParseRequest(ocrRawText));
+  const response = await client.messages.create(
+    buildParseRequest(ocrRawText, model),
+  );
 
   if (response.stop_reason !== "end_turn") {
     throw new LlmParseError(

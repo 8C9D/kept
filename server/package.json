@@ -10,6 +10,8 @@
     "db:verify-restore": "tsx src/db/verifyRestore.ts",
     "db:backup": "tsx src/db/backup.ts",
     "parse-accuracy": "tsx src/db/parseAccuracyReport.ts",
+    "action-report": "tsx src/db/actionReport.ts",
+    "events:prune": "tsx src/db/eventsPrune.ts",
     "preparse-llm-backfill": "touch .env.local",
     "parse-llm-backfill": "node --env-file=.env.local --import tsx src/db/llmBackfill.ts",
     "preparse-llm-probe": "touch .env.local",

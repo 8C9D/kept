@@ -2,10 +2,15 @@ import Anthropic from "@anthropic-ai/sdk";
 import { LOCAL_DEV_DATABASE_URL, createDb } from "./client.js";
 import { assertLocalDatabase } from "./databaseUrl.js";
 import {
-  RECEIPT_PARSE_MODEL,
+  resolveReceiptParseModel,
   parseReceiptText,
 } from "../parse/claudeReceiptParser.js";
 import { runLlmParseSweep } from "../parse/llmParseSweep.js";
+
+// Resolved once per run, and handed to every call, so a configured
+// RECEIPT_PARSE_MODEL cannot have one model do the work while another
+// name is recorded (2026-08-28).
+const receiptParseModel = resolveReceiptParseModel(process.env);
 
 /**
  * `npm run parse-llm-backfill` - run the LLM parse sweep once, from a
@@ -47,11 +52,12 @@ const { db, pool } = createDb(databaseUrl);
 const client = new Anthropic({ apiKey });
 
 async function backfill() {
-  console.log(`Backfilling llm_suggestions with ${RECEIPT_PARSE_MODEL}\n`);
+  console.log(`Backfilling llm_suggestions with ${receiptParseModel}\n`);
 
   const result = await runLlmParseSweep({
     db,
-    parse: (ocrRawText) => parseReceiptText(client, ocrRawText),
+    model: receiptParseModel,
+    parse: (ocrRawText) => parseReceiptText(client, ocrRawText, receiptParseModel),
     onRow(row, outcome, error) {
       const label = `${row.vendor ?? "no vendor"} · ${row.status} · ${row.id.slice(0, 8)}`;
       if (outcome === "failed") {

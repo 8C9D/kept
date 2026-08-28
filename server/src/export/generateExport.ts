@@ -133,6 +133,9 @@ export async function generateExport(
       subtotalCents:
         receipt.subtotalCents === null ? null : cents(receipt.subtotalCents),
       hstCents: receipt.hstCents === null ? null : cents(receipt.hstCents),
+      tipCents: receipt.tipCents === null ? null : cents(receipt.tipCents),
+      otherFeesCents:
+        receipt.otherFeesCents === null ? null : cents(receipt.otherFeesCents),
       totalCents: cents(receipt.totalCents),
       currency: receipt.currency,
       category: receipt.category,

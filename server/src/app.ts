@@ -13,6 +13,7 @@ import {
   requestLog,
 } from "./observability/requestLog.js";
 import { authRoutes } from "./routes/auth.js";
+import { eventRoutes } from "./routes/events.js";
 import { exportRoutes } from "./routes/exports.js";
 import { meRoutes } from "./routes/me.js";
 import { receiptRoutes } from "./routes/receipts.js";
@@ -213,6 +214,7 @@ export function createApp(deps: AppDependencies): Hono {
   app.route("/api/receipts", receiptRoutes(deps));
   app.route("/api/export", exportRoutes(deps));
   app.route("/api/me", meRoutes(deps));
+  app.route("/api/events", eventRoutes(deps));
 
   return app;
 }

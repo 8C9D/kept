@@ -82,6 +82,12 @@ export const RECEIPT_PARSE_JSON_SCHEMA = {
     totalCents: { type: ["integer", "null"] },
     hstCents: { type: ["integer", "null"] },
     subtotalCents: { type: ["integer", "null"] },
+    // Gratuity (prompt v4, 2026-08-28 - The owner asked for a second amount the
+    // heuristic already suggests, so the model gets asked for it too). Like
+    // every other amount here it is stored and scored but never served - the
+    // merge stays heuristic-only for money (mergedSuggestions.ts) - so this
+    // field exists for parse-accuracy, not for the confirm screen.
+    tipCents: { type: ["integer", "null"] },
   },
   required: [
     "vendor",
@@ -89,6 +95,7 @@ export const RECEIPT_PARSE_JSON_SCHEMA = {
     "totalCents",
     "hstCents",
     "subtotalCents",
+    "tipCents",
   ],
   additionalProperties: false,
 } as const;
@@ -108,8 +115,19 @@ export const RECEIPT_PARSE_JSON_SCHEMA = {
  * Version 3 stopped asking for the supplier's tax number at all
  * (2026-08-26): the field is gone from the receipt, so the request asks for
  * one fewer thing and its answers are not comparable with version 2's.
+ * Version 4 (2026-08-28, first-use product feedback) does two things at
+ * once: the system prompt gains the split-HST rule (component tax lines at
+ * different rates - 5% + 8% = 13% in Ontario - must be summed, unless a
+ * printed line already totals them), and the schema starts asking for
+ * tipCents, which prompts 1-3 never requested. A v3 record's hstCents was
+ * never asked to sum anything, so a receipt whose HST prints as two
+ * components would have scored a plausible-looking single-component read as
+ * a "match" under the old prompt; v3 and v4 hstCents are not the same
+ * question and are not comparable in parse-accuracy. tipCents is absent on
+ * every v1-v3 record for a stronger reason than "not yet run" - those
+ * prompts never asked for it, so there is nothing to backfill.
  */
-export const RECEIPT_PARSE_PROMPT_VERSION = 3;
+export const RECEIPT_PARSE_PROMPT_VERSION = 4;
 
 /**
  * Domain rules for the extraction, stated as facts about Canadian receipts
@@ -119,15 +137,23 @@ export const RECEIPT_PARSE_PROMPT_VERSION = 3;
  * The rules encode the wave-5 and Food Basics lessons: HST/GST are one CRA
  * program, and multiple date representations must be cross-checked. Vendor
  * guidance lives in the schema's vendor field description, scoped to that
- * field alone - see the prompt-version comment above for why.
+ * field alone - see the prompt-version comment above for why: it is a
+ * transcription instruction for the one field that transcribes, and a first
+ * draft that generalized it into the shared prompt made the model tidy the
+ * very thing it was meant to preserve. The split-HST rule below is the other
+ * kind - a fact about how Canadian receipts print tax, not an instruction
+ * scoped to reading one field literally - so it sits with the other domain
+ * facts here, immediately beside the GST-zero rule it must stay compatible
+ * with (2026-08-28, prompt v4).
  */
 export const RECEIPT_PARSE_SYSTEM_PROMPT = `You extract fields from the OCR text of a Canadian retail receipt.
 
 Rules:
 - Return null for anything not printed on the receipt. Never guess or fabricate a value.
 - All money amounts are integer cents: $45.54 is 4554.
-- totalCents is the final amount paid, hstCents is the HST or GST amount, subtotalCents is the pre-tax subtotal.
+- totalCents is the final amount paid, hstCents is the HST or GST amount, subtotalCents is the pre-tax subtotal, tipCents is the gratuity if one is printed.
 - HST and GST are the same federal program. If both are printed, the non-zero amount charged is the tax; an explicit $0.00 beside a charged sibling line is not.
+- HST is sometimes printed as two or more component lines at different rates that together make up the province's combined rate - 5% + 8% = 13% is the common Ontario case - and when that happens, hstCents is their sum, not any single component. But some receipts print both the component lines and a separate line that already totals them for the same tax: when a printed line's amount already equals the sum of the component lines beneath it, that printed line is hstCents, and the components must not be added to it again - summing every tax-labelled line you see double-counts. A component printed as $0.00 still contributes nothing to the sum either way, so this rule and the GST-zero rule above never conflict.
 - purchasedAt is the purchase date as yyyy-mm-dd. Receipts often print a date more than once in different formats; cross-check them against each other (a printed time can disambiguate), and prefer an unambiguous representation over an ambiguous one. A purchase date is in the recent past, never in the future.
 - The text comes from OCR of a photograph: words may be split mid-word, columns may be misaligned, and characters may be misread. Read through such noise, but do not invent what is not there.`;
 
@@ -169,6 +195,12 @@ export const llmParseResponseSchema = z.strictObject({
   totalCents: parsedCents,
   hstCents: parsedCents,
   subtotalCents: parsedCents,
+  // Gratuity (prompt v4, 2026-08-28): asked for like any other amount, and
+  // validated the same way. Stored and scored, never served - the merge
+  // stays heuristic-only for money (mergedSuggestions.ts) - but that is a
+  // fact about mergeSuggestions, not about what this path returns, so it is
+  // no longer stamped here as a placeholder.
+  tipCents: parsedCents,
 });
 
 export function validateLlmParseResponse(value: unknown): OcrFieldSuggestions {
@@ -178,7 +210,10 @@ export function validateLlmParseResponse(value: unknown): OcrFieldSuggestions {
     // never has to tell "key absent" from "parser found nothing". Since
     // version 3 of the prompt this path is not asked for a tax number, so
     // null is the literal truth about what it produced - not a default
-    // standing in for an answer.
+    // standing in for an answer. tipCents needs no equivalent stamp any
+    // more (contrast the previous pass, which stamped it null here because
+    // v3 never asked): the spread above already carries the model's actual
+    // answer now that v4's schema requests one.
     vendorTaxNumber: null,
   };
 }

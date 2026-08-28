@@ -12,6 +12,7 @@ import {
   exportJobs,
   receiptImages,
   receipts,
+  userEvents,
   users,
 } from "../../src/db/schema.js";
 import type { LlmParseSweepHandle } from "../../src/parse/llmParseSweep.js";
@@ -105,6 +106,7 @@ export function createTestHarness(
       await db.delete(receiptImages);
       await db.delete(receipts);
       await db.delete(exportJobs);
+      await db.delete(userEvents);
       await db.delete(users);
       storage.objects.clear();
       if (revoker !== undefined) {

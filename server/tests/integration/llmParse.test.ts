@@ -6,7 +6,7 @@ import {
   type LlmSuggestionRecord,
 } from "../../src/domain/llmSuggestions.js";
 import type { OcrFieldSuggestions } from "../../src/domain/ocrSuggestions.js";
-import { RECEIPT_PARSE_MODEL } from "../../src/parse/claudeReceiptParser.js";
+import { DEFAULT_RECEIPT_PARSE_MODEL as RECEIPT_PARSE_MODEL } from "../../src/parse/claudeReceiptParser.js";
 import {
   MAX_PARSE_ATTEMPTS,
   createLlmParseSweep,
@@ -31,6 +31,7 @@ let currentParse: (text: string) => Promise<OcrFieldSuggestions> = () =>
   Promise.reject(new Error("test did not configure a parse"));
 
 const sweep = createLlmParseSweep({
+  model: RECEIPT_PARSE_MODEL,
   get db() {
     return harness.db;
   },
@@ -62,6 +63,12 @@ function llmValues(
     totalCents: 4553,
     hstCents: 204,
     subtotalCents: 4348,
+    // Left null in this fixture: a stated "no tip line on this receipt",
+    // not a claim that the LLM path never answers one. Since prompt v4
+    // (2026-08-28) it is asked for like any other amount - stored and
+    // scored, never served (mergedSuggestions.ts stays heuristic-only for
+    // money either way, which is what the sweep tests below actually pin).
+    tipCents: null,
     vendorTaxNumber: "R105216170",
     ...overrides,
   };
@@ -123,6 +130,7 @@ describe("runLlmParseSweep", () => {
 
     const result = await runLlmParseSweep({
       db: harness.db,
+      model: RECEIPT_PARSE_MODEL,
       parse: currentParse,
     });
 
@@ -150,10 +158,10 @@ describe("runLlmParseSweep", () => {
       parseCalls.push(text);
       return Promise.resolve(llmValues());
     };
-    await runLlmParseSweep({ db: harness.db, parse });
+    await runLlmParseSweep({ db: harness.db, model: RECEIPT_PARSE_MODEL, parse });
     expect(parseCalls).toHaveLength(1);
 
-    const second = await runLlmParseSweep({ db: harness.db, parse });
+    const second = await runLlmParseSweep({ db: harness.db, model: RECEIPT_PARSE_MODEL, parse });
     expect(second).toEqual({
       attempted: 0,
       written: 0,
@@ -181,6 +189,7 @@ describe("runLlmParseSweep", () => {
 
     const runA = runLlmParseSweep({
       db: harness.db,
+      model: RECEIPT_PARSE_MODEL,
       parse: async () => {
         aSelected();
         await gateA;
@@ -189,6 +198,7 @@ describe("runLlmParseSweep", () => {
     });
     const runB = runLlmParseSweep({
       db: harness.db,
+      model: RECEIPT_PARSE_MODEL,
       parse: async () => {
         bSelected();
         await gateB;
@@ -220,11 +230,13 @@ describe("runLlmParseSweep", () => {
         totalCents: 11300,
         hstCents: null,
         subtotalCents: null,
+        tipCents: null,
         vendorTaxNumber: null,
       },
     });
     const failureCounts = new Map<string, number>();
     const deps = {
+      model: RECEIPT_PARSE_MODEL,
       db: harness.db,
       parse: () => Promise.reject(new Error("schema validation failed")),
       failureCounts,
@@ -274,6 +286,7 @@ describe("runLlmParseSweep", () => {
   it("does not cap attempts when no failure counter is supplied - the backfill's single pass", async () => {
     const id = await insertReceipt({ ocrRawText: "still failing" });
     const deps = {
+      model: RECEIPT_PARSE_MODEL,
       db: harness.db,
       parse: () => Promise.reject(new Error("boom")),
     };
@@ -292,6 +305,7 @@ describe("runLlmParseSweep", () => {
 
     const result = await runLlmParseSweep({
       db: harness.db,
+      model: RECEIPT_PARSE_MODEL,
       parse: (text) =>
         text === "FAIL"
           ? Promise.reject(new Error("model unreachable"))
@@ -396,10 +410,12 @@ describe("the capture routes kick the sweep", () => {
       source: "heuristic",
     });
     // The heuristic found no HST or subtotal; the LLM's amounts are stored
-    // but never served - the fields come back absent.
+    // but never served - the fields come back absent. Not a disagreement
+    // either (§7.3): the heuristic side has nothing to disagree with.
     expect(detailBody.suggestions.hstCents).toEqual({
       value: null,
       source: null,
+      disagreement: false,
     });
     expect(detailBody.suggestions.subtotalCents).toEqual({
       value: null,

@@ -3,7 +3,13 @@ import { eq } from "drizzle-orm";
 import type { AppleTokenRevoker } from "../auth/appleTokenRevoker.js";
 import type { SessionTokens } from "../auth/session.js";
 import type { Db } from "../db/client.js";
-import { exportJobs, receiptImages, receipts, users } from "../db/schema.js";
+import {
+  exportJobs,
+  receiptImages,
+  receipts,
+  userEvents,
+  users,
+} from "../db/schema.js";
 import { ApiError } from "../http/errors.js";
 import { deleteMeSchema, updateMeSchema } from "../http/schemas.js";
 import {
@@ -120,6 +126,12 @@ export function meRoutes(deps: MeRouteDependencies): Hono<AuthedEnv> {
    *      the person the very thing the guideline grants them.
    *   2. Delete every row, in one transaction, children first. Either the
    *      account is gone or nothing moved; there is no half-deleted account.
+   *      `user_events` (added 2026-08-28) is a child of `users` on exactly
+   *      this same term even though it has no foreign key to `receipts` -
+   *      it is deleted here, before `users`, because leaving a behavioural
+   *      log behind would be a straightforward broken promise to the person
+   *      who asked to be deleted, and the kind of thing App Store review
+   *      tests.
    *   3. Delete the objects, after the commit and best-effort. Storage has
    *      no transaction to join, so one of the two orders has to lose. This
    *      way the worst outcome is unreferenced bytes whose keys begin with a
@@ -166,6 +178,10 @@ export function meRoutes(deps: MeRouteDependencies): Hono<AuthedEnv> {
       await tx.delete(receiptImages).where(eq(receiptImages.userId, userId));
       await tx.delete(receipts).where(eq(receipts.userId, userId));
       await tx.delete(exportJobs).where(eq(exportJobs.userId, userId));
+      // No object storage to clean up for these rows - user_events never
+      // references anything outside the database (schema.ts: receipt_id is
+      // a weak reference the log itself never resolves).
+      await tx.delete(userEvents).where(eq(userEvents.userId, userId));
       const deletedUsers = await tx
         .delete(users)
         .where(eq(users.id, userId))

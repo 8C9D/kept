@@ -29,6 +29,12 @@ export type FieldVerdict =
  * and old clients still report one - but the 2026-08-26 field reduction took
  * away the confirmed column it was scored against, and a measurement with no
  * ground truth is not a measurement.
+ *
+ * `tipCents` (2026-08-28) is scored alongside the other amounts: it has a
+ * heuristic suggestion field and a confirmed column to measure it against,
+ * on the same terms as total/hst/subtotal. `otherFeesCents` has neither a
+ * suggestion field (ocrSuggestions.ts) nor a place in this list - there is
+ * nothing suggested to compare against what was confirmed.
  */
 export const SCORED_SUGGESTION_FIELDS = [
   "vendor",
@@ -36,6 +42,7 @@ export const SCORED_SUGGESTION_FIELDS = [
   "totalCents",
   "hstCents",
   "subtotalCents",
+  "tipCents",
 ] as const satisfies readonly (keyof OcrFieldSuggestions)[];
 
 export type ScoredField = (typeof SCORED_SUGGESTION_FIELDS)[number];

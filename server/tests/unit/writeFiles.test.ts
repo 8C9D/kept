@@ -5,7 +5,7 @@ import type { ExportRow } from "../../src/export/exportRows.js";
 import { writeCsv, writeJson, writeXlsx } from "../../src/export/writeFiles.js";
 
 const HEADER =
-  "receipt_id,date,vendor,subtotal,hst,total,currency,category,payment_method,whose,image_filename,notes";
+  "receipt_id,date,vendor,subtotal,hst,tip,other_fees,total,currency,category,payment_method,whose,image_filename,notes";
 
 function row(overrides: Partial<ExportRow> = {}): ExportRow {
   return {
@@ -14,6 +14,8 @@ function row(overrides: Partial<ExportRow> = {}): ExportRow {
     vendor: "Staples",
     subtotalCents: cents(10000),
     hstCents: cents(1300),
+    tipCents: cents(2000),
+    otherFeesCents: cents(500),
     totalCents: cents(11300),
     currency: "CAD",
     category: "office supplies",
@@ -31,7 +33,7 @@ describe("writeCsv", () => {
     const lines = csv.trimEnd().split("\r\n");
     expect(lines[0]).toBe(HEADER);
     expect(lines[1]).toBe(
-      "3f9a1c2e-8b4d-4f6a-9c0d-1e2f3a4b5c6d,2026-01-14,Staples,100.00,13.00,113.00,CAD,office supplies,visa,Synthetic User A,images/2026/01/2026-01-14_Staples_3f9a1c2e.jpg,",
+      "3f9a1c2e-8b4d-4f6a-9c0d-1e2f3a4b5c6d,2026-01-14,Staples,100.00,13.00,20.00,5.00,113.00,CAD,office supplies,visa,Synthetic User A,images/2026/01/2026-01-14_Staples_3f9a1c2e.jpg,",
     );
   });
 
@@ -44,10 +46,17 @@ describe("writeCsv", () => {
   });
 
   it("renders null money as an empty cell, not zero", () => {
-    const csv = writeCsv([row({ subtotalCents: null, hstCents: null })]);
+    const csv = writeCsv([
+      row({
+        subtotalCents: null,
+        hstCents: null,
+        tipCents: null,
+        otherFeesCents: null,
+      }),
+    ]);
     const dataLine = csv.trimEnd().split("\r\n")[1];
-    // subtotal and hst empty; total present.
-    expect(dataLine).toContain(",,,113.00,");
+    // subtotal, hst, tip and other_fees empty; total present.
+    expect(dataLine).toContain(",,,,,113.00,");
   });
 });
 
@@ -63,6 +72,8 @@ describe("writeJson", () => {
       vendor: "Staples",
       subtotal: "100.00",
       hst: "13.00",
+      tip: "20.00",
+      other_fees: "5.00",
       total: "113.00",
       currency: "CAD",
       category: "office supplies",
@@ -139,9 +150,9 @@ describe("formula-shaped fields stay byte-faithful", () => {
     ]);
     const fields = (csv.trimEnd().split("\r\n")[1] ?? "").split(",");
     expect(fields[2]).toBe("=1+1");
-    expect(fields[7]).toBe("+1+1");
-    expect(fields[8]).toBe("-Rogers Communications");
-    expect(fields[11]).toBe("@SUM(A1:A2)");
+    expect(fields[9]).toBe("+1+1");
+    expect(fields[10]).toBe("-Rogers Communications");
+    expect(fields[13]).toBe("@SUM(A1:A2)");
   });
 
   it("stores the same field in the XLSX as a string cell, never a formula", async () => {
@@ -174,7 +185,7 @@ describe("formula-shaped fields stay byte-faithful", () => {
 });
 
 describe("the XLSX money columns", () => {
-  it("formats subtotal, hst and total as two-decimal numbers and nothing else", async () => {
+  it("formats subtotal, hst, tip, other_fees and total as two-decimal numbers and nothing else", async () => {
     const bytes = await writeXlsx([row()]);
     const workbook = new ExcelJS.Workbook();
     type LoadInput = Parameters<typeof workbook.xlsx.load>[0];
@@ -187,8 +198,8 @@ describe("the XLSX money columns", () => {
     const formatted = HEADER.split(",")
       .map((_, index) => index + 1)
       .filter((column) => dataRow.getCell(column).numFmt === "0.00");
-    // Columns 4, 5, 6: subtotal, hst, total.
-    expect(formatted).toEqual([4, 5, 6]);
-    expect(dataRow.getCell(6).value).toBe(113);
+    // Columns 4, 5, 6, 7, 8: subtotal, hst, tip, other_fees, total.
+    expect(formatted).toEqual([4, 5, 6, 7, 8]);
+    expect(dataRow.getCell(8).value).toBe(113);
   });
 });

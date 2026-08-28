@@ -84,6 +84,8 @@ describe("the export pipeline", () => {
       vendor: "Café Dépôt",
       subtotalCents: 10000,
       hstCents: 1300,
+      tipCents: 2000,
+      otherFeesCents: 500,
       totalCents: 11300,
       category: "office supplies",
       paymentMethod: "visa",
@@ -152,16 +154,18 @@ describe("the export pipeline", () => {
     const csv = zip.readAsText("receipts-2026.csv");
     const lines = csv.trimEnd().split("\r\n");
     expect(lines[0]).toBe(
-      "receipt_id,date,vendor,subtotal,hst,total,currency,category,payment_method,whose,image_filename,notes",
+      "receipt_id,date,vendor,subtotal,hst,tip,other_fees,total,currency,category,payment_method,whose,image_filename,notes",
     );
     expect(lines).toHaveLength(3); // header + 2 rows
     const includedLine = lines.find((line) => line.startsWith(included.id));
     expect(includedLine).toBeDefined();
     expect(includedLine).toContain("Café Dépôt");
-    expect(includedLine).toContain("100.00,13.00,113.00,CAD");
+    expect(includedLine).toContain("100.00,13.00,20.00,5.00,113.00,CAD");
     expect(includedLine).toContain("visa,Synthetic User A,images/2026/01/");
     const nullLine = lines.find((line) => line.startsWith(nullFields.id));
-    expect(nullLine).toContain(",,,42.00,CAD");
+    // vendor, subtotal, hst empty; tip and other_fees also empty (never set
+    // on this fixture) - five empty cells before the total.
+    expect(nullLine).toContain(",,,,,42.00,CAD");
     expect(nullLine).toContain("unknown-vendor");
     expect(csv).not.toContain("Pending Vendor");
     expect(csv).not.toContain("Deleted Vendor");
@@ -184,6 +188,8 @@ describe("the export pipeline", () => {
       vendor: "Café Dépôt",
       subtotal: "100.00",
       hst: "13.00",
+      tip: "20.00",
+      other_fees: "5.00",
       total: "113.00",
       currency: "CAD",
       category: "office supplies",
@@ -196,6 +202,8 @@ describe("the export pipeline", () => {
       vendor: null,
       subtotal: null,
       hst: null,
+      tip: null,
+      other_fees: null,
       total: "42.00",
     });
     // The retired columns are gone from every encoding, not blanked.
@@ -224,8 +232,10 @@ describe("the export pipeline", () => {
     const headerValues = (sheet?.getRow(1).values as unknown[]).slice(1);
     expect(headerValues).toEqual(lines[0]?.split(","));
     const firstDataRow = sheet?.getRow(2);
-    expect(firstDataRow?.getCell(6).value).toBe(113); // total, numeric
-    expect(firstDataRow?.getCell(6).numFmt).toBe("0.00");
+    expect(firstDataRow?.getCell(8).value).toBe(113); // total, numeric
+    expect(firstDataRow?.getCell(8).numFmt).toBe("0.00");
+    expect(firstDataRow?.getCell(6).value).toBe(20); // tip, numeric
+    expect(firstDataRow?.getCell(7).value).toBe(5); // other_fees, numeric
 
     // Every image_filename cell resolves to a real entry in images/, and
     // the bytes are the ones uploaded for that receipt.

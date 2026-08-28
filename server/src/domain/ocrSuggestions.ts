@@ -16,6 +16,18 @@ export interface OcrFieldSuggestions {
   totalCents: number | null;
   hstCents: number | null;
   subtotalCents: number | null;
+  /**
+   * Gratuity (2026-08-28). An amount like every other money field here, so
+   * it follows the same heuristic-only merge rule (mergedSuggestions.ts) -
+   * no exception for tip just because it arrived later.
+   *
+   * `other_fees` gets no suggestion field, deliberately: it is a residual
+   * category with no consistent printed label ("delivery fee", "service
+   * charge", "bottle deposit", a foreign tax line all land there), so there
+   * is nothing for a heuristic to pattern-match and nothing an accuracy
+   * measurement could score against.
+   */
+  tipCents: number | null;
   vendorTaxNumber: string | null;
 }
 
@@ -25,5 +37,6 @@ export const OCR_SUGGESTION_FIELDS = [
   "totalCents",
   "hstCents",
   "subtotalCents",
+  "tipCents",
   "vendorTaxNumber",
 ] as const satisfies readonly (keyof OcrFieldSuggestions)[];

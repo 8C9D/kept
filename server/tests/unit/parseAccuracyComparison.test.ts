@@ -15,6 +15,7 @@ function suggestions(
     totalCents: 4554,
     hstCents: 89,
     subtotalCents: 4465,
+    tipCents: 500,
     vendorTaxNumber: "R105216170",
     ...overrides,
   };
