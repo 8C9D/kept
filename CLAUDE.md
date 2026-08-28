@@ -20,12 +20,13 @@ The Fly machine behind it is described by `server/fly.toml`; what is *not* in th
 Images never transit the API: the client PUTs straight to object storage through a presigned URL.
 `docs/Runbook.md` is the operations authority - deploy, migrate, roll back, back up, restore.
 
-## Status, as of 2026-08-27
+## Status, as of 2026-08-28
 
 - The shipped build is **1.0 (1)** - on TestFlight, on the owner's and the second user's phones. App Review rejected it 2026-08-22 under Guideline 2.1; the verbatim rejection, the seven-item reply, the Notes-field text and the recording script are `docs/app-review/2026-08-25/`.
 - **1.0 (2) was uploaded to App Store Connect 2026-08-26** and carries the in-app account deletion Apple asked for. It finished processing, joined the Internal Testers group and is offered to both phones as an ordinary TestFlight update. It is a TestFlight upload only - **nothing has been submitted to App Review**. How a build is versioned, archived, signed and uploaded, and the traps that make a broken one look shippable, are in `ios/CLAUDE.md`.
 - **Deployed:** everything through the 2026-08-26 field reduction - `fly deploy` to machine v6, migration 0005 run against production, the Pages redeploy in the same session. Production is real and in use: two users, 53 receipts as of 2026-08-27.
-- **The blocking owner action:** The owner's demo recording on a physical device; then the Resolution Center reply and resubmission. Approval, the unlisted conversion and pressing Release all sit behind it. The Sign in with Apple `.p8` is to be minted **before** the resubmission, so account deletion revokes when the reviewer tests it. Record: `docs/DECISIONS.md` 2026-08-26.
+- **Built and locally verified 2026-08-28, not deployed:** a second round of product feedback - `tip_cents`/`other_fees_cents` (partially reversing the 2026-08-26 field reduction), an iOS export screen, the parser moved from Haiku 4.5 to Sonnet 5, split-HST parsing in both parsers, new `user_events` behavioural telemetry, three web-client gap fixes. Migrations 0006 and 0007 sit on top of 0005, unrun against production. Record: `docs/DECISIONS.md` 2026-08-28; verification: `docs/gates/product-feedback-2026-08-28.md`.
+- **The blocking owner action:** The owner's demo recording on a physical device; then the Resolution Center reply and resubmission. Approval, the unlisted conversion and pressing Release all sit behind it. The Sign in with Apple `.p8` is to be minted **before** the resubmission, so account deletion revokes when the reviewer tests it. Today's build adds one more item to this same queue, **decided 2026-08-28 and deliberately deferred behind the items above**: the App Store Connect privacy label must be refiled to match `PrivacyInfo.xcprivacy`'s new Product Interaction entry. It is a gate, not a preference - **no build carrying that manifest entry may be submitted to App Review until the label declares it too**, because a manifest and a label that disagree is what a reviewer checks. Record: `docs/DECISIONS.md` 2026-08-26.
 - **Two owner-held keys are still unminted**, and both are traps rather than status: the R2 `kept-backups` token, without which the nightly backup agent refuses every night; and the Sign in with Apple `.p8` with its three `APPLE_*` secrets, without which account deletion still deletes but revokes nothing (Runbook §0). A verified manual backup was taken 2026-08-27 - dump restored and row-counted, all 53 images hash-checked, copies on the laptop (`~/.kept/backups/`) and in `kept-backups` via wrangler - so the exposure until the token exists is writes since that backup, not everything beyond Neon's 6-hour PITR window.
 - What was decided, what deployed when, and what stays deferred on which trigger live in `docs/DECISIONS.md` (newest-first), with the per-wave gate reports in `docs/gates/` and the hardening ledgers in `PROD-READINESS*.md`. This section does not restate them.
 
@@ -42,6 +43,7 @@ Every design decision is subordinate to this sentence.
 ## The three constraints that do not move
 
 1. HST is its own field, never folded into the total.
+   (Strengthened 2026-08-28: tip and other fees got their own fields specifically so they have somewhere to go that isn't HST.)
 2. No OCR value saves without a human confirming it.
    Extracted fields are suggestions in an editable form.
 3. Full per-user isolation.

@@ -37,6 +37,7 @@ A missing one stops the process at startup with the name in the message, rather 
 | `SESSION_JWT_SECRET` | yes | Signs session tokens. At least 32 characters in production |
 | `APPLE_CLIENT_ID` | yes | `com.arthurzhang.kept` |
 | `ANTHROPIC_API_KEY` | yes in production | The server-side LLM parse sweep (spec §7.3). Unset in development the sweep disables itself, stated at boot; unset in production the server refuses to start, because the alternative is silent feature loss |
+| `RECEIPT_PARSE_MODEL` | no | Overrides the model the parse sweep uses; defaults to `claude-sonnet-5`. Added 2026-08-28, when the move off Haiku 4.5 was made on the owner's field report rather than on the accuracy table, so the model can be moved against real traffic without a deploy and `npm run parse-accuracy` can compare the two populations afterwards. Every stored `llm_suggestions` record stamps the model that actually produced it, so changing this never rewrites history. Empty or whitespace falls back to the default; the resolved id is printed at boot, which is where a typo shows up |
 | `STORAGE_ENDPOINT` | yes in production | R2 S3 API endpoint, `https://<account-id>.r2.cloudflarestorage.com` |
 | `STORAGE_BUCKET` | yes in production | `kept` |
 | `STORAGE_ACCESS_KEY_ID` | yes in production | R2 API token access key |
