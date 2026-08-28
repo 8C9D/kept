@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeptApi } from "../api.js";
 import { ApiError, type ExportRequest } from "../api.js";
+import { logEvent } from "../events.js";
 import type { ExportJob, Profile } from "../types.js";
 
 /**
@@ -57,6 +58,13 @@ export function ExportView({ api }: { api: KeptApi }) {
           pollTimer.current = setTimeout(() => void poll(jobId), POLL_INTERVAL_MS);
         } else {
           setActiveJobId(null);
+          // A job can fail after it was accepted (generation itself errors
+          // out), distinct from `start` below's request-time failure - both
+          // are export_failed, the vocabulary has no separate name for
+          // "failed later."
+          if (job.status === "failed") {
+            logEvent({ action: "export_failed" });
+          }
           await refreshJobs();
         }
       } catch (caught) {
@@ -69,6 +77,7 @@ export function ExportView({ api }: { api: KeptApi }) {
 
   async function start(request: ExportRequest) {
     setError(null);
+    logEvent({ action: "export_requested" });
     try {
       const job = await api.startExport(request);
       setJobs((current) => [job, ...current]);
@@ -80,6 +89,7 @@ export function ExportView({ api }: { api: KeptApi }) {
         await refreshJobs();
         return;
       }
+      logEvent({ action: "export_failed" });
       setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
@@ -115,6 +125,7 @@ export function ExportView({ api }: { api: KeptApi }) {
             <span className="muted">year end: {fiscalYearEnd}</span>
           )}
           <button
+            className="primary"
             disabled={activeJobId !== null}
             onClick={() => void start({ fiscalYearEndingIn: fiscalYear })}
           >
@@ -139,6 +150,7 @@ export function ExportView({ api }: { api: KeptApi }) {
             />
           </label>
           <button
+            className="primary"
             disabled={activeJobId !== null || rangeStart === "" || rangeEnd === ""}
             onClick={() =>
               void start({ periodStart: rangeStart, periodEnd: rangeEnd })
@@ -179,7 +191,18 @@ export function ExportView({ api }: { api: KeptApi }) {
               </td>
               <td>
                 {job.downloadUrl !== null && (
-                  <a href={job.downloadUrl}>Download zip</a>
+                  <a
+                    className="download-link"
+                    href={job.downloadUrl}
+                    // The click itself, not a completed transfer - a plain
+                    // navigating anchor gives this component no signal once
+                    // the browser takes over the download, and no
+                    // preventDefault here (rule 1: never block a user
+                    // action on telemetry).
+                    onClick={() => logEvent({ action: "export_downloaded" })}
+                  >
+                    Download zip
+                  </a>
                 )}
               </td>
             </tr>

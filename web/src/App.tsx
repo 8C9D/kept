@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { KeptApi } from "./api.js";
+import { configureEventLogging, logEvent } from "./events.js";
 import { useReceiptOptions } from "./options.js";
 import { clearToken, storeToken, storedToken } from "./session.js";
 import { ConfirmQueue } from "./views/ConfirmQueue.js";
@@ -37,12 +38,27 @@ export function App() {
   const [deletionError, setDeletionError] = useState<string | null>(null);
 
   const signOut = useCallback(() => {
+    // Logged before the queue tears down, not after (events.ts's own
+    // ordering note): configureEventLogging(null) below flushes and clears
+    // the active queue, so this event has to land in it first or it is
+    // dropped with nothing sent.
+    logEvent({ action: "sign_out" });
+    configureEventLogging(null);
     clearToken();
     setToken(null);
     setView({ name: "table" });
     setDeletion("idle");
     setDeletionError(null);
   }, []);
+
+  // Safety net for the case neither `onSignedIn` nor `signOut` covers: a
+  // page load with a session already in storage. Idempotent
+  // (configureEventLogging no-ops on the token it is already configured
+  // for), so this runs harmlessly alongside the explicit calls those two
+  // make for their own ordering reasons.
+  useEffect(() => {
+    configureEventLogging(token);
+  }, [token]);
 
   const api = useMemo(
     () => (token === null ? null : new KeptApi(token, signOut)),
@@ -61,6 +77,11 @@ export function App() {
       <SignIn
         onSignedIn={(newToken) => {
           storeToken(newToken);
+          // Configured here, before logging - not left to the useEffect
+          // below - so the very first event of a session has a queue to
+          // land in rather than being dropped while nothing is active yet.
+          configureEventLogging(newToken);
+          logEvent({ action: "sign_in" });
           setToken(newToken);
         }}
       />
@@ -114,26 +135,28 @@ export function App() {
             Export
           </button>
         </nav>
-        <button className="signout" onClick={signOut}>
-          Sign out
-        </button>
-        {deletion === "idle" ? (
-          <button className="danger" onClick={() => setDeletion("confirming")}>
-            Delete account…
+        <div className="topbar-actions">
+          <button className="signout" onClick={signOut}>
+            Sign out
           </button>
-        ) : deletion === "confirming" ? (
-          <span className="delete-confirm">
-            Permanently delete your account and every receipt in it, images
-            included? This cannot be undone - export first if you need the
-            records.
-            <button className="danger" onClick={() => void deleteAccount()}>
-              Delete account
+          {deletion === "idle" ? (
+            <button className="danger" onClick={() => setDeletion("confirming")}>
+              Delete account…
             </button>
-            <button onClick={() => setDeletion("idle")}>Keep my account</button>
-          </span>
-        ) : (
-          <span className="muted">Deleting your account…</span>
-        )}
+          ) : deletion === "confirming" ? (
+            <span className="delete-confirm">
+              Permanently delete your account and every receipt in it, images
+              included? This cannot be undone - export first if you need the
+              records.
+              <button className="danger" onClick={() => void deleteAccount()}>
+                Delete account
+              </button>
+              <button onClick={() => setDeletion("idle")}>Keep my account</button>
+            </span>
+          ) : (
+            <span className="muted">Deleting your account…</span>
+          )}
+        </div>
       </header>
       {deletionError !== null && (
         <p className="error" role="alert">

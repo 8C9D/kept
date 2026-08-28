@@ -28,6 +28,7 @@ describe("KeptApi.receiptOptions", () => {
     const body: ReceiptOptions = {
       categories: ["office supplies", "meals"],
       paymentMethods: ["visa"],
+      vendors: ["Food Basics", "Staples"],
     };
     const { calls } = stubFetch(
       new Response(JSON.stringify(body), { status: 200 }),
@@ -53,43 +54,98 @@ describe("introducesNewValue - when a save makes the lists stale", () => {
   const options: ReceiptOptions = {
     categories: ["meals"],
     paymentMethods: ["visa"],
+    vendors: ["Food Basics"],
   };
 
   it("is false when the saved values are already offered", () => {
     expect(
-      introducesNewValue(options, { category: "meals", paymentMethod: "visa" }),
+      introducesNewValue(options, {
+        category: "meals",
+        paymentMethod: "visa",
+        vendor: "Food Basics",
+      }),
     ).toBe(false);
   });
 
-  it("is false when the save cleared both fields", () => {
+  it("is false when the save cleared all three fields", () => {
     expect(
-      introducesNewValue(options, { category: null, paymentMethod: null }),
+      introducesNewValue(options, {
+        category: null,
+        paymentMethod: null,
+        vendor: null,
+      }),
     ).toBe(false);
   });
 
-  it("is true for a value neither list carries", () => {
+  it("is true for a value none of the three lists carries", () => {
     expect(
-      introducesNewValue(options, { category: "parking", paymentMethod: "visa" }),
+      introducesNewValue(options, {
+        category: "parking",
+        paymentMethod: "visa",
+        vendor: "Food Basics",
+      }),
     ).toBe(true);
     expect(
-      introducesNewValue(options, { category: "meals", paymentMethod: "amex" }),
+      introducesNewValue(options, {
+        category: "meals",
+        paymentMethod: "amex",
+        vendor: "Food Basics",
+      }),
+    ).toBe(true);
+  });
+
+  it("is true for a vendor the list does not carry", () => {
+    expect(
+      introducesNewValue(options, {
+        category: "meals",
+        paymentMethod: "visa",
+        vendor: "Staples",
+      }),
     ).toBe(true);
   });
 
   it("compares exactly - free text is the user's own, never normalized", () => {
     // The 2026-08-26 ruling on a doubled-space category: "meals " is a
-    // different value from "meals", and the server's filters agree.
+    // different value from "meals", and the server's filters agree. Vendor
+    // is the same free-text rule (2026-08-28: reusable "the way categories
+    // already are", not a taxonomy either).
     expect(
-      introducesNewValue(options, { category: "meals ", paymentMethod: null }),
+      introducesNewValue(options, {
+        category: "meals ",
+        paymentMethod: null,
+        vendor: null,
+      }),
     ).toBe(true);
     expect(
-      introducesNewValue(options, { category: "Meals", paymentMethod: null }),
+      introducesNewValue(options, {
+        category: "Meals",
+        paymentMethod: null,
+        vendor: null,
+      }),
+    ).toBe(true);
+    expect(
+      introducesNewValue(options, {
+        category: null,
+        paymentMethod: null,
+        vendor: "Food Basics ",
+      }),
     ).toBe(true);
   });
 
   it("treats any value as new before the first fetch answers", () => {
     expect(
-      introducesNewValue(NO_OPTIONS, { category: "meals", paymentMethod: null }),
+      introducesNewValue(NO_OPTIONS, {
+        category: "meals",
+        paymentMethod: null,
+        vendor: null,
+      }),
+    ).toBe(true);
+    expect(
+      introducesNewValue(NO_OPTIONS, {
+        category: null,
+        paymentMethod: null,
+        vendor: "Food Basics",
+      }),
     ).toBe(true);
   });
 });

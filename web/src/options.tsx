@@ -3,23 +3,33 @@ import type { KeptApi } from "./api.js";
 import type { ReceiptOptions } from "./types.js";
 
 /**
- * Category and payment method stay free text (engineering rule: no enum, no
- * taxonomy) - but a person retyping "Office supplies" for the two-hundredth
- * time is not free text, it is friction. GET /api/receipts/options returns
- * the user's own past values, and every category/payment input offers them
- * through a <datalist>: a picker over a text box, not a closed list.
+ * Category, payment method and vendor stay free text (engineering rule: no
+ * enum, no taxonomy) - but a person retyping "Food Basics" for the two-
+ * hundredth time is not free text, it is friction. GET /api/receipts/options
+ * returns the user's own past values, and every category/payment/vendor
+ * input offers them through a <datalist>: a picker over a text box, not a
+ * closed list. Vendor added 2026-08-28 (the owner's first-use feedback:
+ * "vendors should be reusable the way categories already are") - same
+ * derivation, same ordering, same free-text-in-free-text-out rule as the
+ * other two.
  */
 
-export const NO_OPTIONS: ReceiptOptions = { categories: [], paymentMethods: [] };
+export const NO_OPTIONS: ReceiptOptions = {
+  categories: [],
+  paymentMethods: [],
+  vendors: [],
+};
 
 /** The one document id each list is referenced by, from `list=`. */
 export const CATEGORY_LIST_ID = "category-options";
 export const PAYMENT_LIST_ID = "payment-options";
+export const VENDOR_LIST_ID = "vendor-options";
 
 /** What a save has to say for the fetched lists to be out of date. */
 export interface SavedValues {
   category: string | null;
   paymentMethod: string | null;
+  vendor: string | null;
 }
 
 /**
@@ -27,7 +37,8 @@ export interface SavedValues {
  * only condition that makes them stale, so the only one that costs a
  * re-fetch. Compared exactly, as the server's own filters compare: free
  * text is the user's own data and is never normalized here (the 2026-08-26
- * ruling on a doubled-space category).
+ * ruling on a doubled-space category, which applies to vendor exactly as it
+ * does to category and payment method).
  */
 export function introducesNewValue(
   options: ReceiptOptions,
@@ -36,7 +47,8 @@ export function introducesNewValue(
   return (
     (saved.category !== null && !options.categories.includes(saved.category)) ||
     (saved.paymentMethod !== null &&
-      !options.paymentMethods.includes(saved.paymentMethod))
+      !options.paymentMethods.includes(saved.paymentMethod)) ||
+    (saved.vendor !== null && !options.vendors.includes(saved.vendor))
   );
 }
 
@@ -91,9 +103,9 @@ export function useReceiptOptions(api: KeptApi | null): ReceiptOptionsHandle {
 }
 
 /**
- * Both lists, rendered once by whichever screen owns the inputs that name
- * them. Only one such screen is mounted at a time (App renders one view),
- * so the two ids stay unique in the document.
+ * All three lists, rendered once by whichever screen owns the inputs that
+ * name them. Only one such screen is mounted at a time (App renders one
+ * view), so the three ids stay unique in the document.
  */
 export function ReceiptOptionsDatalists({
   values,
@@ -109,6 +121,11 @@ export function ReceiptOptionsDatalists({
       </datalist>
       <datalist id={PAYMENT_LIST_ID}>
         {values.paymentMethods.map((value) => (
+          <option key={value} value={value} />
+        ))}
+      </datalist>
+      <datalist id={VENDOR_LIST_ID}>
+        {values.vendors.map((value) => (
           <option key={value} value={value} />
         ))}
       </datalist>

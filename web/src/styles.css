@@ -1,171 +1,555 @@
 /* Density over friendliness (spec §7A): the year-end pass is a working
    session over hundreds of rows, so type is small, chrome is minimal, and
-   nothing animates. */
+   nothing animates by default. This is a visual pass over that same brief
+   (2026-08-28, the owner's "the web UI is ugly" feedback) - a real type scale,
+   a checked colour system, and table/form craft, not a re-skin toward the
+   consumer app. The amber "unreviewed suggestion" and pending-count
+   treatments (§10A.1, §5.2a) are load-bearing product rules, not decor:
+   restyle around them, never soften them. */
 
 :root {
+  /* Ink scale - one hue (the existing near-black/near-white pair), three
+     steps of muting so secondary text and hairlines read as quieter
+     versions of the same colour rather than a second, unrelated grey. */
   --ink: #1a1f16;
-  --muted: #6b7263;
-  --line: #d9ddd2;
+  --ink-soft: #4b5245;
+  /* Darkened off the original #6b7263 (2026-08-28 contrast check): this
+     colour carries every label caption and status pill at the smallest
+     size on the page, on top of the zebra stripe and the pending tint, so
+     the margin above the 4.5:1 floor needed to stay comfortable rather
+     than exact. */
+  --muted: #5c6354;
+  --line: #dbdfd3;
+  /* Input/button borders at rest, not table hairlines - needs to read as
+     a boundary against a near-white surface, which --line does not. */
+  --line-strong: #8f9787;
   --paper: #fbfbf8;
+  --surface: #ffffff;
+  --stripe: rgba(26, 31, 22, 0.035);
+  --hover: rgba(26, 31, 22, 0.05);
+
+  /* Brand / positive. */
   --accent: #1f6f43;
+  --accent-ink: #163a1a;
+  --accent-soft: #e4f0e8;
+  --accent-line: #b9d7c3;
+
+  /* Destructive - reserved for delete and refusal, never for the amber
+     unreviewed-suggestion mark (§10A.1: amber, never red). */
   --danger: #a03123;
-  --warning-bg: #fcf3d7;
-  --pending-bg: #f4f7ee;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --danger-soft: #fbe9e6;
+  --danger-line: #e3b3ab;
+
+  /* Amber - "a human has not looked at this yet," not an error. Carries
+     the arithmetic warning, the date-disagreement note and every
+     unreviewed suggestion (ReceiptForm.tsx `label.suggested`). */
+  --warning-bg: #fbedc7;
+  --warning-line: #d9a63e;
+  --warning-ink: #6b4c05;
+
+  /* Pending - deliberately its own family from amber/warning: a row can be
+     pending without any single field being flagged, and §5.2a asks for
+     this to stay "visible and slightly annoying" on its own terms. */
+  --pending-bg: #fdf6e3;
+  --pending-line: #e8cf8a;
+  --pending-ink: #7a5c00;
+
+  --focus-ring: #2f7dd1;
+
+  --radius-sm: 4px;
+  --radius-md: 7px;
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Type scale - one deliberate set of steps instead of browser defaults.
+     Root stays 14px (spec: "type is small"); everything else is a rem
+     multiple of it, so the whole app rescales together if that ever
+     changes. */
+  --fs-2xs: 0.7rem;
+  --fs-xs: 0.8rem;
+  --fs-sm: 0.9rem;
+  --fs-base: 1rem;
+  --fs-md: 1.15rem;
+  --fs-lg: 1.4rem;
+  --fs-xl: 2rem;
+
+  font-family: var(--font-sans);
   font-size: 14px;
+  line-height: 1.45;
   color: var(--ink);
+  -webkit-font-smoothing: antialiased;
 }
 
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--paper); }
+h1, h2, h3, p { margin: 0 0 0.6em; }
 
+/* One focus treatment for every interactive element (aim 7): a visible
+   ring that does not depend on colour alone, so it survives the amber and
+   pending backgrounds it will often sit on top of. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  button,
+  input,
+  select,
+  textarea,
+  a,
+  tr,
+  .dropzone {
+    transition: background-color 0.12s ease, border-color 0.12s ease,
+      box-shadow 0.12s ease, color 0.12s ease;
+  }
+}
+
+/* Buttons: one base (secondary/neutral) plus explicit hierarchy modifiers.
+   Before this pass every button - nav, Save, Confirm, Delete, Sign out -
+   rendered as the same bordered white box; a keyboard-driven correction
+   pass over hundreds of rows needs the primary action to be findable at a
+   glance. */
 button {
   font: inherit;
-  padding: 0.3rem 0.8rem;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: white;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  padding: 0.4rem 0.85rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-soft);
   cursor: pointer;
 }
+button:hover:not(:disabled) { border-color: var(--ink-soft); color: var(--ink); }
 button:disabled { opacity: 0.5; cursor: default; }
-button.active { border-color: var(--accent); color: var(--accent); }
-button.danger { border-color: var(--danger); color: var(--danger); }
+button.active { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
+
+/* Primary: the one action a screen wants pressed - Save, Confirm, Sign in,
+   Export. Solid fill so it reads before anything else on the screen. */
+button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+button.primary:hover:not(:disabled) { border-color: var(--accent-ink); background: var(--accent-ink); }
+
+/* Destructive: delete receipt, delete account. Outlined rather than
+   filled at rest - it should read as available but not invite a stray
+   click - and fills solid only in the inline confirm step. */
+button.danger { border-color: var(--danger-line); color: var(--danger); background: var(--surface); }
+button.danger:hover:not(:disabled) { border-color: var(--danger); background: var(--danger-soft); }
+.delete-confirm button.danger { border-color: var(--danger); background: var(--danger); color: #fff; }
+.delete-confirm button.danger:hover:not(:disabled) { background: #841f14; border-color: #841f14; }
+
 button.link {
   border: none;
   background: none;
   padding: 0;
-  color: var(--accent);
+  font-weight: 600;
+  color: var(--accent-ink);
   text-decoration: underline;
+  text-underline-offset: 0.15em;
 }
+button.link:hover:not(:disabled) { color: var(--accent); }
 
 input, select, textarea {
   font: inherit;
-  padding: 0.25rem 0.4rem;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  background: white;
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  padding: 0.32rem 0.5rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
   max-width: 100%;
 }
-input.money { text-align: right; width: 6.5rem; }
+input::placeholder, textarea::placeholder { color: var(--muted); font-style: italic; }
+input.money {
+  text-align: right;
+  width: 7.5rem;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
 
-label { display: inline-flex; flex-direction: column; gap: 0.15rem; }
+/* Every <label>Text<input/></label> pair in this app is a caption sitting
+   directly over its control (filter bar, field-grid, sign-in). One rule
+   gives every one of them the same small-caps-style caption instead of
+   inheriting default paragraph size, and the sibling selector hands the
+   control back its normal reading size so the caption shrink does not
+   also shrink what the person types. */
+label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+label > input,
+label > select,
+label > textarea {
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: normal;
+}
 
-.error { color: var(--danger); }
-.muted { color: var(--muted); }
-.warning { background: var(--warning-bg); padding: 0.4rem 0.6rem; border-radius: 4px; }
+.error {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-left: 3px solid var(--danger);
+  padding: 0.45rem 0.7rem;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: var(--fs-xs);
+}
+.muted { color: var(--muted); font-size: var(--fs-xs); }
+.warning {
+  background: var(--warning-bg);
+  color: var(--warning-ink);
+  border-left: 3px solid var(--warning-line);
+  padding: 0.45rem 0.7rem;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.empty-state, .no-image {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  color: var(--muted);
+  background: var(--surface);
+  text-align: center;
+  padding: 2rem 1rem;
+}
+.no-image { min-height: 16rem; display: flex; align-items: center; justify-content: center; }
 
 /* Shell */
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 1rem;
-  padding: 0.5rem 1rem;
+  padding: 0.55rem 1rem;
   border-bottom: 1px solid var(--line);
-  background: white;
+  background: var(--surface);
 }
-.topbar nav { display: flex; gap: 0.4rem; flex: 1; }
-.brand { font-weight: 700; color: var(--accent); }
-main { padding: 1rem; max-width: 75rem; margin: 0 auto; }
+.topbar nav { display: flex; gap: 0.2rem; flex: 1; }
+.topbar nav button {
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  padding: 0.4rem 0.75rem;
+  border-radius: var(--radius-sm);
+}
+.topbar nav button:hover:not(:disabled) { border-color: transparent; background: var(--stripe); color: var(--ink); }
+.topbar nav button.active { background: var(--accent-soft); color: var(--accent-ink); border-color: transparent; }
+.brand { font-weight: 800; font-size: var(--fs-md); color: var(--accent-ink); letter-spacing: -0.01em; }
+.topbar-actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; flex-basis: 100%; justify-content: flex-end; }
+@media (min-width: 40rem) {
+  .topbar-actions { flex-basis: auto; }
+}
+.topbar .signout {
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+}
+.topbar .signout:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong); }
+
+main { padding: 1.25rem 1.5rem 3rem; max-width: 75rem; margin: 0 auto; }
+main > section > h2 { font-size: var(--fs-md); font-weight: 700; color: var(--ink); }
 
 /* Sign in */
 .signin {
-  max-width: 26rem;
+  max-width: 24rem;
   margin: 15vh auto;
   text-align: center;
   display: flex;
   flex-direction: column;
-  gap: 0.8rem;
+  align-items: center;
+  gap: 0.9rem;
 }
-.dev-token { display: flex; flex-direction: column; gap: 0.5rem; text-align: left; }
+.signin h1 { font-size: var(--fs-xl); color: var(--accent-ink); letter-spacing: -0.02em; }
+.signin p { color: var(--muted); font-size: var(--fs-sm); }
+.signin > button.primary { width: 100%; padding: 0.6rem; font-size: var(--fs-sm); }
+.dev-token {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  text-align: left;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 0.9rem;
+  background: var(--surface);
+}
 .dev-token input { width: 100%; }
+.dev-token code { font-family: var(--font-mono); font-size: 0.85em; }
 
 /* Table */
 .table-controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.7rem;
+  gap: 0.9rem;
   align-items: end;
-  margin-bottom: 0.8rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid var(--line);
 }
 .table-controls .grow { flex: 1; min-width: 12rem; }
 .table-controls .grow input { width: 100%; }
 /* The two reuse-backed filters: narrow, like the selects beside them. */
 .table-controls input[list] { width: 9rem; }
-.sort-order { white-space: nowrap; }
+.sort-order { align-self: end; white-space: nowrap; }
 
-table.receipts { width: 100%; border-collapse: collapse; }
-table.receipts th {
+/* Pill button that carries constraint 2's queue count - deliberately in
+   the warning family (unreviewed suggestions live inside these receipts),
+   never the same accent as an active nav tab, so it cannot be mistaken
+   for ordinary navigation. §5.2a: visible and slightly annoying, not
+   softened into something tasteful and ignorable. */
+.confirm-queue {
+  border-color: var(--warning-line);
+  background: var(--warning-bg);
+  color: var(--warning-ink);
+  font-weight: 700;
+}
+.confirm-queue:hover:not(:disabled) { border-color: var(--warning-ink); }
+.confirm-queue:disabled { background: var(--surface); border-color: var(--line-strong); color: var(--muted); }
+
+table.receipts { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+table.receipts thead th {
+  position: sticky;
+  top: 3.1rem;
+  z-index: 10;
   text-align: left;
-  font-weight: 600;
-  border-bottom: 2px solid var(--line);
-  padding: 0.3rem 0.4rem;
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  background: var(--paper);
+  border-bottom: 2px solid var(--line-strong);
+  padding: 0.5rem 0.5rem;
 }
 table.receipts th.num, table.receipts td.num { text-align: right; }
-table.receipts td { border-bottom: 1px solid var(--line); padding: 0.15rem 0.4rem; }
+table.receipts td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.4rem 0.5rem;
+  vertical-align: middle;
+}
+table.receipts td.num, table.receipts td input.money {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+table.receipts tbody tr:nth-child(even) td { background: var(--stripe); }
+table.receipts tbody tr:hover td { box-shadow: inset 0 0 0 999px var(--hover); }
+table.receipts tbody tr:focus-within td { box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* Editable-but-quiet: cells look like text at rest and reveal a hairline
+   underline on row hover, rather than every one of ~400 cells sitting in
+   its own visible box. */
 table.receipts td input, table.receipts td select {
   border-color: transparent;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
   background: transparent;
   width: 100%;
+  padding: 0.15rem 0.2rem;
+  text-overflow: ellipsis;
 }
-table.receipts td input.money { width: 6.5rem; }
+table.receipts tbody tr:hover td input,
+table.receipts tbody tr:hover td select {
+  border-bottom-color: var(--line-strong);
+}
+table.receipts td input.money { width: 7rem; }
 table.receipts td input:focus, table.receipts td select:focus {
-  border-color: var(--accent);
-  background: white;
+  border-color: transparent;
+  border-bottom-color: var(--accent);
+  background: var(--surface);
   outline: none;
 }
-tr.pending { background: var(--pending-bg); }
-tr.row-error td { padding: 0.3rem 0.4rem; background: #fdf0ee; }
-.load-more { margin-top: 0.8rem; }
-.confirm-queue { border-color: var(--accent); color: var(--accent); }
+
+tr.pending td { background: var(--pending-bg); }
+tr.pending:nth-child(even) td { background: var(--pending-bg); }
+tr.pending:hover td { box-shadow: inset 0 0 0 999px rgba(122, 92, 0, 0.06); }
+tr.row-error td { padding: 0.5rem 0.6rem; background: var(--danger-soft); border-bottom: 1px solid var(--danger-line); }
+tr.row-error .error { background: none; border: none; padding: 0; display: inline; }
+
+button.link.status-pending { color: var(--pending-ink); font-weight: 700; text-transform: uppercase; font-size: var(--fs-2xs); letter-spacing: 0.04em; text-decoration: none; }
+button.link.status-confirmed { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: var(--fs-2xs); letter-spacing: 0.04em; text-decoration: none; }
+button.link.status-pending:hover, button.link.status-confirmed:hover { text-decoration: underline; }
+
+.load-more { margin-top: 1rem; }
 
 /* Detail and confirm queue */
-.detail-header { display: flex; justify-content: space-between; margin-bottom: 0.8rem; }
-.status-tag { text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.05em; }
-.status-tag.pending { color: var(--accent); }
-.detail-body { display: flex; gap: 1.5rem; align-items: flex-start; }
+.detail-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+.status-tag { font-size: var(--fs-2xs); text-transform: uppercase; font-weight: 700; letter-spacing: 0.06em; padding: 0.25rem 0.55rem; border-radius: 999px; }
+.status-tag.pending { color: var(--pending-ink); background: var(--pending-bg); border: 1px solid var(--pending-line); }
+.status-tag.confirmed { color: var(--muted); background: var(--stripe); border: 1px solid var(--line); }
+.detail-body { display: flex; gap: 2rem; align-items: flex-start; }
 .detail-image { flex: 1; min-width: 0; }
-.receipt-photo { max-width: 100%; border: 1px solid var(--line); }
-.receipt-pdf { width: 100%; height: 75vh; border: 1px solid var(--line); }
-.detail-fields { flex: 1; min-width: 20rem; }
-.field-grid { display: flex; flex-wrap: wrap; gap: 0.7rem; }
-.field-grid label { flex: 1 1 12rem; }
-.field-grid .notes { flex-basis: 100%; }
-.field-grid textarea { width: 100%; }
-.detail-actions { margin-top: 0.9rem; display: flex; gap: 0.6rem; align-items: center; }
-.delete-confirm { display: inline-flex; gap: 0.5rem; align-items: center; color: var(--danger); }
+.receipt-photo { max-width: 100%; border: 1px solid var(--line); border-radius: var(--radius-md); }
+.receipt-pdf { width: 100%; height: 75vh; border: 1px solid var(--line); border-radius: var(--radius-md); }
+.detail-fields { flex: 1; min-width: 22rem; }
+
+/* The field grid is a real two-column form grid, not a wrapped flex line:
+   DOM order already groups Purchase date/Vendor, HST/Subtotal, Tip/Other
+   fees and Category/Payment method into row pairs (ReceiptForm.tsx's
+   field order comment), so handing that same order to CSS grid lands each
+   pair correctly with no JSX reordering. Total, any warning note and
+   Notes are the only fields that span both columns. */
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.9rem 1.2rem;
+  align-items: start;
+}
+.field-grid .notes,
+.field-grid .warning,
+.field-grid p.warning {
+  grid-column: 1 / -1;
+}
+.field-grid textarea { width: 100%; resize: vertical; min-height: 4.5rem; font-family: inherit; }
+
+/* Total: the largest thing on the screen (§10A.1, ported from iOS), so the
+   eye lands there before anything else. */
+.field-grid label.total-field {
+  grid-column: 1 / -1;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 0.7rem 0.9rem 0.6rem;
+}
+.field-grid label.total-field input.money {
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  width: 100%;
+  border: none;
+  padding: 0.1rem 0;
+  background: none;
+}
+.field-grid label.total-field input.money:focus { outline: none; }
+/* The arithmetic warning renders immediately after the total card in DOM
+   order; pulling its top margin to zero and sharing the card's radius on
+   the seam makes the two read as one unit, matching iOS's "warning inside
+   the total card" exactly, without nesting the <p> inside the <label>. */
+.field-grid label.total-field + p.warning {
+  grid-column: 1 / -1;
+  margin-top: -0.6rem;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  border-left: none;
+  border-top: 1px solid var(--warning-line);
+}
+
+/* §10A.1 ported from iOS: unchecked fields carry an amber tint, touching
+   one clears it permanently (ReceiptFieldsForm's `touched` set). Amber,
+   inside the field, never red - never weaken this to something a person
+   could miss. */
+.field-grid label.suggested input,
+.field-grid label.suggested select {
+  background: var(--warning-bg);
+  border-color: var(--warning-line);
+}
+.field-grid label.suggested.total-field { background: var(--warning-bg); border-color: var(--warning-line); }
+.field-grid label.suggested.total-field input.money { background: none; }
+
+.detail-actions { margin-top: 1.1rem; display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+.delete-confirm {
+  display: inline-flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-line);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.8rem;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.topbar .delete-confirm { flex-basis: 100%; }
 
 /* Upload */
 .upload-view { max-width: 45rem; }
 .dropzone {
-  border: 2px dashed var(--line);
-  border-radius: 6px;
-  padding: 2.2rem 1rem;
+  border: 2px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: 2.4rem 1rem;
   text-align: center;
-  margin: 0.9rem 0;
+  margin: 1rem 0;
+  background: var(--surface);
+  color: var(--ink-soft);
 }
-.dropzone.dragging { border-color: var(--accent); background: var(--pending-bg); }
-.upload-queue { list-style: none; padding: 0; }
+.dropzone.dragging { border-color: var(--accent); background: var(--accent-soft); }
+.upload-queue { list-style: none; padding: 0; margin: 0.5rem 0 0; font-size: var(--fs-xs); }
 .upload-queue li {
   display: flex;
   justify-content: space-between;
   gap: 1rem;
-  padding: 0.25rem 0;
+  padding: 0.4rem 0;
   border-bottom: 1px solid var(--line);
 }
 .upload-queue li.duplicate span:last-child { color: var(--muted); }
-.upload-queue li.failed span:last-child, .upload-queue li.unsupported span:last-child { color: var(--danger); }
-.upload-queue li.created span:last-child { color: var(--accent); }
-.filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-queue li.failed span:last-child, .upload-queue li.unsupported span:last-child { color: var(--danger); font-weight: 600; }
+.upload-queue li.created span:last-child { color: var(--accent-ink); font-weight: 600; }
+.upload-queue li.uploading span:last-child { color: var(--muted); font-style: italic; }
+.filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 
 /* Export */
 .export-view { max-width: 55rem; }
-.export-starters { display: flex; gap: 2rem; flex-wrap: wrap; margin: 1rem 0; }
-.starter { display: flex; gap: 0.7rem; align-items: end; flex-wrap: wrap; }
-table.export-jobs { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-table.export-jobs th, table.export-jobs td {
+.export-starters { display: flex; gap: 2.5rem; flex-wrap: wrap; margin: 1.1rem 0 1.4rem; }
+.starter {
+  display: flex;
+  gap: 0.8rem;
+  align-items: end;
+  flex-wrap: wrap;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+table.export-jobs { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: var(--fs-sm); }
+table.export-jobs th {
   text-align: left;
-  padding: 0.3rem 0.4rem;
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  padding: 0.4rem 0.5rem;
+  border-bottom: 2px solid var(--line-strong);
+}
+table.export-jobs td {
+  text-align: left;
+  padding: 0.5rem;
   border-bottom: 1px solid var(--line);
 }
+table.export-jobs tbody tr:hover td { background: var(--stripe); }
+.export-status { font-weight: 600; }
 .export-status.failed { color: var(--danger); }
-.export-status.complete { color: var(--accent); }
+.export-status.complete { color: var(--accent-ink); }
+.export-status.expired, .export-status.stale { color: var(--warning-ink); }
+.download-link {
+  display: inline-block;
+  font-weight: 700;
+  font-size: var(--fs-xs);
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.6rem;
+  text-decoration: none;
+}
+.download-link:hover { background: var(--accent-line); }

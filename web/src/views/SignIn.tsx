@@ -85,7 +85,7 @@ export function SignIn({
       <h1>Kept</h1>
       <p>Sign in to see your receipts.</p>
       {!import.meta.env.DEV && (
-        <button disabled={busy} onClick={() => void signInWithApple()}>
+        <button className="primary" disabled={busy} onClick={() => void signInWithApple()}>
           Sign in with Apple
         </button>
       )}
@@ -128,7 +128,9 @@ function DevTokenEntry({
           placeholder="paste token"
         />
       </label>
-      <button type="submit">Use dev token</button>
+      <button className="primary" type="submit">
+        Use dev token
+      </button>
     </form>
   );
 }

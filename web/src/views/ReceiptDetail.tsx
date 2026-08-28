@@ -1,11 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { KeptApi } from "../api.js";
+import { logEvent } from "../events.js";
 import type { ReceiptOptionsHandle } from "../options.js";
 import type { ReceiptDetail } from "../types.js";
 import {
   DraftError,
   ReceiptFieldsForm,
+  draftForDisplay,
   draftFromReceipt,
+  logFieldEditTelemetry,
   patchFromDraft,
   type ReceiptDraft,
 } from "./ReceiptForm.js";
@@ -36,6 +39,11 @@ export function ReceiptDetailView({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // Every field name `ReceiptFieldsForm.onFieldEdited` has reported since
+  // this receipt loaded, once per edit - `summarizeFieldEdits` (ReceiptForm)
+  // turns it into save-time counts and suggestion outcomes. A ref, not
+  // state: nothing here should ever trigger a re-render on its own.
+  const editsRef = useRef<(keyof ReceiptDraft)[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -44,7 +52,9 @@ export function ReceiptDetailView({
         const loaded = await api.receipt(receiptId);
         if (!cancelled) {
           setReceipt(loaded);
-          setDraft(draftFromReceipt(loaded));
+          setDraft(draftForDisplay(loaded));
+          editsRef.current = [];
+          logEvent({ action: "receipt_viewed", receiptId: loaded.id });
         }
       } catch (caught) {
         if (!cancelled) {
@@ -95,6 +105,13 @@ export function ReceiptDetailView({
       setNotice("Saved.");
       options.noteSaved(updated);
       onChanged();
+      logEvent({ action: "receipt_edited", receiptId: receipt.id });
+      logFieldEditTelemetry(receipt, editsRef.current);
+      // Reset after a successful save only - a failed one leaves the
+      // person still mid-edit, and the next successful save should still
+      // count everything since the receipt loaded, not just since the
+      // failure.
+      editsRef.current = [];
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -106,6 +123,7 @@ export function ReceiptDetailView({
     }
     try {
       await api.deleteReceipt(receipt.id);
+      logEvent({ action: "receipt_deleted", receiptId: receipt.id });
       onChanged();
       onBack();
     } catch (caught) {
@@ -124,7 +142,7 @@ export function ReceiptDetailView({
       <div className="detail-body">
         <div className="detail-image">
           {receipt.images.length === 0 ? (
-            <p className="muted">No image behind this receipt.</p>
+            <p className="muted no-image">No image behind this receipt.</p>
           ) : (
             receipt.images.map((image) => (
               <ReceiptImage key={image.page} url={image.downloadUrl} />
@@ -133,14 +151,18 @@ export function ReceiptDetailView({
         </div>
         <div className="detail-fields">
           <ReceiptFieldsForm
+            receipt={receipt}
             draft={draft}
             setDraft={(update) => setDraft((d) => (d === null ? d : update(d)))}
             options={options.values}
+            onFieldEdited={(field) => editsRef.current.push(field)}
           />
           {error !== null && <p className="error">{error}</p>}
           {notice !== null && <p className="muted">{notice}</p>}
           <div className="detail-actions">
-            <button onClick={() => void save()}>Save</button>
+            <button className="primary" onClick={() => void save()}>
+              Save
+            </button>
             {!confirmingDelete ? (
               <button className="danger" onClick={() => setConfirmingDelete(true)}>
                 Delete…

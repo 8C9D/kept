@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeptApi } from "../api.js";
 import { ApiError } from "../api.js";
+import { logEvent } from "../events.js";
 import { formatCents, parseMoneyInput } from "../money.js";
 import {
   CATEGORY_LIST_ID,
   PAYMENT_LIST_ID,
   ReceiptOptionsDatalists,
+  VENDOR_LIST_ID,
   type ReceiptOptionsHandle,
 } from "../options.js";
 import type {
@@ -16,6 +18,40 @@ import type {
   ReceiptStatus,
   SortOrder,
 } from "../types.js";
+
+/**
+ * Which of list_searched / list_filtered / list_sorted (events.ts's
+ * vocabulary) one `filters` change was, by diffing the previous value
+ * against the next field by field - the table has one `filters` object and
+ * one effect that re-fetches on any change to it, so nothing upstream
+ * already knows which control the person touched. Pure and exported so the
+ * classification itself has a test independent of the effect that calls it.
+ * Checked in a fixed order (search, then sort, then the rest) because a
+ * single control's onChange only ever changes one field at a time in this
+ * UI, so at most one of these is ever true per call - the order only
+ * matters for the untested case of two fields changing in one state update.
+ */
+export function classifyFilterChange(
+  prev: ListFilters,
+  next: ListFilters,
+): "list_searched" | "list_filtered" | "list_sorted" | null {
+  if (prev.q !== next.q) {
+    return "list_searched";
+  }
+  if (prev.sort !== next.sort || prev.order !== next.order) {
+    return "list_sorted";
+  }
+  if (
+    prev.from !== next.from ||
+    prev.to !== next.to ||
+    prev.status !== next.status ||
+    prev.category !== next.category ||
+    prev.paymentMethod !== next.paymentMethod
+  ) {
+    return "list_filtered";
+  }
+  return null;
+}
 
 /**
  * Spec §7A screen 2: every receipt, filterable (date range, status,
@@ -47,6 +83,10 @@ export function ReceiptsTable({
   const [pendingCount, setPendingCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // For classifyFilterChange below - the effect that fetches on `filters`
+  // also fires on a `dataVersion` bump alone (another screen changed a
+  // receipt), which must not be misread as a search/filter/sort action.
+  const previousFilters = useRef(filters);
 
   const loadFirstPage = useCallback(
     async (activeFilters: ListFilters) => {
@@ -71,6 +111,15 @@ export function ReceiptsTable({
   );
 
   useEffect(() => {
+    // Logged for the action itself, not the fetch's outcome - there is no
+    // list_search_failed in the vocabulary (events.ts), so a search/filter/
+    // sort is worth recording whether or not the page that follows loads
+    // cleanly.
+    const changed = classifyFilterChange(previousFilters.current, filters);
+    previousFilters.current = filters;
+    if (changed !== null) {
+      logEvent({ action: changed });
+    }
     void loadFirstPage(filters);
   }, [loadFirstPage, filters, dataVersion]);
 
@@ -99,6 +148,7 @@ export function ReceiptsTable({
       );
       options.noteSaved(updated);
       onChanged();
+      logEvent({ action: "receipt_edited", receiptId: id });
       return null;
     } catch (caught) {
       if (caught instanceof ApiError) {
@@ -251,7 +301,7 @@ export function ReceiptsTable({
       {loading && rows.length === 0 ? (
         <p className="muted">Loading…</p>
       ) : rows.length === 0 ? (
-        <p className="muted">
+        <p className="muted empty-state">
           No receipts match. Capture on the phone, or drop files under Upload.
         </p>
       ) : (
@@ -263,6 +313,8 @@ export function ReceiptsTable({
               <th>Category</th>
               <th className="num">Total</th>
               <th className="num">HST</th>
+              <th className="num">Tip</th>
+              <th className="num">Other fees</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -330,6 +382,7 @@ function ReceiptRow({
           <TextCell
             value={row.vendor}
             placeholder="vendor"
+            list={VENDOR_LIST_ID}
             onSave={(v) => save({ vendor: v })}
           />
         </td>
@@ -355,15 +408,29 @@ function ReceiptRow({
             onBadInput={setRowError}
           />
         </td>
+        <td className="num">
+          <MoneyCell
+            value={row.tipCents}
+            onSave={(v) => save({ tipCents: v })}
+            onBadInput={setRowError}
+          />
+        </td>
+        <td className="num">
+          <MoneyCell
+            value={row.otherFeesCents}
+            onSave={(v) => save({ otherFeesCents: v })}
+            onBadInput={setRowError}
+          />
+        </td>
         <td>
-          <button className="link" onClick={onOpen}>
+          <button className={`link status-${row.status}`} onClick={onOpen}>
             {row.status}
           </button>
         </td>
       </tr>
       {rowError !== null && (
         <tr className="row-error">
-          <td colSpan={6}>
+          <td colSpan={8}>
             <span className="error">{rowError}</span>
             <button className="link" onClick={() => setRowError(null)}>
               dismiss
@@ -448,7 +515,7 @@ function MoneyCell({
     <input
       className="money"
       value={draft}
-      placeholder="0.00"
+      placeholder="Not found"
       onChange={(e) => setDraft(e.target.value)}
       onBlur={() => {
         let parsed: number | null;

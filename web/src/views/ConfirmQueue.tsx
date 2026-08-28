@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeptApi } from "../api.js";
+import { logEvent } from "../events.js";
 import type { ReceiptOptionsHandle } from "../options.js";
 import type { ReceiptDetail } from "../types.js";
 import { ReceiptImage } from "./ReceiptDetail.js";
@@ -7,6 +8,7 @@ import {
   DraftError,
   ReceiptFieldsForm,
   draftFromPending,
+  logFieldEditTelemetry,
   patchFromDraft,
   type ReceiptDraft,
 } from "./ReceiptForm.js";
@@ -36,6 +38,9 @@ export function ConfirmQueue({
   const [skippedIds, setSkippedIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [exhausted, setExhausted] = useState(false);
+  // Same accumulator as ReceiptDetailView's, reset per receipt and read out
+  // at Confirm - see ReceiptForm.tsx's `summarizeFieldEdits`.
+  const editsRef = useRef<(keyof ReceiptDraft)[]>([]);
 
   const loadNext = useCallback(
     async (skip: string[]) => {
@@ -56,6 +61,8 @@ export function ConfirmQueue({
         const detail = await api.receipt(next.id);
         setCurrent(detail);
         setDraft(draftFromPending(detail));
+        editsRef.current = [];
+        logEvent({ action: "confirm_opened", receiptId: detail.id });
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught));
       }
@@ -88,6 +95,8 @@ export function ConfirmQueue({
         status: "confirmed",
       });
       options.noteSaved(confirmed);
+      logEvent({ action: "confirm_saved", receiptId: current.id });
+      logFieldEditTelemetry(current, editsRef.current);
       await loadNext(skippedIds);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -127,7 +136,6 @@ export function ConfirmQueue({
     );
   }
 
-  const suggestions = current.suggestions;
   return (
     <section className="confirm-queue-view">
       <div className="detail-header">
@@ -138,16 +146,14 @@ export function ConfirmQueue({
           {remaining === null ? "" : `${remaining} pending`}
         </span>
       </div>
-      {suggestions?.purchasedAt.disagreement === true && (
-        <p className="warning">
-          The two parsers read different dates from this receipt - check the
-          paper before confirming.
-        </p>
-      )}
+      {/* The date-disagreement note is rendered inside ReceiptFieldsForm
+          now (§10A.1: same treatment as the arithmetic warning, "inside
+          the field"), off the same receipt.suggestions this screen already
+          hands the form - nothing left to read here. */}
       <div className="detail-body">
         <div className="detail-image">
           {current.images.length === 0 ? (
-            <p className="muted">No image behind this receipt.</p>
+            <p className="muted no-image">No image behind this receipt.</p>
           ) : (
             current.images.map((image) => (
               <ReceiptImage key={image.page} url={image.downloadUrl} />
@@ -156,13 +162,17 @@ export function ConfirmQueue({
         </div>
         <div className="detail-fields">
           <ReceiptFieldsForm
+            receipt={current}
             draft={draft}
             setDraft={(update) => setDraft((d) => (d === null ? d : update(d)))}
             options={options.values}
+            onFieldEdited={(field) => editsRef.current.push(field)}
           />
           {error !== null && <p className="error">{error}</p>}
           <div className="detail-actions">
-            <button onClick={() => void confirm()}>Confirm</button>
+            <button className="primary" onClick={() => void confirm()}>
+              Confirm
+            </button>
             <button onClick={skip}>Skip for now</button>
           </div>
         </div>
