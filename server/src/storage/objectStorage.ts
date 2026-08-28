@@ -87,23 +87,3 @@ export class ObjectNotFoundError extends Error {
     this.name = "ObjectNotFoundError";
   }
 }
-
-/**
- * Placeholder wired into the production entrypoint until the R2 adapter
- * exists. Throwing on first use is deliberate: a loud failure at the call
- * site, not a broken URL handed silently to a client.
- */
-export function unconfiguredObjectStorage(): ObjectStorage {
-  const fail = (): never => {
-    throw new Error(
-      "Object storage is not configured; the R2 adapter does not exist yet",
-    );
-  };
-  return {
-    presignUpload: async () => fail(),
-    presignDownload: async () => fail(),
-    upload: async () => fail(),
-    download: async () => fail(),
-    delete: async () => fail(),
-  };
-}
