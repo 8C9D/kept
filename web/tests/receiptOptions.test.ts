@@ -29,6 +29,9 @@ describe("KeptApi.receiptOptions", () => {
       categories: ["office supplies", "meals"],
       paymentMethods: ["visa"],
       vendors: ["Food Basics", "Staples"],
+      vendorDefaults: {
+        "Food Basics": { category: "groceries", paymentMethod: "visa" },
+      },
     };
     const { calls } = stubFetch(
       new Response(JSON.stringify(body), { status: 200 }),
@@ -55,6 +58,7 @@ describe("introducesNewValue - when a save makes the lists stale", () => {
     categories: ["meals"],
     paymentMethods: ["visa"],
     vendors: ["Food Basics"],
+    vendorDefaults: {},
   };
 
   it("is false when the saved values are already offered", () => {

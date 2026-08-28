@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { logEvent } from "../events.js";
-import { formatCents, parseMoneyInput } from "../money.js";
+import {
+  MAX_STORABLE_CENTS,
+  MIN_STORABLE_CENTS,
+  formatCents,
+  parseMoneyInput,
+} from "../money.js";
 import {
   CATEGORY_LIST_ID,
   PAYMENT_LIST_ID,
@@ -228,15 +233,277 @@ export function arithmeticMismatch(draft: ReceiptDraft): boolean {
 }
 
 /**
- * The draft fields a served suggestion can mark amber - every key
- * `MergedSuggestions` carries. `otherFees` has no entry in
- * `MergedSuggestions` (see `draftFromPending` above) and so can never
- * appear here: the styling below reads this set rather than naming fields,
- * which is what keeps "other fees never starts marked" true by
- * construction instead of by a special case someone could forget to keep
- * in sync.
+ * Proposal #1 (docs/proposals/2026-08-28-ux-enhancements.md #1, approved):
+ * derive the one missing amount, live, mirroring the server's own
+ * `deriveMissingAmount` (server/src/domain/arithmetic.ts) field for field -
+ * same missing-count check, same sum, same refusals. Read that function's
+ * doc comment for the full reasoning; this restates only enough of it to
+ * keep the two in step. Exactly like `arithmeticMismatch` above, this is a
+ * suggestion generator and nothing more - there is deliberately no path
+ * from here to a PATCH. The affordance that renders it (`AmountDeriveNote`
+ * below) is what proposal #1 names as the risk mitigation: it has to say
+ * what it computed, not just offer a bare button, because a person tapping
+ * a fill without reading it stores an amount the receipt does not print.
  */
-type SuggestibleField = "vendor" | "purchasedAt" | "subtotal" | "hst" | "total" | "tip";
+export type DerivableAmountField = "subtotal" | "hst" | "tip" | "otherFees" | "total";
+
+export interface DerivedAmount {
+  field: DerivableAmountField;
+  cents: number;
+  /** What the fill is doing, in words - e.g. "Tip = total − subtotal − HST
+   * − other fees" - rendered next to the computed amount so the affordance
+   * states the arithmetic instead of appearing as an unexplained button. */
+  formula: string;
+}
+
+const DERIVABLE_AMOUNT_FIELDS: readonly DerivableAmountField[] = [
+  "subtotal",
+  "hst",
+  "tip",
+  "otherFees",
+  "total",
+];
+
+/** Mirrors the server's `NEVER_NEGATIVE_FIELDS` exactly, for the exact same
+ * reason (arithmetic.ts's own comment): tip and other fees are charges
+ * layered on a subtotal, never amounts that run negative on any receipt
+ * this app has seen, so a bill that does not reconcile does not
+ * retroactively invent a negative one. Offering "tip: -$3.00" as a one-tap
+ * fill would be evidence the OTHER four fields are wrong, not a suggestion
+ * anyone could act on - refusing to derive is the honest response. */
+const NEVER_NEGATIVE_AMOUNT_FIELDS: ReadonlySet<DerivableAmountField> = new Set([
+  "tip",
+  "otherFees",
+]);
+
+function formulaFor(field: DerivableAmountField): string {
+  switch (field) {
+    case "subtotal":
+      return "Subtotal = total − HST − tip − other fees";
+    case "hst":
+      return "HST = total − subtotal − tip − other fees";
+    case "tip":
+      return "Tip = total − subtotal − HST − other fees";
+    case "otherFees":
+      return "Other fees = total − subtotal − HST − tip";
+    case "total":
+      return "Total = subtotal + HST + tip + other fees";
+  }
+}
+
+/**
+ * The refusal tail both derivation functions below share - the server's
+ * `cents()` range check plus `NEVER_NEGATIVE_FIELDS`, in one place so the
+ * two offers this form can ever make (a single missing field, or a
+ * reconciliation fix) are refused by the identical rule rather than two
+ * copies of it that could quietly drift apart.
+ */
+function finalizeDerivedAmount(
+  field: DerivableAmountField,
+  value: number,
+): DerivedAmount | null {
+  if (NEVER_NEGATIVE_AMOUNT_FIELDS.has(field) && value < 0) {
+    return null;
+  }
+  if (
+    !Number.isSafeInteger(value) ||
+    value < MIN_STORABLE_CENTS ||
+    value > MAX_STORABLE_CENTS
+  ) {
+    // Out of the storable cents range - the mismatch is real, but there is
+    // no honest suggestion to offer for it (server's own comment).
+    return null;
+  }
+  return { field, cents: value, formula: formulaFor(field) };
+}
+
+interface ParsedAmounts {
+  subtotal: number | null;
+  hst: number | null;
+  tip: number | null;
+  otherFees: number | null;
+  total: number | null;
+}
+
+/** Parses all five money fields at once, or null the instant any one of
+ * them is mid-keystroke invalid - the same "an unparseable box silences the
+ * check" rule `arithmeticMismatch` follows above, shared here so both
+ * derivation functions read it from one place. */
+function parseAmounts(draft: ReceiptDraft): ParsedAmounts | null {
+  const subtotal = tryParseMoney(draft.subtotal);
+  const hst = tryParseMoney(draft.hst);
+  const tip = tryParseMoney(draft.tip);
+  const otherFees = tryParseMoney(draft.otherFees);
+  const total = tryParseMoney(draft.total);
+  if (
+    subtotal === INVALID_MONEY ||
+    hst === INVALID_MONEY ||
+    tip === INVALID_MONEY ||
+    otherFees === INVALID_MONEY ||
+    total === INVALID_MONEY
+  ) {
+    return null;
+  }
+  return { subtotal, hst, tip, otherFees, total };
+}
+
+/**
+ * The live mirror of the server's `deriveMissingAmount`. Returns null in
+ * every case the server would: not exactly one of the five fields blank, a
+ * mid-keystroke unparseable box, a negative tip or other-fees result, or a
+ * result outside the storable cents range.
+ */
+export function deriveMissingAmount(draft: ReceiptDraft): DerivedAmount | null {
+  const parsed = parseAmounts(draft);
+  if (parsed === null) {
+    return null;
+  }
+  const missing = DERIVABLE_AMOUNT_FIELDS.filter((field) => parsed[field] === null);
+  if (missing.length !== 1) {
+    return null;
+  }
+  const field = missing[0];
+  if (field === undefined) {
+    // Guaranteed by the length check above; narrows the type for TS.
+    return null;
+  }
+  // Every field but the missing one is non-null here, so summing with
+  // `?? 0` adds every KNOWN component and adds nothing for the field being
+  // solved for - exactly the server function's own comment on this line.
+  const knownComponentSum =
+    (parsed.subtotal ?? 0) + (parsed.hst ?? 0) + (parsed.tip ?? 0) + (parsed.otherFees ?? 0);
+  const value =
+    field === "total" ? knownComponentSum : (parsed.total ?? 0) - knownComponentSum;
+  return finalizeDerivedAmount(field, value);
+}
+
+/**
+ * Proposal #1's second offer: "when all five are present but do not
+ * reconcile, offer to put the difference into tip ... or into other fees."
+ * There is no server function for this half - `deriveMissingAmount` only
+ * ever fires on the opposite precondition, exactly one field blank - but it
+ * solves the identical equation the server's function does, holding every
+ * field but the one target at its current draft value. Putting the
+ * shortfall into tip (`tip_old + (total - sum)`) and solving
+ * `tip = total - subtotal - hst - otherFees` from scratch are the same
+ * number by construction, so this reuses `finalizeDerivedAmount`'s
+ * refusals rather than inventing a second, looser version of them - a
+ * "reconciliation fix" that produced a negative tip would be exactly the
+ * dishonest suggestion the server's own comment refuses to offer.
+ */
+export interface ReconciliationSuggestions {
+  tip: DerivedAmount | null;
+  otherFees: DerivedAmount | null;
+}
+
+export function reconciliationSuggestions(
+  draft: ReceiptDraft,
+): ReconciliationSuggestions | null {
+  const parsed = parseAmounts(draft);
+  if (parsed === null) {
+    return null;
+  }
+  if (
+    parsed.subtotal === null ||
+    parsed.hst === null ||
+    parsed.tip === null ||
+    parsed.otherFees === null ||
+    parsed.total === null
+  ) {
+    // One field is blank - deriveMissingAmount above is the offer for that
+    // case, not this one.
+    return null;
+  }
+  if (parsed.subtotal + parsed.hst + parsed.tip + parsed.otherFees === parsed.total) {
+    // Already reconciles - nothing to offer.
+    return null;
+  }
+  const tip = finalizeDerivedAmount(
+    "tip",
+    parsed.total - parsed.subtotal - parsed.hst - parsed.otherFees,
+  );
+  const otherFees = finalizeDerivedAmount(
+    "otherFees",
+    parsed.total - parsed.subtotal - parsed.hst - parsed.tip,
+  );
+  if (tip === null && otherFees === null) {
+    return null;
+  }
+  return { tip, otherFees };
+}
+
+/**
+ * Proposal #2 (approved): what a vendor default would fill on this draft
+ * right now - pure, so the effect that applies it (`ReceiptFieldsForm`
+ * below) and its test read the "empty and untouched only" rule from one
+ * place. Exact match only: `vendorDefaults` is keyed by the server's
+ * verbatim vendor string, and the 2026-08-26 ruling on a doubled-space
+ * category applies here exactly as it does to every other free-text field -
+ * nothing here trims or case-folds the lookup.
+ *
+ * Category and payment method are defensible to prefill this way where an
+ * amount never would be (see `DerivedAmount`'s doc comment, and the
+ * server's own `vendorDefaultCandidates` comment): category is free text
+ * with no tax consequence - a wrong default costs a mislabelled row an
+ * accountant re-reads, never a wrong claim, unlike HST, which is an input
+ * tax credit.
+ */
+export interface VendorDefaultFill {
+  category: string | null;
+  paymentMethod: string | null;
+}
+
+export function vendorDefaultFill(
+  draft: ReceiptDraft,
+  touched: ReadonlySet<keyof ReceiptDraft>,
+  vendorDefaults: ReceiptOptions["vendorDefaults"],
+): VendorDefaultFill {
+  const defaults = vendorDefaults[draft.vendor];
+  if (defaults === undefined) {
+    return { category: null, paymentMethod: null };
+  }
+  return {
+    // Never overwrites a value the person already typed, or a confirmed
+    // receipt's existing value - both read the same way here: the field is
+    // non-empty. Never re-applies once touched, even if touching emptied it
+    // back out - touching a field is a permanent opt-out, same as §10A.1's
+    // rule for every other suggestion source.
+    category:
+      defaults.category !== null && draft.category === "" && !touched.has("category")
+        ? defaults.category
+        : null,
+    paymentMethod:
+      defaults.paymentMethod !== null &&
+      draft.paymentMethod === "" &&
+      !touched.has("paymentMethod")
+        ? defaults.paymentMethod
+        : null,
+  };
+}
+
+/**
+ * The draft fields that can ever carry an amber "unreviewed suggestion"
+ * tint. Originally exactly the keys `MergedSuggestions` carries; widened
+ * 2026-08-28 for proposals #1 and #2, which introduced two amber sources
+ * that are NOT part of the server's OCR merge at all: `otherFees` can go
+ * amber from a derived-amount fill even though no heuristic has ever
+ * suggested it (the merge has no `otherFeesCents` key, per
+ * `draftFromPending`'s own comment - that is still true, this is a
+ * different source), and `category`/`paymentMethod` can go amber from a
+ * vendor default. `suggestedFields` below still reads only the
+ * server-sourced half of this set; `ReceiptFieldsForm`'s `amber()` helper
+ * is what unions it with the client-sourced half (`clientApplied` state).
+ */
+type SuggestibleField =
+  | "vendor"
+  | "purchasedAt"
+  | "subtotal"
+  | "hst"
+  | "total"
+  | "tip"
+  | "otherFees"
+  | "category"
+  | "paymentMethod";
 
 /**
  * §10A.1's amber rule, ported from iOS's confirm screen to this form:
@@ -423,13 +690,28 @@ export function ReceiptFieldsForm({
   const [touched, setTouched] = useState<ReadonlySet<keyof ReceiptDraft>>(
     () => new Set(),
   );
+  // Which fields currently hold a CLIENT-applied suggestion - a derived
+  // amount fill (proposal #1) or a vendor default (proposal #2) - as
+  // opposed to `suggested` below, which is the server's OCR merge. Once a
+  // field is added here it stays, even after it is touched: `amber()`
+  // already re-gates on `touched`, and this set is what would let a future
+  // save-time accept/override summary (like `summarizeFieldEdits`'s
+  // server-suggestion one) tell "this field once held ours" from "it never
+  // did" - not needed for the reset rule below either way, so it resets
+  // alongside `touched` on every new receipt.
+  const [clientApplied, setClientApplied] = useState<ReadonlySet<SuggestibleField>>(
+    () => new Set(),
+  );
   useEffect(() => {
     setTouched(new Set());
+    setClientApplied(new Set());
   }, [receipt.id]);
 
   const suggested = suggestedFields(receipt);
   const amber = (field: SuggestibleField): string | undefined =>
-    suggested.has(field) && !touched.has(field) ? "suggested" : undefined;
+    (suggested.has(field) || clientApplied.has(field)) && !touched.has(field)
+      ? "suggested"
+      : undefined;
 
   const text =
     (key: keyof ReceiptDraft) =>
@@ -446,6 +728,60 @@ export function ReceiptFieldsForm({
   // confirm queue and a pending receipt opened straight from the table.
   const dateDisagreement = dateDisagreementNote(receipt, touched);
   const hstDisagreement = hstDisagreementNote(receipt, touched);
+
+  // Proposal #1: at most one of these is ever non-null for a given draft -
+  // `deriveMissingAmount` requires exactly one field blank,
+  // `reconciliationSuggestions` requires none blank - so there is no need
+  // to reconcile the two ever both having something to say about the same
+  // field.
+  const derived = deriveMissingAmount(draft);
+  const reconciliation = derived === null ? reconciliationSuggestions(draft) : null;
+
+  /** Applies a derived-amount fill (the "Fill" button in `AmountDeriveNote`
+   * below) - never wired to `text()`/`onFieldEdited`/`touched`, because
+   * applying the suggestion is not the person editing it: the whole point
+   * (proposal #1's own risk mitigation) is that the filled value lands
+   * amber and STAYS amber until a person actually looks at and touches it,
+   * never silently on save. */
+  function applyDerivedAmount(offer: DerivedAmount) {
+    const key = offer.field;
+    setDraft((d) => ({ ...d, [key]: formatCents(offer.cents) }));
+    setClientApplied((current) => (current.has(key) ? current : new Set(current).add(key)));
+    logEvent({ action: "suggestion_accepted", field: key, receiptId: receipt.id });
+  }
+
+  // Proposal #2: live, not just on load - a vendor typed or corrected mid-
+  // session that comes to match a known vendor gets the same treatment as
+  // one that arrived already matching from a suggestion. `vendorDefaultFill`
+  // is what actually enforces "empty and untouched only"; this effect is
+  // just wiring its result to `setDraft` and to the amber/telemetry state.
+  useEffect(() => {
+    const fill = vendorDefaultFill(draft, touched, options.vendorDefaults);
+    if (fill.category === null && fill.paymentMethod === null) {
+      return;
+    }
+    setDraft((d) => ({
+      ...d,
+      ...(fill.category !== null && { category: fill.category }),
+      ...(fill.paymentMethod !== null && { paymentMethod: fill.paymentMethod }),
+    }));
+    setClientApplied((current) => {
+      const next = new Set(current);
+      if (fill.category !== null) next.add("category");
+      if (fill.paymentMethod !== null) next.add("paymentMethod");
+      return next;
+    });
+    if (fill.category !== null) {
+      logEvent({ action: "suggestion_accepted", field: "category", receiptId: receipt.id });
+    }
+    if (fill.paymentMethod !== null) {
+      logEvent({
+        action: "suggestion_accepted",
+        field: "paymentMethod",
+        receiptId: receipt.id,
+      });
+    }
+  }, [draft, touched, options.vendorDefaults, receipt.id, setDraft]);
 
   return (
     <div className="field-grid">
@@ -465,6 +801,13 @@ export function ReceiptFieldsForm({
           look, not a blocker.
         </p>
       )}
+      {/* Only reachable when `mismatch` above is not: total is blank exactly
+          when arithmeticMismatch has nothing to reconcile against, so the
+          two never render together (see `derived`'s own comment). */}
+      <AmountDeriveNote
+        offer={derived?.field === "total" ? derived : null}
+        onApply={applyDerivedAmount}
+      />
       <label className={amber("purchasedAt")}>
         Purchase date
         <input
@@ -508,6 +851,10 @@ export function ReceiptFieldsForm({
           check the paper before confirming.
         </p>
       )}
+      <AmountDeriveNote
+        offer={derived?.field === "hst" ? derived : null}
+        onApply={applyDerivedAmount}
+      />
       <label className={amber("subtotal")}>
         Subtotal
         <input
@@ -518,6 +865,10 @@ export function ReceiptFieldsForm({
           placeholder="Not found"
         />
       </label>
+      <AmountDeriveNote
+        offer={derived?.field === "subtotal" ? derived : null}
+        onApply={applyDerivedAmount}
+      />
       <label className={amber("tip")}>
         Tip
         <input
@@ -528,10 +879,20 @@ export function ReceiptFieldsForm({
           placeholder="Not found"
         />
       </label>
-      {/* No suggestion exists for this field (see `draftFromPending`), so
-          it never starts amber - nothing to opt it out of, it is just not
-          in `suggested`. */}
-      <label>
+      {/* Either offer, never both (`derived`/`reconciliation` above are
+          mutually exclusive by construction): the single-missing-field fill
+          when tip is the one blank amount, the reconciliation fix when all
+          five are present but do not add up. */}
+      <AmountDeriveNote
+        offer={derived?.field === "tip" ? derived : (reconciliation?.tip ?? null)}
+        onApply={applyDerivedAmount}
+      />
+      {/* Proposal #1 widened this field's amber source beyond the OCR merge
+          (see `SuggestibleField`'s comment): no heuristic has ever
+          suggested other fees, but a derived fill or a reconciliation fix
+          can now land here, so it gets the same amber treatment as every
+          other amount field instead of being permanently exempt. */}
+      <label className={amber("otherFees")}>
         Other fees
         <input
           className="money"
@@ -541,9 +902,15 @@ export function ReceiptFieldsForm({
           placeholder="Not found"
         />
       </label>
+      <AmountDeriveNote
+        offer={derived?.field === "otherFees" ? derived : (reconciliation?.otherFees ?? null)}
+        onApply={applyDerivedAmount}
+      />
       {/* Free text with the person's own past values offered: a suggestion
-          list, never a closed set. */}
-      <label>
+          list, never a closed set. Proposal #2's vendor default is the same
+          amber source as `otherFees` above - a client-applied suggestion
+          the OCR merge has no key for at all. */}
+      <label className={amber("category")}>
         Category
         <input
           value={draft.category}
@@ -553,7 +920,7 @@ export function ReceiptFieldsForm({
           list={CATEGORY_LIST_ID}
         />
       </label>
-      <label>
+      <label className={amber("paymentMethod")}>
         Payment method
         <input
           value={draft.paymentMethod}
@@ -573,5 +940,38 @@ export function ReceiptFieldsForm({
         />
       </label>
     </div>
+  );
+}
+
+/**
+ * Proposal #1's affordance, rendered next to whichever field it is about:
+ * the formula and the computed amount together (the risk mitigation named
+ * in the proposal - "the affordance says what it is doing... rather than
+ * just appearing"), and filling is a deliberate click via `onApply`, never
+ * automatic and never wired to Save. Reused for both of this form's
+ * offers - `deriveMissingAmount`'s single missing field and
+ * `reconciliationSuggestions`' fix - since both produce the identical
+ * `DerivedAmount` shape and both land amber the same way once applied.
+ * `.warning` for its background (this is the same amber family as every
+ * other unreviewed-suggestion note on this form, §10A.1 - never a separate,
+ * softer treatment) with its own class for the "Fill" button's styling.
+ */
+function AmountDeriveNote({
+  offer,
+  onApply,
+}: {
+  offer: DerivedAmount | null;
+  onApply: (offer: DerivedAmount) => void;
+}) {
+  if (offer === null) {
+    return null;
+  }
+  return (
+    <p className="warning derive-note">
+      {offer.formula} = {formatCents(offer.cents)}
+      <button type="button" className="link" onClick={() => onApply(offer)}>
+        Fill
+      </button>
+    </p>
   );
 }

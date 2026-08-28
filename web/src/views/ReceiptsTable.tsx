@@ -1,6 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeptApi } from "../api.js";
 import { ApiError } from "../api.js";
+import {
+  EMPTY_SELECTION,
+  allLoadedSelected,
+  categoryPatch,
+  confirmPatch,
+  partitionConfirmable,
+  paymentMethodPatch,
+  runBatch,
+  toggleRow,
+  toggleSelectAll,
+  type BatchFailure,
+  type BatchResult,
+  type Selection,
+} from "../bulkEdit.js";
 import { logEvent } from "../events.js";
 import { formatCents, parseMoneyInput } from "../money.js";
 import {
@@ -16,6 +30,7 @@ import type {
   ReceiptPatch,
   ReceiptSort,
   ReceiptStatus,
+  ReceiptSummary,
   SortOrder,
 } from "../types.js";
 
@@ -53,6 +68,20 @@ export function classifyFilterChange(
   return null;
 }
 
+/** The three bulk actions the brief names - "set category," "set payment
+ * method," "confirm." No "delete": see bulkEdit.ts's comment for why that
+ * omission is deliberate rather than missing. */
+type BulkActionKind = "category" | "paymentMethod" | "confirm";
+
+/** The result of the most recently finished bulk action, kept on screen
+ * until the next one starts or the person dismisses it - the report
+ * `runBulkAction` below builds, and the one place partial failure actually
+ * gets said out loud. */
+interface BulkOutcome {
+  kind: BulkActionKind;
+  result: BatchResult;
+}
+
 /**
  * Spec §7A screen 2: every receipt, filterable (date range, status,
  * category, payment, free-text over vendor/category/notes), sortable on the
@@ -83,10 +112,26 @@ export function ReceiptsTable({
   const [pendingCount, setPendingCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Proposal #3's running totals for the current filter - a separate fetch
+  // from the page above (GET /api/receipts/summary, not computed from
+  // `rows`: the page is 50 rows and the answer is about the whole filter).
+  // Null both before the first answer and after a failed one - see
+  // `loadSummary` below for why a stale figure is not kept on failure the
+  // way `rows` is.
+  const [summary, setSummary] = useState<ReceiptSummary | null>(null);
   // For classifyFilterChange below - the effect that fetches on `filters`
   // also fires on a `dataVersion` bump alone (another screen changed a
   // receipt), which must not be misread as a search/filter/sort action.
   const previousFilters = useRef(filters);
+
+  // Bulk edit (proposal #5): selection is a set of receipt ids, always a
+  // subset of what `rows` currently holds - see bulkEdit.ts for why that
+  // scoping is load-bearing rather than incidental.
+  const [selected, setSelected] = useState<Selection>(EMPTY_SELECTION);
+  const [bulkCategory, setBulkCategory] = useState("");
+  const [bulkPayment, setBulkPayment] = useState("");
+  const [bulkRunning, setBulkRunning] = useState<BulkActionKind | null>(null);
+  const [bulkOutcome, setBulkOutcome] = useState<BulkOutcome | null>(null);
 
   const loadFirstPage = useCallback(
     async (activeFilters: ListFilters) => {
@@ -110,6 +155,24 @@ export function ReceiptsTable({
     [api],
   );
 
+  const loadSummary = useCallback(
+    async (activeFilters: ListFilters) => {
+      try {
+        setSummary(await api.receiptSummary(activeFilters));
+      } catch {
+        // Proposal #3's own instruction: a failed aggregate fetch must
+        // never break the table sitting below it - degrade to no summary.
+        // Unlike `options.ts`'s "keep the last good lists", the last good
+        // summary is NOT kept here: it would be a total for a filter that
+        // has since changed, which is actively misleading rather than
+        // merely missing, and this row has nothing else on screen it could
+        // silently disagree with the way a stale picker list would not.
+        setSummary(null);
+      }
+    },
+    [api],
+  );
+
   useEffect(() => {
     // Logged for the action itself, not the fetch's outcome - there is no
     // list_search_failed in the vocabulary (events.ts), so a search/filter/
@@ -119,9 +182,20 @@ export function ReceiptsTable({
     previousFilters.current = filters;
     if (changed !== null) {
       logEvent({ action: changed });
+      // A new search/filter/sort replaces `rows` with a different result
+      // set entirely - unlike the dataVersion-only refresh a bulk action or
+      // a single-row save triggers below, where the point is to keep the
+      // selection (narrowed to whatever failed) so a retry has something to
+      // retry.
+      setSelected(EMPTY_SELECTION);
+      setBulkOutcome(null);
     }
     void loadFirstPage(filters);
-  }, [loadFirstPage, filters, dataVersion]);
+    // Same trigger as the page fetch above (any filter change, or another
+    // screen bumping dataVersion after a save) - the brief's own
+    // instruction: "re-fetch when the filter changes, alongside the list."
+    void loadSummary(filters);
+  }, [loadFirstPage, loadSummary, filters, dataVersion]);
 
   async function loadMore() {
     if (nextCursor === null) {
@@ -156,6 +230,97 @@ export function ReceiptsTable({
       }
       return caught instanceof Error ? caught.message : String(caught);
     }
+  }
+
+  /**
+   * Runs one bulk action over `ids`, `preBlocked` already-known failures
+   * (only ever non-empty for "confirm" - the rows `partitionConfirmable`
+   * refused before a request was ever sent). This is the one place that
+   * turns a `BatchResult` into what the rest of this screen must do with
+   * it:
+   *
+   * - Every succeeded PATCH's response updates its row in place, the same
+   *   way `saveField` above does for a single edit - the server's own
+   *   returned row, never a locally-guessed one.
+   * - Selection narrows to exactly the ids that failed (blocked or
+   *   rejected), so "Confirm" pressed again acts on only what still needs
+   *   it - the brief's "leave the failed ones still selected."
+   * - `onChanged()` fires once, only if something actually succeeded, and
+   *   only once per whole batch rather than once per row - it re-fetches
+   *   page one, which is the only path that refreshes `pendingCount`
+   *   honestly (§5.2a: that count has to come from the server, never a
+   *   locally decremented guess).
+   * - `bulkOutcome` is set unconditionally, even on a clean sweep, so the
+   *   screen always states a real count rather than ever implying success
+   *   silently.
+   */
+  async function runBulkAction(
+    kind: BulkActionKind,
+    ids: string[],
+    patch: ReceiptPatch,
+    preBlocked: BatchFailure[] = [],
+  ) {
+    setBulkRunning(kind);
+    setBulkOutcome(null);
+    const result = await runBatch(ids, async (id) => {
+      const updated = await api.updateReceipt(id, patch);
+      setRows((current) =>
+        current.map((row) => (row.id === id ? updated : row)),
+      );
+      options.noteSaved({
+        category: updated.category,
+        paymentMethod: updated.paymentMethod,
+        vendor: updated.vendor,
+      });
+    });
+    const failed = [...preBlocked, ...result.failed];
+    // One receipt_edited per receipt actually changed - the vocabulary's
+    // existing per-row action (events.ts), not a bulk-specific one the
+    // server does not know. Fire-and-forget, per logEvent's own contract;
+    // never for a blocked or rejected id, since nothing changed for those.
+    for (const id of result.succeeded) {
+      logEvent({ action: "receipt_edited", receiptId: id });
+    }
+    setSelected(new Set(failed.map((f) => f.id)));
+    setBulkOutcome({ kind, result: { succeeded: result.succeeded, failed } });
+    setBulkRunning(null);
+    // The value just got sent - leaving it sitting in the box reads as
+    // "not yet applied" and invites a confused second click. Only the box
+    // for the action that actually ran; "confirm" carries no text input.
+    if (kind === "category") {
+      setBulkCategory("");
+    } else if (kind === "paymentMethod") {
+      setBulkPayment("");
+    }
+    if (result.succeeded.length > 0) {
+      onChanged();
+    }
+  }
+
+  const selectedRows = rows.filter((row) => selected.has(row.id));
+  // Computed live off the current selection, not only at the moment
+  // Confirm is pressed - the brief's "consider disabling or warning before
+  // the request is sent." Recomputed every render is cheap at table
+  // scale (at most a page's worth of rows).
+  const confirmPreview = partitionConfirmable(selectedRows);
+
+  function bulkSetCategory() {
+    void runBulkAction("category", Array.from(selected), categoryPatch(bulkCategory));
+  }
+  function bulkSetPaymentMethod() {
+    void runBulkAction(
+      "paymentMethod",
+      Array.from(selected),
+      paymentMethodPatch(bulkPayment),
+    );
+  }
+  function bulkConfirm() {
+    void runBulkAction(
+      "confirm",
+      confirmPreview.confirmable,
+      confirmPatch,
+      confirmPreview.blocked,
+    );
   }
 
   // What the controls show while nothing is chosen is what the server does
@@ -297,7 +462,102 @@ export function ReceiptsTable({
         </button>
       </div>
 
+      <SummaryLine summary={summary} />
+
       {error !== null && <p className="error">{error}</p>}
+
+      {selected.size > 0 && (
+        <div className="bulk-bar">
+          {/* Denominator is always the loaded count, never a total-account
+              figure the table has not fetched - the brief's own warning
+              about what "select all" must not be misread as. */}
+          <span className="bulk-count">
+            {selected.size} of {rows.length} loaded selected
+          </span>
+          <label>
+            Set category
+            <input
+              placeholder="category"
+              list={CATEGORY_LIST_ID}
+              value={bulkCategory}
+              disabled={bulkRunning !== null}
+              onChange={(e) => setBulkCategory(e.target.value)}
+            />
+          </label>
+          <button
+            className="primary"
+            disabled={bulkRunning !== null || bulkCategory.trim() === ""}
+            onClick={bulkSetCategory}
+          >
+            Apply
+          </button>
+          <label>
+            Set payment
+            <input
+              placeholder="payment method"
+              list={PAYMENT_LIST_ID}
+              value={bulkPayment}
+              disabled={bulkRunning !== null}
+              onChange={(e) => setBulkPayment(e.target.value)}
+            />
+          </label>
+          <button
+            className="primary"
+            disabled={bulkRunning !== null || bulkPayment.trim() === ""}
+            onClick={bulkSetPaymentMethod}
+          >
+            Apply
+          </button>
+          <div className="bulk-confirm">
+            <button
+              className="primary"
+              disabled={
+                bulkRunning !== null || confirmPreview.confirmable.length === 0
+              }
+              onClick={bulkConfirm}
+              title="Moves pending rows to confirmed. Rows with no total on file are skipped."
+            >
+              Confirm ({confirmPreview.confirmable.length})
+            </button>
+            {confirmPreview.blocked.length > 0 && (
+              <span className="bulk-warning">
+                {confirmPreview.blocked.length} of {selected.size} selected{" "}
+                {confirmPreview.blocked.length === 1 ? "has" : "have"} no total
+                and will be skipped
+              </span>
+            )}
+          </div>
+          <button
+            className="link"
+            disabled={bulkRunning !== null}
+            onClick={() => {
+              setSelected(EMPTY_SELECTION);
+              setBulkOutcome(null);
+            }}
+          >
+            Clear selection
+          </button>
+          {/* Only shown when it is actually ambiguous: every loaded row is
+              selected AND the table knows more receipts exist past what it
+              has fetched. This is the concrete answer to "select all must
+              not read as all N receipts in my account." */}
+          {nextCursor !== null && allLoadedSelected(rows.map((r) => r.id), selected) && (
+            <p className="bulk-scope-note muted">
+              This selects the {rows.length} loaded rows only - more receipts
+              are not loaded. Load more first to include them.
+            </p>
+          )}
+        </div>
+      )}
+
+      {bulkOutcome !== null && (
+        <BulkOutcomeBanner
+          outcome={bulkOutcome}
+          rows={rows}
+          onDismiss={() => setBulkOutcome(null)}
+        />
+      )}
+
       {loading && rows.length === 0 ? (
         <p className="muted">Loading…</p>
       ) : rows.length === 0 ? (
@@ -308,6 +568,21 @@ export function ReceiptsTable({
         <table className="receipts">
           <thead>
             <tr>
+              <th className="select-col">
+                <SelectAllCheckbox
+                  loadedIds={rows.map((row) => row.id)}
+                  selected={selected}
+                  disabled={bulkRunning !== null}
+                  onToggle={() =>
+                    setSelected((current) =>
+                      toggleSelectAll(
+                        rows.map((row) => row.id),
+                        current,
+                      ),
+                    )
+                  }
+                />
+              </th>
               <th>Date</th>
               <th>Vendor</th>
               <th>Category</th>
@@ -323,6 +598,11 @@ export function ReceiptsTable({
               <ReceiptRow
                 key={row.id}
                 row={row}
+                selected={selected.has(row.id)}
+                selectionDisabled={bulkRunning !== null}
+                onToggleSelected={() =>
+                  setSelected((current) => toggleRow(current, row.id))
+                }
                 onOpen={() => onOpen(row.id)}
                 onSave={(patch) => saveField(row.id, patch)}
               />
@@ -337,6 +617,126 @@ export function ReceiptsTable({
       )}
     </section>
   );
+}
+
+/**
+ * The header checkbox. A separate component only for the indeterminate
+ * state - React has no `indeterminate` prop (it is not a real HTML
+ * attribute, only a DOM property), so it has to be imperatively set on the
+ * element after every render that could change it.
+ */
+function SelectAllCheckbox({
+  loadedIds,
+  selected,
+  disabled,
+  onToggle,
+}: {
+  loadedIds: string[];
+  selected: Selection;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  const allSelected = allLoadedSelected(loadedIds, selected);
+  const someSelected = !allSelected && loadedIds.some((id) => selected.has(id));
+  useEffect(() => {
+    if (ref.current !== null) {
+      ref.current.indeterminate = someSelected;
+    }
+  }, [someSelected]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={allSelected}
+      disabled={disabled}
+      aria-label={`Select all ${loadedIds.length} loaded receipt${loadedIds.length === 1 ? "" : "s"}`}
+      onChange={onToggle}
+    />
+  );
+}
+
+/**
+ * The result of one finished bulk action, stated in full every time -
+ * never a bare "Done," because part of the batch failing is the normal
+ * case here, not the edge case. A clean sweep and a partial one share this
+ * one component so a partial failure cannot be styled or worded into
+ * looking like success.
+ */
+function BulkOutcomeBanner({
+  outcome,
+  rows,
+  onDismiss,
+}: {
+  outcome: BulkOutcome;
+  rows: Receipt[];
+  onDismiss: () => void;
+}) {
+  const { result } = outcome;
+  const total = result.succeeded.length + result.failed.length;
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const label = (id: string) => {
+    const row = byId.get(id);
+    if (row === undefined) {
+      return id;
+    }
+    return `${row.purchasedAt} · ${row.vendor ?? "no vendor"}`;
+  };
+  return (
+    <div className={`bulk-outcome${result.failed.length > 0 ? " warning" : ""}`}>
+      <p>
+        {result.succeeded.length} of {total} updated.
+        {result.failed.length > 0 &&
+          ` ${result.failed.length} failed - still selected, ready to retry.`}
+      </p>
+      {result.failed.length > 0 && (
+        <ul>
+          {result.failed.map((failure) => (
+            <li key={failure.id}>
+              {label(failure.id)}: {failure.reason}
+            </li>
+          ))}
+        </ul>
+      )}
+      <button className="link" onClick={onDismiss}>
+        dismiss
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Proposal #3's summary line copy, exported for its own unit test - same
+ * reasoning as `describeOrder` below: the one place this screen states, in
+ * words, what the figures do and do not include. The risk the proposal
+ * names by name: "the number invites being read as a tax figure... a
+ * summary that quietly counted pending rows would disagree with the export
+ * sitting next to it." Both halves of the mitigation are in this one
+ * sentence - the money is captioned "confirmed only" in the same breath it
+ * is stated, and the pending count is its own clause, read off
+ * `summary.pendingCount` and never folded into `summary.confirmed`'s
+ * figures beside it.
+ */
+export function describeSummary(summary: ReceiptSummary): string {
+  const { count, totalCents, hstCents } = summary.confirmed;
+  return (
+    `${count} confirmed receipt${count === 1 ? "" : "s"} · ` +
+    `${formatCents(totalCents)} spent · ${formatCents(hstCents)} HST - ` +
+    `confirmed only, excludes ${summary.pendingCount} pending`
+  );
+}
+
+/**
+ * Renders nothing before the first answer or after a failed one
+ * (`summary === null`) - "a failure to load the summary must not break the
+ * table" (the brief's own words), so this is the one piece of this screen
+ * allowed to just quietly not be there.
+ */
+function SummaryLine({ summary }: { summary: ReceiptSummary | null }) {
+  if (summary === null) {
+    return null;
+  }
+  return <p className="summary-line">{describeSummary(summary)}</p>;
 }
 
 /**
@@ -359,10 +759,16 @@ export function describeOrder(sort: ReceiptSort, order: SortOrder): string {
 
 function ReceiptRow({
   row,
+  selected,
+  selectionDisabled,
+  onToggleSelected,
   onOpen,
   onSave,
 }: {
   row: Receipt;
+  selected: boolean;
+  selectionDisabled: boolean;
+  onToggleSelected: () => void;
   onOpen: () => void;
   onSave: (patch: ReceiptPatch) => Promise<string | null>;
 }) {
@@ -375,6 +781,15 @@ function ReceiptRow({
   return (
     <>
       <tr className={row.status === "pending" ? "pending" : ""}>
+        <td className="select-col">
+          <input
+            type="checkbox"
+            checked={selected}
+            disabled={selectionDisabled}
+            aria-label={`Select receipt from ${row.vendor ?? "unknown vendor"} on ${row.purchasedAt}`}
+            onChange={onToggleSelected}
+          />
+        </td>
         <td>
           <DateCell value={row.purchasedAt} onSave={(v) => save({ purchasedAt: v })} />
         </td>
@@ -430,7 +845,7 @@ function ReceiptRow({
       </tr>
       {rowError !== null && (
         <tr className="row-error">
-          <td colSpan={8}>
+          <td colSpan={9}>
             <span className="error">{rowError}</span>
             <button className="link" onClick={() => setRowError(null)}>
               dismiss

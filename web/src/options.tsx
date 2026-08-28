@@ -18,6 +18,7 @@ export const NO_OPTIONS: ReceiptOptions = {
   categories: [],
   paymentMethods: [],
   vendors: [],
+  vendorDefaults: {},
 };
 
 /** The one document id each list is referenced by, from `list=`. */

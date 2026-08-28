@@ -102,6 +102,34 @@ export interface ReceiptDetail extends Receipt {
   images: ReceiptImage[];
 }
 
+/**
+ * What POST /api/receipts/:id/images (add a page) and
+ * PUT /api/receipts/:id/images/:page (replace a page) both take -
+ * `receiptImageSchema` (server/src/http/schemas.ts), the exact shape
+ * POST /api/receipts/upload-url issues and the create route's own `image`
+ * key already uses. Proposal #6, 2026-08-28.
+ */
+export interface ReceiptImageWrite {
+  objectKey: string;
+  sha256: string;
+}
+
+/**
+ * What both of those routes return (server's `imageResponse`,
+ * routes/receipts.ts) - richer than the plain `ReceiptImage` the detail
+ * route serves (an `id` and `createdAt` neither the list nor the detail
+ * response carries), and deliberately not merged into it: the receipt
+ * detail screen refreshes from GET /api/receipts/:id after either write
+ * rather than hand-mutating this response into its images array, since the
+ * server - not this client - is what assigns a new page's number.
+ */
+export interface ReceiptImageWriteResult {
+  id: string;
+  page: number;
+  downloadUrl: string;
+  createdAt: string;
+}
+
 export interface ReceiptList {
   receipts: Receipt[];
   nextCursor: string | null;
@@ -186,6 +214,53 @@ export interface ReceiptOptions {
   categories: string[];
   paymentMethods: string[];
   vendors: string[];
+  /**
+   * Proposal #2 (2026-08-28, approved): per vendor, the category and
+   * payment method to prefill from that vendor's most recent CONFIRMED
+   * receipt - keyed by the exact vendor string, no normalization, same
+   * free-text-in-free-text-out rule as the three lists above. The server's
+   * own comment (`vendorDefaultCandidates`, routes/receipts.ts) is why this
+   * is confirmed-only where `vendors` above counts pending receipts too: a
+   * default PREFILLS a field on a *different* receipt without a human
+   * having looked at that one yet, so sourcing it from an unreviewed
+   * pending guess would risk compounding one unconfirmed value into a
+   * second one. Category and payment are defensible to default this way
+   * where an amount never would be (`deriveMissingAmount`'s own doc
+   * comment): category is free text with no tax consequence - a wrong
+   * default costs a mislabelled row an accountant re-reads, never a wrong
+   * claim.
+   *
+   * A vendor absent from this map has no default to offer - omitted rather
+   * than served as `{category: null, paymentMethod: null}`, which a client
+   * would otherwise have to learn is not one.
+   */
+  vendorDefaults: Record<
+    string,
+    { category: string | null; paymentMethod: string | null }
+  >;
+}
+
+/**
+ * GET /api/receipts/summary (proposal #3, 2026-08-28, approved): the same
+ * running-totals question a single receipt's arithmetic check answers,
+ * asked over a whole filtered list. `confirmed` is the count and summed
+ * money fields over confirmed rows only; `pendingCount` is that same
+ * filter's pending rows, counted and nothing else - two numbers, never one
+ * blended figure, so a client cannot fold a pending row's amount into a
+ * total that reads as a finished claim (spec: nothing pending may appear in
+ * an export, and a summary that disagreed with the export sitting next to
+ * it would be exactly the failure the proposal names by name).
+ */
+export interface ReceiptSummary {
+  confirmed: {
+    count: number;
+    subtotalCents: number;
+    hstCents: number;
+    tipCents: number;
+    otherFeesCents: number;
+    totalCents: number;
+  };
+  pendingCount: number;
 }
 
 /**

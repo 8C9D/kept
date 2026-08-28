@@ -28,6 +28,17 @@ export interface UploadCandidate {
   bytes: () => Promise<ArrayBuffer>;
 }
 
+/**
+ * The two ways the presign-then-PUT step itself can come up short, before
+ * either this file's `createReceipt` or receiptImages.ts's add/replace
+ * routes are ever called. Factored out as its own type (not just inlined
+ * into UploadOutcome) so receiptImages.ts's own outcome type can share it
+ * exactly rather than redeclaring the same two shapes.
+ */
+export type UploadStepOutcome =
+  | { state: "unsupported"; detail: string }
+  | { state: "failed"; detail: string };
+
 export type UploadOutcome =
   | { state: "created"; receiptId: string }
   /**
@@ -38,8 +49,7 @@ export type UploadOutcome =
    * fact to show, not a lost 201 to smooth over.
    */
   | { state: "duplicate" }
-  | { state: "unsupported"; detail: string }
-  | { state: "failed"; detail: string };
+  | UploadStepOutcome;
 
 /** Today's date where the API expects yyyy-mm-dd, in local time. */
 export function isoDateToday(now: Date): string {
@@ -63,6 +73,54 @@ export async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
 }
 
 /**
+ * The presign -> PUT step shared by every writer that attaches bytes to a
+ * receipt: this file's `uploadOne` (create) and receiptImages.ts's
+ * add-a-page / replace-a-page (proposal #6, 2026-08-28). Pulled out on its
+ * own so "only tell the API about bytes that actually landed" is true by
+ * construction in one place rather than three - a failed PUT here returns
+ * `ok: false` before any caller ever reaches its own API call, which is
+ * exactly what stops a failed storage PUT from producing a receipt (or a
+ * page) that points at bytes which are not there, the documented sharp
+ * edge (spec §8) this whole feature exists to repair.
+ */
+export async function presignAndPut(
+  api: KeptApi,
+  file: UploadCandidate,
+): Promise<
+  | { ok: true; objectKey: string; sha256: string }
+  | { ok: false; outcome: UploadStepOutcome }
+> {
+  const contentType = supportedContentType(file.type);
+  if (contentType === null) {
+    return {
+      ok: false,
+      outcome: {
+        state: "unsupported",
+        detail: `${file.type === "" ? "unknown type" : file.type} - use JPEG, PNG or PDF`,
+      },
+    };
+  }
+  const bytes = await file.bytes();
+  const sha256 = await sha256Hex(bytes);
+  const { objectKey, uploadUrl } = await api.uploadUrl(contentType);
+  const put = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: { "Content-Type": contentType },
+    body: bytes,
+  });
+  if (!put.ok) {
+    return {
+      ok: false,
+      outcome: {
+        state: "failed",
+        detail: `storage answered ${put.status} to the upload`,
+      },
+    };
+  }
+  return { ok: true, objectKey, sha256 };
+}
+
+/**
  * One file, end to end. The purchase date is the upload day - the same
  * capture-day fallback the iOS confirm screen prefills when OCR finds no
  * date - and it is a suggestion for the confirm queue to correct, never a
@@ -74,32 +132,15 @@ export async function uploadOne(
   file: UploadCandidate,
   now: Date,
 ): Promise<UploadOutcome> {
-  const contentType = supportedContentType(file.type);
-  if (contentType === null) {
-    return {
-      state: "unsupported",
-      detail: `${file.type === "" ? "unknown type" : file.type} - use JPEG, PNG or PDF`,
-    };
-  }
   try {
-    const bytes = await file.bytes();
-    const sha256 = await sha256Hex(bytes);
-    const { objectKey, uploadUrl } = await api.uploadUrl(contentType);
-    const put = await fetch(uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": contentType },
-      body: bytes,
-    });
-    if (!put.ok) {
-      return {
-        state: "failed",
-        detail: `storage answered ${put.status} to the upload`,
-      };
+    const step = await presignAndPut(api, file);
+    if (!step.ok) {
+      return step.outcome;
     }
     const receipt = await api.createReceipt({
       purchasedAt: isoDateToday(now),
       capturedAt: now.toISOString(),
-      image: { objectKey, sha256 },
+      image: { objectKey: step.objectKey, sha256: step.sha256 },
     });
     return { state: "created", receiptId: receipt.id };
   } catch (error) {

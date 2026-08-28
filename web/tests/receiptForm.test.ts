@@ -3,15 +3,18 @@ import {
   DraftError,
   arithmeticMismatch,
   dateDisagreementNote,
+  deriveMissingAmount,
   draftForDisplay,
   draftFromPending,
   draftFromReceipt,
   hstDisagreementNote,
   patchFromDraft,
+  reconciliationSuggestions,
   summarizeFieldEdits,
+  vendorDefaultFill,
   type ReceiptDraft,
 } from "../src/views/ReceiptForm.js";
-import type { Receipt } from "../src/types.js";
+import type { Receipt, ReceiptOptions } from "../src/types.js";
 
 function receipt(overrides: Partial<Receipt> = {}): Receipt {
   return {
@@ -237,6 +240,256 @@ describe("arithmeticMismatch - the live subtotal + HST + tip + other fees = tota
     expect(
       arithmeticMismatch(draft({ subtotal: "10.00", total: "10.00", tip: "1." })),
     ).toBe(false);
+  });
+});
+
+describe("deriveMissingAmount - the live mirror of the server's function of the same name", () => {
+  it("derives subtotal when it is the one blank field", () => {
+    // $138.00 total = subtotal + $13.00 HST + $20.00 tip + $5.00 other fees.
+    const result = deriveMissingAmount(
+      draft({ hst: "13.00", tip: "20.00", otherFees: "5.00", total: "138.00" }),
+    );
+    expect(result).toEqual({
+      field: "subtotal",
+      cents: 10000,
+      formula: expect.stringContaining("Subtotal"),
+    });
+  });
+
+  it("derives HST when it is the one blank field", () => {
+    const result = deriveMissingAmount(
+      draft({ subtotal: "100.00", tip: "20.00", otherFees: "5.00", total: "138.00" }),
+    );
+    expect(result).toEqual({ field: "hst", cents: 1300, formula: expect.any(String) });
+  });
+
+  it("derives tip when it is the one blank field", () => {
+    const result = deriveMissingAmount(
+      draft({ subtotal: "100.00", hst: "13.00", otherFees: "5.00", total: "138.00" }),
+    );
+    expect(result).toEqual({ field: "tip", cents: 2000, formula: expect.any(String) });
+  });
+
+  it("derives other fees when it is the one blank field", () => {
+    const result = deriveMissingAmount(
+      draft({ subtotal: "100.00", hst: "13.00", tip: "20.00", total: "138.00" }),
+    );
+    expect(result).toEqual({ field: "otherFees", cents: 500, formula: expect.any(String) });
+  });
+
+  it("derives total when it is the one blank field - the sum, not a subtraction", () => {
+    const result = deriveMissingAmount(
+      draft({ subtotal: "100.00", hst: "13.00", tip: "20.00", otherFees: "5.00" }),
+    );
+    expect(result).toEqual({ field: "total", cents: 13800, formula: expect.any(String) });
+  });
+
+  it("names which field it is a suggestion for, not a bare number", () => {
+    // The server's own point (arithmetic.ts): the field name in the result
+    // is what lets a caller never confuse which field a value is for.
+    const result = deriveMissingAmount(
+      draft({ subtotal: "100.00", hst: "13.00", tip: "20.00", total: "138.00" }),
+    );
+    expect(result?.field).toBe("otherFees");
+    expect(result?.formula).toContain("Other fees");
+  });
+
+  it("derives nothing when all five are already filled", () => {
+    expect(
+      deriveMissingAmount(
+        draft({
+          subtotal: "100.00",
+          hst: "13.00",
+          tip: "20.00",
+          otherFees: "5.00",
+          total: "138.00",
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("derives nothing when two or more fields are blank - more than one unknown", () => {
+    expect(
+      deriveMissingAmount(draft({ hst: "13.00", tip: "20.00", total: "138.00" })),
+    ).toBeNull();
+  });
+
+  it("refuses a negative tip - the server's own named refusal", () => {
+    // subtotal + hst + otherFees ($118) already exceeds total ($100), so
+    // solving for tip would require -$18. NEVER_NEGATIVE_FIELDS refuses it
+    // rather than inventing a number that looks like an answer.
+    const result = deriveMissingAmount(
+      draft({ subtotal: "100.00", hst: "13.00", otherFees: "5.00", total: "100.00" }),
+    );
+    expect(result).toBeNull();
+  });
+
+  it("refuses a negative other-fees amount the same way", () => {
+    const result = deriveMissingAmount(
+      draft({ subtotal: "100.00", hst: "13.00", tip: "5.00", total: "100.00" }),
+    );
+    expect(result).toBeNull();
+  });
+
+  it("allows a negative subtotal, HST or total - a refund receipt is real", () => {
+    // Mirrors the server's own comment: negative money is allowed generally
+    // (a refund), and only tip/otherFees are charges that can never run
+    // negative. Every component zero except a negative total: subtotal
+    // (the blank field) must come out -$50.00 to balance.
+    const result = deriveMissingAmount(
+      draft({ hst: "0.00", tip: "0.00", otherFees: "0.00", total: "-50.00" }),
+    );
+    expect(result).toEqual({ field: "subtotal", cents: -5000, formula: expect.any(String) });
+  });
+
+  it("refuses a result outside the storable cents range", () => {
+    // subtotal ($21,474,836.47) + hst ($0.01) already exceeds
+    // MAX_STORABLE_CENTS by one cent, so the derived total would too.
+    const result = deriveMissingAmount(
+      draft({ subtotal: "21474836.47", hst: "0.01", tip: "0.00", otherFees: "0.00" }),
+    );
+    expect(result).toBeNull();
+  });
+
+  it("derives nothing while a box is mid-keystroke unparseable", () => {
+    expect(
+      deriveMissingAmount(
+        draft({ subtotal: "100.00", hst: "13.00", otherFees: "1.", total: "138.00" }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("reconciliationSuggestions - proposal #1's second offer, all five present but mismatched", () => {
+  it("offers both a tip fix and an other-fees fix when the shortfall makes both non-negative", () => {
+    // $100 subtotal + $13 HST + $5 tip + $0 other fees = $118, but the
+    // receipt says $138 total - an $20 shortfall the person under-recorded
+    // somewhere in tip or other fees.
+    const result = reconciliationSuggestions(
+      draft({ subtotal: "100.00", hst: "13.00", tip: "5.00", otherFees: "0.00", total: "138.00" }),
+    );
+    expect(result?.tip).toEqual({ field: "tip", cents: 2500, formula: expect.any(String) });
+    expect(result?.otherFees).toEqual({
+      field: "otherFees",
+      cents: 2000,
+      formula: expect.any(String),
+    });
+  });
+
+  it("refuses only the half of the offer that would be a negative tip or fee", () => {
+    // Solving for tip ($27) stays positive; solving for other fees instead
+    // would require -$23, which is refused - the same rule
+    // deriveMissingAmount enforces, reused rather than duplicated.
+    const result = reconciliationSuggestions(
+      draft({ subtotal: "100.00", hst: "13.00", tip: "50.00", otherFees: "0.00", total: "140.00" }),
+    );
+    expect(result?.tip).toEqual({ field: "tip", cents: 2700, formula: expect.any(String) });
+    expect(result?.otherFees).toBeNull();
+  });
+
+  it("offers nothing when the five already reconcile", () => {
+    expect(
+      reconciliationSuggestions(
+        draft({
+          subtotal: "100.00",
+          hst: "13.00",
+          tip: "20.00",
+          otherFees: "5.00",
+          total: "138.00",
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("offers nothing when a field is blank - deriveMissingAmount is the offer for that case", () => {
+    expect(
+      reconciliationSuggestions(
+        draft({ subtotal: "100.00", hst: "13.00", otherFees: "5.00", total: "138.00" }),
+      ),
+    ).toBeNull();
+  });
+
+  it("offers nothing while a box is mid-keystroke unparseable", () => {
+    expect(
+      reconciliationSuggestions(
+        draft({ subtotal: "100.00", hst: "13.00", tip: "1.", otherFees: "5.00", total: "138.00" }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("vendorDefaultFill - proposal #2's live vendor default", () => {
+  const NO_TOUCH = new Set<keyof ReceiptDraft>();
+  const vendorDefaults: ReceiptOptions["vendorDefaults"] = {
+    "Food Basics": { category: "groceries", paymentMethod: "visa" },
+    "Cash Only Diner": { category: "meals", paymentMethod: null },
+  };
+
+  it("fills both fields when the vendor matches and both are empty", () => {
+    const fill = vendorDefaultFill(
+      draft({ vendor: "Food Basics" }),
+      NO_TOUCH,
+      vendorDefaults,
+    );
+    expect(fill).toEqual({ category: "groceries", paymentMethod: "visa" });
+  });
+
+  it("never overwrites a value the person already typed", () => {
+    const fill = vendorDefaultFill(
+      draft({ vendor: "Food Basics", category: "office supplies" }),
+      NO_TOUCH,
+      vendorDefaults,
+    );
+    expect(fill.category).toBeNull();
+    expect(fill.paymentMethod).toBe("visa");
+  });
+
+  it("never re-applies to a field that has been touched, even if it is empty again", () => {
+    const touched = new Set<keyof ReceiptDraft>(["category"]);
+    const fill = vendorDefaultFill(draft({ vendor: "Food Basics" }), touched, vendorDefaults);
+    expect(fill.category).toBeNull();
+    expect(fill.paymentMethod).toBe("visa");
+  });
+
+  it("never overwrites a confirmed receipt's existing values - covered by the same empty-only rule", () => {
+    // A confirmed receipt's draft carries its own stored category/payment
+    // (draftFromReceipt), so this is the same "field is non-empty" check
+    // as the typed-value case above, exercised against a value that came
+    // from the row itself rather than a keystroke.
+    const fill = vendorDefaultFill(
+      draft({ vendor: "Food Basics", category: "meals", paymentMethod: "amex" }),
+      NO_TOUCH,
+      vendorDefaults,
+    );
+    expect(fill).toEqual({ category: null, paymentMethod: null });
+  });
+
+  it("offers nothing for a vendor with no stored default", () => {
+    const fill = vendorDefaultFill(
+      draft({ vendor: "Somewhere New" }),
+      NO_TOUCH,
+      vendorDefaults,
+    );
+    expect(fill).toEqual({ category: null, paymentMethod: null });
+  });
+
+  it("matches the vendor string exactly - no trim, no case fold", () => {
+    expect(
+      vendorDefaultFill(draft({ vendor: "food basics" }), NO_TOUCH, vendorDefaults),
+    ).toEqual({ category: null, paymentMethod: null });
+    expect(
+      vendorDefaultFill(draft({ vendor: "Food Basics " }), NO_TOUCH, vendorDefaults),
+    ).toEqual({ category: null, paymentMethod: null });
+  });
+
+  it("fills only the field the vendor has a default for", () => {
+    // "Cash Only Diner" has a category default and no payment default.
+    const fill = vendorDefaultFill(
+      draft({ vendor: "Cash Only Diner" }),
+      NO_TOUCH,
+      vendorDefaults,
+    );
+    expect(fill).toEqual({ category: "meals", paymentMethod: null });
   });
 });
 

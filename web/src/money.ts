@@ -22,6 +22,19 @@ export function formatCents(cents: number | null): string {
   return `${sign}$${dollars}.${String(centsPart).padStart(2, "0")}`;
 }
 
+/**
+ * int4 bounds, mirrored from the server's own domain/money.ts
+ * (`MAX_STORABLE_CENTS`/`MIN_STORABLE_CENTS`): every money column is a
+ * Postgres `integer`, so a value outside this range is one the server would
+ * refuse to store no matter how it got there. Used only by ReceiptForm.tsx's
+ * `deriveMissingAmount` mirror (proposal #1, 2026-08-28) - this client still
+ * never decides on its own what is storable (the PATCH is still the real
+ * enforcement), but the live derivation that offers a one-tap fill must not
+ * offer a number the server would 400 on the moment it landed.
+ */
+export const MAX_STORABLE_CENTS = 2_147_483_647;
+export const MIN_STORABLE_CENTS = -2_147_483_648;
+
 export class MoneyParseError extends Error {
   constructor(message: string) {
     super(message);

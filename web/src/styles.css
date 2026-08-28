@@ -299,6 +299,18 @@ main > section > h2 { font-size: var(--fs-md); font-weight: 700; color: var(--in
 .dev-token code { font-family: var(--font-mono); font-size: 0.85em; }
 
 /* Table */
+/* Proposal #3's running totals (ReceiptsTable.tsx), above the table it
+   describes. Deliberately plain text, not a card or a stat tile: the risk
+   the proposal names by name is this figure being read as a finished tax
+   total, so nothing here should make it look more authoritative than the
+   sentence stating its own scope right inside it. */
+.summary-line {
+  margin: 0 0 0.9rem;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
 .table-controls {
   display: flex;
   flex-wrap: wrap;
@@ -327,6 +339,58 @@ main > section > h2 { font-size: var(--fs-md); font-weight: 700; color: var(--in
 }
 .confirm-queue:hover:not(:disabled) { border-color: var(--warning-ink); }
 .confirm-queue:disabled { background: var(--surface); border-color: var(--line-strong); color: var(--muted); }
+
+/* Bulk edit (proposal #5, 2026-08-28): the bar sits directly above the
+   table it acts on and shares its border radius and accent tint, so it
+   reads as an active state of the table rather than a modal bolted on -
+   §7A's density-over-friendliness brief applies here as much as anywhere
+   else on this screen. */
+.bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.7rem;
+  margin-bottom: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-md);
+}
+.bulk-bar .bulk-count {
+  align-self: center;
+  font-weight: 700;
+  font-size: var(--fs-xs);
+  color: var(--accent-ink);
+  white-space: nowrap;
+}
+.bulk-bar label { color: var(--accent-ink); }
+.bulk-bar input[list] { width: 10rem; }
+.bulk-confirm { display: flex; flex-direction: column; gap: 0.2rem; }
+.bulk-warning { font-size: var(--fs-2xs); color: var(--warning-ink); font-weight: 600; }
+.bulk-scope-note {
+  flex-basis: 100%;
+  margin: 0.1rem 0 0;
+  color: var(--accent-ink);
+}
+
+.bulk-outcome {
+  margin-bottom: 0.9rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: var(--fs-xs);
+  background: var(--stripe);
+  border-left: 3px solid var(--line-strong);
+}
+/* Reserved for a batch that had at least one failure - the same amber-vs-
+   red distinction the rest of the app draws does not apply here, since a
+   failed row is a genuine refusal (a 400, a network error), not an
+   unreviewed suggestion. */
+.bulk-outcome.warning { background: var(--danger-soft); border-left-color: var(--danger); }
+.bulk-outcome p { margin: 0 0 0.3rem; font-weight: 600; }
+.bulk-outcome ul { margin: 0 0 0.4rem; padding-left: 1.1rem; }
+.bulk-outcome li { margin-bottom: 0.15rem; }
+
+th.select-col, td.select-col { width: 1.8rem; padding-left: 0.6rem; padding-right: 0.1rem; text-align: center; }
 
 table.receipts { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
 table.receipts thead th {
@@ -404,6 +468,28 @@ button.link.status-pending:hover, button.link.status-confirmed:hover { text-deco
 .receipt-pdf { width: 100%; height: 75vh; border: 1px solid var(--line); border-radius: var(--radius-md); }
 .detail-fields { flex: 1; min-width: 22rem; }
 
+/* Multi-page detail images and the add/replace controls (proposal #6,
+   2026-08-28). Each page gets its own labelled block; the add-page
+   dropzone reuses the upload view's own .dropzone treatment, scaled down
+   to fit beside a form rather than filling a whole screen. */
+.detail-page { margin-bottom: 1.2rem; }
+.detail-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+.detail-page-label {
+  font-size: var(--fs-2xs);
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.add-page { margin-top: 1rem; }
+.image-tools-hint { margin-bottom: 0.5rem; }
+.add-page-dropzone { padding: 1.1rem 1rem; margin: 0; font-size: var(--fs-xs); }
+
 /* The field grid is a real two-column form grid, not a wrapped flex line:
    DOM order already groups Purchase date/Vendor, HST/Subtotal, Tip/Other
    fees and Category/Payment method into row pairs (ReceiptForm.tsx's
@@ -464,6 +550,16 @@ button.link.status-pending:hover, button.link.status-confirmed:hover { text-deco
 }
 .field-grid label.suggested.total-field { background: var(--warning-bg); border-color: var(--warning-line); }
 .field-grid label.suggested.total-field input.money { background: none; }
+
+/* Proposal #1's derive-amount offer (ReceiptForm.tsx's `AmountDeriveNote`):
+   the same `.warning` amber band every other inline note on this form uses
+   (never a separate, softer treatment), with its "Fill" button tinted to
+   match rather than reading as an unrelated green link sitting on amber. */
+.field-grid p.warning.derive-note button.link {
+  margin-left: 0.5em;
+  color: var(--warning-ink);
+}
+.field-grid p.warning.derive-note button.link:hover:not(:disabled) { color: var(--ink); }
 
 .detail-actions { margin-top: 1.1rem; display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
 .delete-confirm {
