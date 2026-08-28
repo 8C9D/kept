@@ -73,6 +73,22 @@ struct ConfirmReceiptView: View {
             if model.purpose == .confirm {
                 eventLogger.log(.confirmOpened, receiptId: model.receiptId)
             }
+            // Proposal #2's vendor-default prefill (2026-08-28): whatever
+            // ReceiptOptionsStore already holds at this moment - the last
+            // fetch, possibly stale, possibly from disk - is harmless to
+            // try immediately, the same "these are suggestions into a
+            // free-text field" reasoning ReceiptOptionsStore's own doc
+            // comment states for the reuse menus. The two onChange hooks
+            // below cover the cases this single call cannot: a vendor
+            // typed or picked after the screen opens, and an options fetch
+            // that lands after it.
+            applyVendorDefaultsIfAvailable()
+        }
+        .onChange(of: model.vendorText) { _, _ in
+            applyVendorDefaultsIfAvailable()
+        }
+        .onChange(of: options.options) { _, _ in
+            applyVendorDefaultsIfAvailable()
         }
         .onChange(of: focusedField) { oldFocus, newFocus in
             // Focusing a field is looking at it: the amber clears whether
@@ -98,6 +114,19 @@ struct ConfirmReceiptView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Vendor defaults (proposal #2, 2026-08-28)
+
+    /// The one call site for ConfirmReceiptModel.applyVendorDefaultIfAvailable(_:) -
+    /// wired to three triggers above (onAppear, the vendor text changing,
+    /// the options fetch landing) because any of the three can be the
+    /// thing that makes a match newly possible, and the model itself is
+    /// deliberately not the one polling ReceiptOptionsStore (its own doc
+    /// comment: staying network-free is what keeps it simulator-testable,
+    /// spec §10.2).
+    private func applyVendorDefaultsIfAvailable() {
+        model.applyVendorDefaultIfAvailable(options.options.vendorDefaults)
     }
 
     // MARK: - Telemetry (2026-08-28)
@@ -204,10 +233,53 @@ struct ConfirmReceiptView: View {
                     .font(.footnote)
                     .foregroundStyle(.orange)
                 }
+                derivedAmountAffordances
             }
             .padding(.vertical, 6)
             .listRowBackground(suggestionBackground(for: .total))
         }
+    }
+
+    /// Proposal #1 (2026-08-28): the one-tap fill when exactly one money
+    /// field is derivable, or the reconciliation split when all five are
+    /// present but do not reconcile. Named buttons, not bare ones - the
+    /// proposal's own risk, verbatim: "a person tapping without reading
+    /// and storing an amount the paper does not print" - so every button
+    /// here carries the model's own label stating what it does and the
+    /// exact amount before anyone taps it. Mutually exclusive by
+    /// construction (ConfirmReceiptModel.derivableFill's own comment), so
+    /// at most one row of buttons ever shows.
+    @ViewBuilder
+    private var derivedAmountAffordances: some View {
+        if let label = model.derivableFillLabel {
+            derivedAmountButton(label, identifier: "derivedFill.apply") {
+                model.applyDerivedFill()
+            }
+        }
+        if let tipLabel = model.reconciliationLabel(for: .tip) {
+            derivedAmountButton(tipLabel, identifier: "reconciliation.tip") {
+                model.applyReconciliationDifference(into: .tip)
+            }
+        }
+        if let otherFeesLabel = model.reconciliationLabel(for: .otherFees) {
+            derivedAmountButton(otherFeesLabel, identifier: "reconciliation.otherFees") {
+                model.applyReconciliationDifference(into: .otherFees)
+            }
+        }
+    }
+
+    /// One button shape for both proposal #1 affordances, so the labelled-
+    /// not-bare treatment - the proposal's own risk mitigation - cannot
+    /// drift between the fill button and the two reconciliation buttons
+    /// the way `SuggestedFieldRow`'s own history warns a near-duplicate
+    /// view would.
+    private func derivedAmountButton(_ label: String, identifier: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(label, systemImage: "wand.and.stars")
+                .font(.footnote)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityIdentifier(identifier)
     }
 
     // MARK: - Suggested fields, in the §7.2 order after the total
@@ -298,18 +370,19 @@ struct ConfirmReceiptView: View {
                 isUnreviewed: model.isUnreviewed(.tip),
                 moneyInput: model.tipInput
             )
-            // Other fees carries no suggestion (§6), so it never starts
-            // amber - `isUnreviewed` is hard false here because there is
-            // no SuggestedField.otherFees to ask; the amber mechanism
-            // itself reads the absence of a suggestion (EditableField
-            // .otherFees.suggestion is nil), this call site just has
-            // nothing to look up.
+            // Other fees never starts amber from a parser (§6: no
+            // heuristic or LLM can match a residual with no consistent
+            // printed label) - but it CAN go amber from a proposal #1
+            // derived fill or reconciliation split (2026-08-28), so this
+            // reads the model exactly like every field above it rather
+            // than hard-coding false the way it used to when no source of
+            // amber existed for this field at all.
             SuggestedFieldRow(
                 label: "Other fees",
                 text: $model.otherFeesText,
                 field: .otherFees,
                 focus: $focusedField,
-                isUnreviewed: false,
+                isUnreviewed: model.isUnreviewed(.otherFees),
                 moneyInput: model.otherFeesInput
             )
         }
@@ -319,16 +392,18 @@ struct ConfirmReceiptView: View {
 
     private var optionalFieldsSection: some View {
         Section {
-            // These three carry no suggestion and so no amber, but they
-            // still take a focus value: the toolbar decides what to offer
-            // from the focused field, and a field outside that enum would
-            // read as "nothing is focused" while its keyboard was up.
+            // Category and payment method carry no OCR suggestion, but
+            // either can go amber from a proposal #2 vendor default
+            // (2026-08-28) - same isUnreviewed wiring as every other
+            // suggestible field now, in place of the permanent false these
+            // two carried before a source of amber existed for them.
             ReusableValueFieldRow(
                 label: "Category",
                 text: $model.categoryText,
                 field: .category,
                 focus: $focusedField,
                 pastValues: options.options.categories,
+                isUnreviewed: model.isUnreviewed(.category),
                 onReuse: { eventLogger.log(.optionReused, field: .category, receiptId: model.receiptId) }
             )
             ReusableValueFieldRow(
@@ -337,6 +412,7 @@ struct ConfirmReceiptView: View {
                 field: .paymentMethod,
                 focus: $focusedField,
                 pastValues: options.options.paymentMethods,
+                isUnreviewed: model.isUnreviewed(.paymentMethod),
                 onReuse: { eventLogger.log(.optionReused, field: .paymentMethod, receiptId: model.receiptId) }
             )
             TextField("Notes", text: $model.notesText, axis: .vertical)

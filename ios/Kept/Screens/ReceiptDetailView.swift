@@ -29,6 +29,26 @@ struct ReceiptDetailView: View {
     /// multi-page seam), even though v1 capture stores one.
     @State private var zoomedImageSource: ReceiptImageSource?
     @State private var confirmingDelete = false
+    /// Non-nil while the "add a page" / "replace this page's image" scan
+    /// flow (proposal #6, 2026-08-28) is up.
+    @State private var pageUploadRequest: PageUploadRequest?
+    /// The page number a replace confirmation is asking about, if any -
+    /// separate from `pageUploadRequest` because this is a question, and
+    /// the scanner only opens once it is answered "yes".
+    @State private var confirmingReplacePage: Int?
+
+    /// Wraps ReceiptImageUploadView.Mode so it can drive a
+    /// `fullScreenCover(item:)` - SwiftUI needs Identifiable, and the mode
+    /// itself carries everything the cover needs to know.
+    private struct PageUploadRequest: Identifiable {
+        let mode: ReceiptImageUploadView.Mode
+        var id: String {
+            switch mode {
+            case .add: return "add"
+            case .replace(let page): return "replace-\(page)"
+            }
+        }
+    }
 
     init(
         api: APIClient,
@@ -106,6 +126,49 @@ struct ReceiptDetailView: View {
                     eventLogger.log(.imageZoomed, receiptId: receipt.id)
                 }
             }
+        }
+        .fullScreenCover(item: $pageUploadRequest) { request in
+            ReceiptImageUploadView(
+                api: api,
+                eventLogger: eventLogger,
+                receiptId: receipt.id,
+                mode: request.mode
+            ) { didChangeAnything in
+                pageUploadRequest = nil
+                if didChangeAnything {
+                    // Refresh from the server rather than guessing what
+                    // changed locally (spec: the server assigns page
+                    // numbers, so this screen cannot know the new shape
+                    // in advance) - the same rule the confirm sheet's
+                    // onSaved above already follows.
+                    Task { await model.load(id: receipt.id) }
+                }
+            }
+        }
+        // Asks before opening the scanner for a replace, in the receipt
+        // delete dialog's own words where the point is the same: the
+        // photo shown here changes, but nothing is erased (spec §10B) -
+        // the old row is soft-deleted and kept, exactly like a deleted
+        // receipt's image.
+        .confirmationDialog(
+            "Replace this page's image?",
+            isPresented: Binding(
+                get: { confirmingReplacePage != nil },
+                set: { if !$0 { confirmingReplacePage = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Scan a new photo") {
+                if let page = confirmingReplacePage {
+                    pageUploadRequest = PageUploadRequest(mode: .replace(page: page))
+                }
+                confirmingReplacePage = nil
+            }
+            Button("Keep this image", role: .cancel) {
+                confirmingReplacePage = nil
+            }
+        } message: {
+            Text("This repairs a page whose photo never uploaded, without losing this receipt's vendor, date, total or HST. The image shown here changes; the one it replaces stays stored for tax retention - it isn't erased.")
         }
         // Same shape as Home's account-deletion dialog (HomeView), so the
         // two destructive confirmations read as one app: a title, the
@@ -243,22 +306,77 @@ struct ReceiptDetailView: View {
                 .italic()
                 .foregroundStyle(.secondary)
         } else {
+            // Every live page, in the order the server already sorted
+            // them (routes/receipts.ts's `.orderBy(receiptImages.page)`) -
+            // proposal #6, 2026-08-28: a two-page receipt used to show
+            // only its first page here, hiding half the evidence someone
+            // is checking numbers against.
             ForEach(images, id: \.page) { image in
-                // The same component the confirm screen renders, so the
-                // two screens' image behaviour cannot drift (wave-4
-                // reviewer pass: this block was its copy) - tap-to-zoom
-                // included (2026-08-28: this screen never wired it up, and
-                // "see the paper" (§7.2) applies here as much as it does
-                // on the confirm form).
-                ReceiptImageView(source: .remote(image.downloadUrl))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        zoomedImageSource = .remote(image.downloadUrl)
-                        eventLogger.log(.imageOpened, receiptId: receipt.id)
+                VStack(alignment: .leading, spacing: 6) {
+                    if images.count > 1 {
+                        Text("Page \(image.page)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .accessibilityLabel("Receipt image. Tap to zoom.")
+                    // The same component the confirm screen renders, so the
+                    // two screens' image behaviour cannot drift (wave-4
+                    // reviewer pass: this block was its copy) - tap-to-zoom
+                    // included (2026-08-28: this screen never wired it up, and
+                    // "see the paper" (§7.2) applies here as much as it does
+                    // on the confirm form).
+                    ReceiptImageView(source: .remote(image.downloadUrl))
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            zoomedImageSource = .remote(image.downloadUrl)
+                            eventLogger.log(.imageOpened, receiptId: receipt.id)
+                        }
+                        .accessibilityLabel("Receipt image, page \(image.page). Tap to zoom.")
+                    // Per page (proposal #6, 2026-08-28): the repair path
+                    // for a page whose photo never actually uploaded,
+                    // without losing the receipt's confirmed fields - the
+                    // remedy the old delete-and-recapture advice used to
+                    // cost. Confirmed first, so the honest wording about
+                    // retention (spec §10B) is read before the scanner
+                    // opens, not after.
+                    Button {
+                        confirmingReplacePage = image.page
+                    } label: {
+                        Label("Replace this page's image", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.footnote)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(!DocumentScannerView.isSupported)
+                }
+                .padding(.vertical, images.count > 1 ? 8 : 4)
             }
         }
+        addPageButton
+    }
+
+    /// "Add a page" (proposal #6, 2026-08-28): a hotel folio or a long
+    /// restaurant bill is genuinely two pages, and `receipt_images` has
+    /// had a `page` column since wave 1 with nothing ever writing page 2
+    /// until now. Offered even when `images` is empty - a receipt whose
+    /// only image never landed (the §8 sharp edge) has exactly this same
+    /// remedy, one page at a time.
+    private var addPageButton: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                pageUploadRequest = PageUploadRequest(mode: .add)
+            } label: {
+                Label("Add a page", systemImage: "doc.badge.plus")
+            }
+            .disabled(!DocumentScannerView.isSupported)
+
+            if !DocumentScannerView.isSupported {
+                // The simulator, in practice - same wording as Home's
+                // capture button for the identical reason (HomeView).
+                Text("Scanning needs a device with a camera.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.top, 4)
     }
 
     /// Optional money for the detail rows: nil stays nil so FieldRow can

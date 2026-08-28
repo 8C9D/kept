@@ -40,6 +40,17 @@ final class ReceiptListModel: ObservableObject {
     @Published private(set) var receipts: [Receipt] = []
     @Published private(set) var pendingCount: PendingCount = .exact(0)
     @Published private(set) var nextPage: NextPage = .idle
+    /// Proposal #3 (2026-08-28): the running totals for the CURRENT
+    /// filter (`query` below), fetched from GET /api/receipts/summary
+    /// alongside the first page and re-fetched on every filter change -
+    /// never computed from `receipts`, which is one 50-row page and would
+    /// silently answer a different, narrower question than "the whole
+    /// filter". `nil` is the resting state for three different reasons -
+    /// nothing has loaded yet, the first page itself failed, or the
+    /// summary fetch failed on its own - and HomeView degrades to no
+    /// summary block for all three without needing to tell them apart:
+    /// this is pure enhancement over the list, never load-bearing for it.
+    @Published private(set) var summary: ReceiptSummary?
 
     /// What the list is currently asking the server for. Changed only
     /// through the methods below, each of which restarts from page one -
@@ -85,13 +96,41 @@ final class ReceiptListModel: ObservableObject {
             nextCursor = nil
             nextPage = .idle
             pendingCount = .unknown
+            summary = nil
             phase = .failed(error.localizedDescription)
+            return
         case .success(let page):
             receipts = page.receipts
             nextCursor = page.nextCursor
             nextPage = .idle
             pendingCount = .exact(page.pendingCount)
             phase = receipts.isEmpty ? .empty : .loaded
+        }
+
+        await loadSummary()
+    }
+
+    /// Proposal #3's fetch, run after the page itself settles - nothing on
+    /// screen needs the summary before the list is showing something, and
+    /// sequencing keeps this load's superseded-guard story identical to
+    /// every other one here (one outcome to switch on, not two interleaved
+    /// requests racing each other into `summary`). Not called from
+    /// `loadMore()`: paging never changes the filter, so the totals it
+    /// already has are still the right answer (spec: "never compute
+    /// totals from the loaded page... re-fetch when the filter changes" -
+    /// this is the re-fetch; paging is the case where nothing changed).
+    ///
+    /// A failed fetch degrades to no summary - the proposal's own brief:
+    /// this must never break the list - so `summary` simply becomes nil
+    /// and nothing here surfaces the error, the same "never blocks, never
+    /// invents" shape ReceiptOptionsStore already uses for a fetch that is
+    /// pure enhancement rather than load-bearing.
+    private func loadSummary() async {
+        switch await loader.summary(query: query) {
+        case .superseded, .failure:
+            summary = nil
+        case .success(let value):
+            summary = value
         }
     }
 

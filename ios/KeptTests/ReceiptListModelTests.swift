@@ -374,6 +374,79 @@ final class ReceiptListModelTests: XCTestCase {
         XCTAssertEqual(model.query.sort, .vendor)
     }
 
+    // MARK: - Running totals (proposal #3, 2026-08-28)
+
+    /// The summary loads alongside the first page, over the identical
+    /// query - confirmed-only totals, pending kept separate.
+    func testSummaryLoadsAlongsideTheFirstPage() async {
+        stubPages(byCursor: [nil: Fixtures.page([Fixtures.receipt()])])
+        api.receiptsSummaryHandler = { _ in
+            Fixtures.summary(count: 3, hstCents: 900, totalCents: 33900, pendingCount: 2)
+        }
+        let model = makeModel()
+
+        await model.loadFirstPage()
+
+        XCTAssertEqual(model.summary?.confirmed.count, 3)
+        XCTAssertEqual(model.summary?.confirmed.hstCents, 900)
+        XCTAssertEqual(model.summary?.confirmed.totalCents, 33900)
+        // Never blended into the confirmed totals - its own number.
+        XCTAssertEqual(model.summary?.pendingCount, 2)
+    }
+
+    /// Re-fetched, over the new filter, whenever the filter changes -
+    /// never computed from the loaded page, which is one bounded slice.
+    func testSummaryRefetchesUnderTheNewFilterWhenTheFilterChanges() async {
+        stubPages(byCursor: [nil: Fixtures.page([Fixtures.receipt()])])
+        api.receiptsSummaryHandler = { query in
+            Fixtures.summary(count: query.status == .pending ? 0 : 5)
+        }
+        let model = makeModel()
+        await model.loadFirstPage()
+        XCTAssertEqual(model.summary?.confirmed.count, 5)
+
+        await model.setStatus(.pending)
+
+        XCTAssertEqual(model.summary?.confirmed.count, 0)
+        XCTAssertEqual(api.receiptsSummaryCalls.last?.status, .pending)
+    }
+
+    /// The proposal's own brief, verbatim: "a failed summary fetch must
+    /// not break the list." An unstubbed - and so failing - summary
+    /// handler must still leave the page itself loaded and usable.
+    func testAFailedSummaryFetchDegradesToNoSummaryWithoutBreakingTheList() async {
+        let receipt = Fixtures.receipt()
+        stubPages(byCursor: [nil: Fixtures.page([receipt])])
+        // receiptsSummaryHandler deliberately left nil - StubKeptAPI
+        // throws UnstubbedCall, exactly an unexpected server failure.
+        let model = makeModel()
+
+        await model.loadFirstPage()
+
+        XCTAssertEqual(model.phase, .loaded)
+        XCTAssertEqual(model.receipts, [receipt])
+        XCTAssertNil(model.summary)
+    }
+
+    /// When the page itself fails, there is nothing to summarize either -
+    /// a stale summary sitting over a failed, now-empty list would answer
+    /// a question about rows no longer on screen.
+    func testSummaryClearsWhenTheFirstPageFails() async {
+        stubPages(byCursor: [nil: Fixtures.page([Fixtures.receipt()])])
+        api.receiptsSummaryHandler = { _ in Fixtures.summary(count: 5) }
+        let model = makeModel()
+        await model.loadFirstPage()
+        XCTAssertNotNil(model.summary)
+
+        api.receiptsPageHandler = { _, _, _ in throw APIError.network(URLError(.notConnectedToInternet)) }
+        await model.loadFirstPage()
+
+        guard case .failed = model.phase else {
+            return XCTFail("Expected .failed, got \(model.phase)")
+        }
+        XCTAssertNil(model.summary)
+    }
+
     func testFailedPageCanBeRetried() async {
         let last = Fixtures.receipt()
         let recovered = Fixtures.receipt()

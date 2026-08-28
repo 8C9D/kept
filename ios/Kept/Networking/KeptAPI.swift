@@ -10,7 +10,28 @@ protocol KeptAPI: Sendable {
     func signInWithApple(identityToken: String, displayName: String?) async throws -> SignInResponse
     func receiptsPage(cursor: String?, query: ReceiptQuery, limit: Int?) async throws -> ReceiptListPage
     func receiptDetail(id: UUID) async throws -> ReceiptDetail
+    /// POST /api/receipts/:id/images (proposal #6, 2026-08-28) - add a
+    /// page to an existing receipt. The bytes are already uploaded via
+    /// `uploadTarget`/`uploadImage` exactly like the create route's own
+    /// image; this call only records where they landed. The server
+    /// assigns the page number - never taken from here (see
+    /// routes/receipts.ts's own comment on why) - so callers refresh the
+    /// receipt detail afterward rather than trust this response's `page`
+    /// into local state.
+    func addReceiptImage(receiptId: UUID, objectKey: String, sha256: String) async throws -> ReceiptImage
+    /// PUT /api/receipts/:id/images/:page (proposal #6, 2026-08-28) -
+    /// replace the bytes behind one page: the repair path for a page
+    /// whose photo never finished uploading, without losing the
+    /// receipt's vendor, date, total or HST. The server soft-deletes the
+    /// old row and inserts a new one at the same page number (spec
+    /// §5/§10B) - the old bytes stay retained, never erased.
+    func replaceReceiptImage(receiptId: UUID, page: Int, objectKey: String, sha256: String) async throws -> ReceiptImage
     func receiptOptions() async throws -> ReceiptOptions
+    /// GET /api/receipts/summary (proposal #3, 2026-08-28) - confirmed-only
+    /// totals plus a separate pending count, for the same filter the list
+    /// is currently showing. No cursor, no limit: an aggregate has no
+    /// pages to turn.
+    func receiptsSummary(query: ReceiptQuery) async throws -> ReceiptSummary
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget
     func uploadImage(to target: UploadTarget, data: Data, contentType: ImageUploadContentType) async throws
     func createReceipt(_ request: CreateReceiptRequest) async throws -> Receipt
@@ -70,11 +91,43 @@ extension APIClient: KeptAPI {
         try await get("/api/receipts/\(id.uuidString.lowercased())")
     }
 
+    /// The wire body both add-a-page and replace-a-page send - identical
+    /// to what the create route's `image` key and the server's
+    /// `receiptImageSchema` both accept (server/src/http/schemas.ts):
+    /// `{objectKey, sha256}`, nothing else. One place both call sites
+    /// share so the shape cannot drift between them.
+    private struct ImageUploadBody: Encodable {
+        let objectKey: String
+        let sha256: String
+    }
+
+    func addReceiptImage(receiptId: UUID, objectKey: String, sha256: String) async throws -> ReceiptImage {
+        try await post(
+            "/api/receipts/\(receiptId.uuidString.lowercased())/images",
+            body: ImageUploadBody(objectKey: objectKey, sha256: sha256)
+        )
+    }
+
+    func replaceReceiptImage(receiptId: UUID, page: Int, objectKey: String, sha256: String) async throws -> ReceiptImage {
+        try await put(
+            "/api/receipts/\(receiptId.uuidString.lowercased())/images/\(page)",
+            body: ImageUploadBody(objectKey: objectKey, sha256: sha256)
+        )
+    }
+
     /// The values this user has already used for category and payment.
     /// The route is a literal path registered above `/:id`, so it is not
     /// a receipt id and never collides with one.
     func receiptOptions() async throws -> ReceiptOptions {
         try await get("/api/receipts/options")
+    }
+
+    /// The filter-only query (no sort/order/cursor/limit): the server's
+    /// `receiptFilterQuerySchema` is a strict object and 400s an unknown
+    /// key, so sending the paging route's own `sort`/`order` here would
+    /// fail the request rather than being ignored.
+    func receiptsSummary(query: ReceiptQuery) async throws -> ReceiptSummary {
+        try await get("/api/receipts/summary", query: query.filterQueryItems)
     }
 
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget {

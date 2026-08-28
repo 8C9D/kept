@@ -82,6 +82,29 @@ enum Fixtures {
         ReceiptListPage(receipts: receipts, nextCursor: nextCursor, pendingCount: pendingCount)
     }
 
+    /// GET /api/receipts/summary's shape (proposal #3).
+    static func summary(
+        count: Int = 0,
+        subtotalCents: Int = 0,
+        hstCents: Int = 0,
+        tipCents: Int = 0,
+        otherFeesCents: Int = 0,
+        totalCents: Int = 0,
+        pendingCount: Int = 0
+    ) -> ReceiptSummary {
+        ReceiptSummary(
+            confirmed: ReceiptSummary.Confirmed(
+                count: count,
+                subtotalCents: subtotalCents,
+                hstCents: hstCents,
+                tipCents: tipCents,
+                otherFeesCents: otherFeesCents,
+                totalCents: totalCents
+            ),
+            pendingCount: pendingCount
+        )
+    }
+
     static func exportJob(
         id: UUID = UUID(),
         status: ExportJobStatus = .queued,

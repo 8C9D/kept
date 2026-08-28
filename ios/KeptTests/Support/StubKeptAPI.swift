@@ -16,7 +16,10 @@ final class StubKeptAPI: KeptAPI {
     var signInHandler: ((_ identityToken: String, _ displayName: String?) async throws -> SignInResponse)?
     var receiptsPageHandler: ((_ cursor: String?, _ query: ReceiptQuery, _ limit: Int?) async throws -> ReceiptListPage)?
     var receiptDetailHandler: ((_ id: UUID) async throws -> ReceiptDetail)?
+    var addReceiptImageHandler: ((_ receiptId: UUID, _ objectKey: String, _ sha256: String) async throws -> ReceiptImage)?
+    var replaceReceiptImageHandler: ((_ receiptId: UUID, _ page: Int, _ objectKey: String, _ sha256: String) async throws -> ReceiptImage)?
     var receiptOptionsHandler: (() async throws -> ReceiptOptions)?
+    var receiptsSummaryHandler: ((_ query: ReceiptQuery) async throws -> ReceiptSummary)?
     var uploadTargetHandler: ((_ contentType: ImageUploadContentType) async throws -> UploadTarget)?
     var uploadImageHandler: ((_ target: UploadTarget, _ data: Data, _ contentType: ImageUploadContentType) async throws -> Void)?
     var createReceiptHandler: ((_ request: CreateReceiptRequest) async throws -> Receipt)?
@@ -38,11 +41,14 @@ final class StubKeptAPI: KeptAPI {
     /// reviewer finding.)
     private let callLock = NSLock()
     private var recordedReceiptsPageCalls: [(cursor: String?, query: ReceiptQuery, limit: Int?)] = []
+    private var recordedAddReceiptImageCalls: [(receiptId: UUID, objectKey: String, sha256: String)] = []
+    private var recordedReplaceReceiptImageCalls: [(receiptId: UUID, page: Int, objectKey: String, sha256: String)] = []
     private var recordedCreateReceiptCalls: [CreateReceiptRequest] = []
     private var recordedConfirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] = []
     private var recordedDeleteReceiptCalls: [UUID] = []
     private var recordedDeleteAccountCalls: [String?] = []
     private var recordedReceiptOptionsCalls = 0
+    private var recordedReceiptsSummaryCalls: [ReceiptQuery] = []
     private var recordedStartExportCalls: [ExportRequest] = []
     private var recordedExportJobCalls: [UUID] = []
     private var recordedPostEventsCalls: [PostEventsRequest] = []
@@ -53,6 +59,18 @@ final class StubKeptAPI: KeptAPI {
 
     var receiptOptionsCalls: Int {
         callLock.withLock { recordedReceiptOptionsCalls }
+    }
+
+    var receiptsSummaryCalls: [ReceiptQuery] {
+        callLock.withLock { recordedReceiptsSummaryCalls }
+    }
+
+    var addReceiptImageCalls: [(receiptId: UUID, objectKey: String, sha256: String)] {
+        callLock.withLock { recordedAddReceiptImageCalls }
+    }
+
+    var replaceReceiptImageCalls: [(receiptId: UUID, page: Int, objectKey: String, sha256: String)] {
+        callLock.withLock { recordedReplaceReceiptImageCalls }
     }
 
     var createReceiptCalls: [CreateReceiptRequest] {
@@ -104,10 +122,28 @@ final class StubKeptAPI: KeptAPI {
         return try await receiptDetailHandler(id)
     }
 
+    func addReceiptImage(receiptId: UUID, objectKey: String, sha256: String) async throws -> ReceiptImage {
+        callLock.withLock { recordedAddReceiptImageCalls.append((receiptId, objectKey, sha256)) }
+        guard let addReceiptImageHandler else { throw UnstubbedCall(endpoint: "addReceiptImage") }
+        return try await addReceiptImageHandler(receiptId, objectKey, sha256)
+    }
+
+    func replaceReceiptImage(receiptId: UUID, page: Int, objectKey: String, sha256: String) async throws -> ReceiptImage {
+        callLock.withLock { recordedReplaceReceiptImageCalls.append((receiptId, page, objectKey, sha256)) }
+        guard let replaceReceiptImageHandler else { throw UnstubbedCall(endpoint: "replaceReceiptImage") }
+        return try await replaceReceiptImageHandler(receiptId, page, objectKey, sha256)
+    }
+
     func receiptOptions() async throws -> ReceiptOptions {
         callLock.withLock { recordedReceiptOptionsCalls += 1 }
         guard let receiptOptionsHandler else { throw UnstubbedCall(endpoint: "receiptOptions") }
         return try await receiptOptionsHandler()
+    }
+
+    func receiptsSummary(query: ReceiptQuery) async throws -> ReceiptSummary {
+        callLock.withLock { recordedReceiptsSummaryCalls.append(query) }
+        guard let receiptsSummaryHandler else { throw UnstubbedCall(endpoint: "receiptsSummary") }
+        return try await receiptsSummaryHandler(query)
     }
 
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget {

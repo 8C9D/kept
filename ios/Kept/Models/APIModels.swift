@@ -129,11 +129,55 @@ struct ReceiptListPage: Decodable, Equatable {
     let pendingCount: Int
 }
 
+/// GET /api/receipts/summary (proposal #3, 2026-08-28) - the running
+/// totals for whatever filter the caller sent, the same
+/// `receiptFilterQuerySchema` GET / accepts, minus its paging and sorting
+/// (ReceiptQuery.filterQueryItems is what builds that request).
+///
+/// `confirmed` is every count and sum over CONFIRMED rows only;
+/// `pendingCount` is the same filter's pending rows, counted and nothing
+/// else - never blended into `confirmed`. This mirrors the server's own
+/// warning verbatim (routes/receipts.ts's `/summary` handler): nothing
+/// with status = 'pending' may ever reach an export (spec §5.2a), so a
+/// summary that folded pending rows into its totals would disagree with
+/// the export sitting next to it. Rendering this must keep the two
+/// separate the same way the response does - HomeView's summary block is
+/// the one place that renders it, and its own comment explains how it
+/// reconciles with the unrelated, whole-account pending badge already on
+/// that screen.
+struct ReceiptSummary: Decodable, Equatable {
+    struct Confirmed: Decodable, Equatable {
+        let count: Int
+        let subtotalCents: Int
+        let hstCents: Int
+        let tipCents: Int
+        let otherFeesCents: Int
+        let totalCents: Int
+    }
+
+    let confirmed: Confirmed
+    let pendingCount: Int
+}
+
+/// One vendor's remembered category and payment method (proposal #2,
+/// 2026-08-28), from that vendor's most recent CONFIRMED receipt - the
+/// server's `vendorDefaultCandidates` picks confirmed-only deliberately
+/// (its own doc comment, receipts.ts): a default PREFILLS a different
+/// receipt without anyone having looked at THIS one yet, so sourcing it
+/// from a still-unreviewed guess would risk compounding one unconfirmed
+/// value into a second one. Either field can be nil independently - a
+/// vendor whose confirmed receipts carried a category but never a payment
+/// method still offers the one it has.
+struct VendorDefault: Codable, Equatable {
+    let category: String?
+    let paymentMethod: String?
+}
+
 /// GET /api/receipts/options - the free-text values this user has already
 /// used, most recently used first, so the confirm form can offer them
-/// back. All three fields stay free text (engineering rule: no enum, no
-/// taxonomy); these are suggestions drawn from the person's own data, not
-/// a vocabulary they must pick from. `vendors` joined the other two
+/// back. All three list fields stay free text (engineering rule: no enum,
+/// no taxonomy); these are suggestions drawn from the person's own data,
+/// not a vocabulary they must pick from. `vendors` joined the other two
 /// 2026-08-28, on the same product feedback that added tip and other
 /// fees - vendor names repeat for a small business the same way categories
 /// and payment methods do.
@@ -144,11 +188,56 @@ struct ReceiptOptions: Codable, Equatable {
     let categories: [String]
     let paymentMethods: [String]
     let vendors: [String]
+    /// Proposal #2 (2026-08-28): per vendor, the category and payment
+    /// method to prefill when that vendor is typed on the confirm form -
+    /// keyed by the EXACT vendor string served in `vendors` above (exact,
+    /// unnormalized match: the 2026-08-26 ruling is that these are the
+    /// person's own values, and an options list that quietly rewrote them
+    /// would offer a string the exact-match filter then fails to find).
+    let vendorDefaults: [String: VendorDefault]
 
-    static let none = ReceiptOptions(categories: [], paymentMethods: [], vendors: [])
+    static let none = ReceiptOptions(categories: [], paymentMethods: [], vendors: [], vendorDefaults: [:])
 
     var isEmpty: Bool {
         categories.isEmpty && paymentMethods.isEmpty && vendors.isEmpty
+    }
+
+    init(
+        categories: [String],
+        paymentMethods: [String],
+        vendors: [String],
+        vendorDefaults: [String: VendorDefault] = [:]
+    ) {
+        self.categories = categories
+        self.paymentMethods = paymentMethods
+        self.vendors = vendors
+        self.vendorDefaults = vendorDefaults
+    }
+
+    /// Custom decoding, deliberately: `vendorDefaults` is a key neither a
+    /// pre-2026-08-28 server response nor a disk cache written by an
+    /// earlier build ever carried. `ReceiptOptionsStore.cached(in:)`
+    /// already has a contract for a cache this build cannot make sense of
+    /// at all ("an unreadable cache is replaced on next refresh" - it
+    /// decodes with `try?` and treats a thrown error as no cache), and
+    /// that contract alone would already keep a pre-existing cache from
+    /// crashing anything, missing key included. This goes one step
+    /// gentler than that floor: `decodeIfPresent` means a response or a
+    /// cache missing only this one key still decodes successfully, with
+    /// an empty dictionary meaning exactly what an old server or an old
+    /// cache actually means - "no defaults known" - rather than discarding
+    /// a perfectly good cached `categories`/`paymentMethods`/`vendors` for
+    /// the sake of one additive key.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        categories = try container.decode([String].self, forKey: .categories)
+        paymentMethods = try container.decode([String].self, forKey: .paymentMethods)
+        vendors = try container.decode([String].self, forKey: .vendors)
+        vendorDefaults = try container.decodeIfPresent([String: VendorDefault].self, forKey: .vendorDefaults) ?? [:]
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case categories, paymentMethods, vendors, vendorDefaults
     }
 }
 

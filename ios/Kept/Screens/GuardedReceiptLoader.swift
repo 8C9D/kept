@@ -50,6 +50,18 @@ final class GuardedReceiptLoader {
         }
     }
 
+    /// Proposal #3 (2026-08-28): the running totals for the same query the
+    /// list is showing. Guarded by the identical generation check as the
+    /// two loads above - a filter changed twice in quick succession must
+    /// not let the first change's summary land after the second's, the
+    /// same interleave this whole type exists to make unrepresentable for
+    /// the list itself.
+    func summary(query: ReceiptQuery) async -> Outcome<ReceiptSummary> {
+        await run { api in
+            try await api.receiptsSummary(query: query)
+        }
+    }
+
     /// The one place the generation is captured and re-checked. New
     /// endpoints for this screen get a method above and inherit the guard;
     /// they cannot opt out of it.

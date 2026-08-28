@@ -151,4 +151,31 @@ final class ReceiptOptionsStoreTests: XCTestCase {
         XCTAssertTrue(store.options.isEmpty)
         XCTAssertNil(store.lastFailure)
     }
+
+    /// The disk-cache compatibility point the brief asks about directly:
+    /// `vendorDefaults` (proposal #2, 2026-08-28) is a key neither a build
+    /// before today nor a pre-2026-08-28 server response ever wrote. A
+    /// cache holding exactly the OLD three-key shape - what is actually on
+    /// the owner's and the second user's phones this morning - must decode successfully
+    /// rather than being discarded as unreadable: ReceiptOptions' custom
+    /// `init(from:)` uses `decodeIfPresent` for this one key precisely so
+    /// this is a normal, gentle decode (an empty `vendorDefaults`, not a
+    /// thrown error caught by `cached(in:)`'s `try?` and replaced with
+    /// `.none`) - the categories/paymentMethods/vendors this cache still
+    /// carries survive intact rather than being thrown away for the sake
+    /// of one additive key.
+    func testAPreVendorDefaultsCacheStillDecodesWithEmptyDefaults() {
+        let oldShapeJSON = """
+        {"categories":["meals"],"paymentMethods":["Visa"],"vendors":["Maple Foods"]}
+        """
+        defaults.set(Data(oldShapeJSON.utf8), forKey: ReceiptOptionsStore.defaultsKey)
+
+        let store = makeStore()
+
+        XCTAssertEqual(store.options.categories, ["meals"])
+        XCTAssertEqual(store.options.paymentMethods, ["Visa"])
+        XCTAssertEqual(store.options.vendors, ["Maple Foods"])
+        XCTAssertEqual(store.options.vendorDefaults, [:])
+        XCTAssertNil(store.lastFailure)
+    }
 }

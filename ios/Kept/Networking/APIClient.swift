@@ -71,6 +71,17 @@ final class APIClient: Sendable {
         return try await perform(method: "PATCH", path: path, query: [], body: bodyData, requiresSession: true)
     }
 
+    /// PUT /api/receipts/:id/images/:page (proposal #6, 2026-08-28) is the
+    /// only caller today - a whole-resource replace at a known path,
+    /// unlike PATCH's partial update.
+    func put<Body: Encodable, Response: Decodable>(
+        _ path: String,
+        body: Body
+    ) async throws -> Response {
+        let bodyData = try Self.encoder.encode(body)
+        return try await perform(method: "PUT", path: path, query: [], body: bodyData, requiresSession: true)
+    }
+
     /// DELETE with a JSON body and no response body. Separate from
     /// `perform` because 204 No Content is the success shape here - there is
     /// nothing to decode, and a decoder pointed at an empty body would turn

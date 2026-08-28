@@ -386,6 +386,287 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertFalse(model.showsArithmeticWarning)
     }
 
+    // MARK: - Derived amounts (proposal #1, 2026-08-28)
+
+    /// Exactly one field blank (tip), the other four filled: the fill
+    /// offers 15.00, and the label names the field before anyone taps
+    /// anything - the proposal's own risk mitigation.
+    func testDerivedFillOffersTheMissingTip() {
+        // subtotal 100 + hst 13 + otherFees 5 = 118; total 133 -> tip 15.
+        let model = model(receipt: scannedReceipt(
+            totalCents: 13300, hstCents: 1300, subtotalCents: 10000,
+            tipCents: nil, otherFeesCents: 500
+        ))
+        XCTAssertEqual(model.derivableFill, DerivedAmount(field: .tip, cents: 1500))
+        XCTAssertTrue(
+            model.derivableFillLabel?.hasPrefix("Tip = Total − Subtotal − HST − Other fees") ?? false
+        )
+    }
+
+    /// Computing the suggestion is not applying it - the field and its
+    /// amber state are untouched until the explicit tap.
+    func testDerivedFillIsNotAppliedWithoutTheExplicitTap() {
+        let model = model(receipt: scannedReceipt(
+            totalCents: 13300, hstCents: 1300, subtotalCents: 10000,
+            tipCents: nil, otherFeesCents: 500
+        ))
+        XCTAssertNotNil(model.derivableFill) // a suggestion exists...
+        XCTAssertEqual(model.tipText, "") // ...but nothing has filled it in
+        XCTAssertFalse(model.isUnreviewed(.tip))
+    }
+
+    /// The tap itself: fills the text, marks it amber exactly like an OCR
+    /// suggestion, and - because the receipt now reconciles - the
+    /// affordance itself disappears.
+    func testApplyingTheDerivedFillFillsTheFieldAndMarksItAmber() {
+        let model = model(receipt: scannedReceipt(
+            totalCents: 13300, hstCents: 1300, subtotalCents: 10000,
+            tipCents: nil, otherFeesCents: 500
+        ))
+        XCTAssertTrue(model.applyDerivedFill())
+        XCTAssertEqual(model.tipText, "15.00")
+        XCTAssertTrue(model.isUnreviewed(.tip))
+        XCTAssertFalse(model.showsArithmeticWarning)
+        XCTAssertNil(model.derivableFill, "nothing left to derive once it reconciles")
+    }
+
+    /// Two fields missing at once: nothing to offer, nothing to apply.
+    func testApplyDerivedFillDoesNothingWhenNoSuggestionExists() {
+        let model = model(receipt: scannedReceipt(
+            totalCents: 13300, hstCents: 1300, subtotalCents: 10000,
+            tipCents: nil, otherFeesCents: nil
+        ))
+        XCTAssertNil(model.derivableFill)
+        XCTAssertFalse(model.applyDerivedFill())
+        XCTAssertEqual(model.tipText, "")
+        XCTAssertEqual(model.otherFeesText, "")
+    }
+
+    /// The derived fill's own never-negative refusal, mirrored end to end
+    /// through the live path: a receipt whose four known fields already
+    /// sum past the total would derive a negative tip, and offers nothing.
+    func testDerivedFillRefusesANegativeTip() {
+        let model = model(receipt: scannedReceipt(
+            totalCents: 11000, hstCents: 1300, subtotalCents: 10000,
+            tipCents: nil, otherFeesCents: 0
+        ))
+        XCTAssertNil(model.derivableFill)
+        XCTAssertNil(model.derivableFillLabel)
+    }
+
+    /// Applies just as well to the receipt-detail edit form (spec: "this
+    /// belongs on the receipt detail edit form too, not just the confirm
+    /// screen") - even though nothing else on an edit form is amber, a
+    /// derived fill still marks its field amber and stays reportable.
+    func testDerivedFillWorksOnTheEditForm() {
+        let receipt = Fixtures.receipt(
+            subtotalCents: 10000, hstCents: 1300, tipCents: 0,
+            otherFeesCents: nil, totalCents: 11300, status: .confirmed
+        )
+        let model = ConfirmReceiptModel(api: api, detail: Fixtures.detail(receipt: receipt), purpose: .edit)
+        XCTAssertEqual(model.unreviewedCount, 0) // nothing amber on open
+
+        XCTAssertEqual(model.derivableFill, DerivedAmount(field: .otherFees, cents: 0))
+        XCTAssertTrue(model.applyDerivedFill())
+        XCTAssertEqual(model.otherFeesText, "0.00")
+        XCTAssertTrue(model.isUnreviewed(.otherFees))
+        XCTAssertEqual(model.unreviewedCount, 1)
+    }
+
+    // MARK: - Reconciliation split (proposal #1, second affordance)
+
+    /// All five present but mismatched: both destinations are offered,
+    /// each naming the resulting total it would produce.
+    func testReconciliationOffersBothDestinationsWhenAllFiveAreFilled() {
+        // 100 + 13 + 10 + 0 = 123; total is 133 - 10.00 short.
+        let model = model(receipt: scannedReceipt(
+            totalCents: 13300, hstCents: 1300, subtotalCents: 10000,
+            tipCents: 1000, otherFeesCents: 0
+        ))
+        XCTAssertNil(model.derivableFill, "nothing is blank, so this is not the derive-fill case")
+        XCTAssertEqual(model.reconciliationResult(for: .tip), 2000) // 10.00 existing + 10.00
+        XCTAssertEqual(model.reconciliationResult(for: .otherFees), 1000) // 0 existing + 10.00
+        XCTAssertNotNil(model.reconciliationLabel(for: .tip))
+        XCTAssertNotNil(model.reconciliationLabel(for: .otherFees))
+    }
+
+    func testApplyingTheReconciliationDifferenceAddsToTheExistingValue() {
+        let model = model(receipt: scannedReceipt(
+            totalCents: 13300, hstCents: 1300, subtotalCents: 10000,
+            tipCents: 1000, otherFeesCents: 0
+        ))
+        XCTAssertTrue(model.applyReconciliationDifference(into: .tip))
+        XCTAssertEqual(model.tipText, "20.00")
+        XCTAssertTrue(model.isUnreviewed(.tip))
+        XCTAssertFalse(model.showsArithmeticWarning)
+        // Now balanced - nothing left to offer for other fees either.
+        XCTAssertNil(model.reconciliationResult(for: .otherFees))
+    }
+
+    func testNoReconciliationOfferedWhenTheBooksAlreadyBalance() {
+        let model = model(receipt: scannedReceipt(
+            totalCents: 11300, hstCents: 1300, subtotalCents: 10000,
+            tipCents: 0, otherFeesCents: 0
+        ))
+        XCTAssertNil(model.reconciliationResult(for: .tip))
+        XCTAssertNil(model.reconciliationResult(for: .otherFees))
+        XCTAssertFalse(model.applyReconciliationDifference(into: .tip))
+    }
+
+    /// The same never-negative floor `deriveMissingAmount` enforces,
+    /// applied here even though there is no server function to mirror it
+    /// from: fields that already sum PAST the total would need to
+    /// subtract from tip and other fees, which would leave both negative,
+    /// so neither destination is offered.
+    func testReconciliationRefusesADestinationThatWouldGoNegative() {
+        // 100 + 13 + 5 + 0 = 118; total is only 100.00 - 18.00 over.
+        let model = model(receipt: scannedReceipt(
+            totalCents: 10000, hstCents: 1300, subtotalCents: 10000,
+            tipCents: 500, otherFeesCents: 0
+        ))
+        XCTAssertNil(model.reconciliationResult(for: .tip))
+        XCTAssertNil(model.reconciliationResult(for: .otherFees))
+        XCTAssertNil(model.reconciliationLabel(for: .tip))
+        XCTAssertFalse(model.applyReconciliationDifference(into: .tip))
+    }
+
+    // MARK: - Vendor defaults (proposal #2, 2026-08-28)
+
+    func testVendorDefaultPrefillsBothEmptyFields() {
+        let model = model(receipt: scannedReceipt()) // vendor "Maple Foods"
+        XCTAssertEqual(model.categoryText, "")
+        XCTAssertEqual(model.paymentMethodText, "")
+
+        model.applyVendorDefaultIfAvailable([
+            "Maple Foods": VendorDefault(category: "Groceries", paymentMethod: "Visa"),
+        ])
+
+        XCTAssertEqual(model.categoryText, "Groceries")
+        XCTAssertEqual(model.paymentMethodText, "Visa")
+        XCTAssertTrue(model.isUnreviewed(.category))
+        XCTAssertTrue(model.isUnreviewed(.paymentMethod))
+    }
+
+    /// Independently per field: a vendor default with only one of the two
+    /// fields still offers that one.
+    func testVendorDefaultAppliesFieldsIndependently() {
+        let model = model(receipt: scannedReceipt())
+        model.applyVendorDefaultIfAvailable([
+            "Maple Foods": VendorDefault(category: "Groceries", paymentMethod: nil),
+        ])
+        XCTAssertEqual(model.categoryText, "Groceries")
+        XCTAssertEqual(model.paymentMethodText, "")
+        XCTAssertFalse(model.isUnreviewed(.paymentMethod))
+    }
+
+    /// The named risk this whole affordance exists beside: never overwrite
+    /// what the person already typed.
+    func testVendorDefaultNeverOverwritesAnAlreadyTypedValue() {
+        let model = model(receipt: scannedReceipt())
+        model.categoryText = "Already typed"
+
+        model.applyVendorDefaultIfAvailable([
+            "Maple Foods": VendorDefault(category: "Groceries", paymentMethod: "Visa"),
+        ])
+
+        XCTAssertEqual(model.categoryText, "Already typed")
+        XCTAssertFalse(model.isUnreviewed(.category))
+        // The untyped field beside it still gets its default.
+        XCTAssertEqual(model.paymentMethodText, "Visa")
+    }
+
+    /// Exact, unnormalized match only - a case or whitespace difference is
+    /// a different string and matches nothing (2026-08-26 ruling).
+    func testVendorDefaultRequiresAnExactMatch() {
+        let model = model(receipt: scannedReceipt()) // vendor "Maple Foods"
+        model.applyVendorDefaultIfAvailable([
+            "maple foods": VendorDefault(category: "Groceries", paymentMethod: "Visa"),
+        ])
+        XCTAssertEqual(model.categoryText, "")
+
+        model.applyVendorDefaultIfAvailable([
+            "Maple Foods ": VendorDefault(category: "Groceries", paymentMethod: "Visa"),
+        ])
+        XCTAssertEqual(model.categoryText, "")
+    }
+
+    /// Never overwrites a confirmed receipt's existing values - the edit
+    /// form's category is the person's own, already-saved choice.
+    func testVendorDefaultNeverOverwritesAConfirmedReceiptsExistingCategory() {
+        let receipt = Fixtures.receipt(
+            vendor: "Maple Foods", totalCents: 11300, category: "Existing category", status: .confirmed
+        )
+        let model = ConfirmReceiptModel(api: api, detail: Fixtures.detail(receipt: receipt), purpose: .edit)
+
+        model.applyVendorDefaultIfAvailable([
+            "Maple Foods": VendorDefault(category: "Groceries", paymentMethod: "Visa"),
+        ])
+
+        XCTAssertEqual(model.categoryText, "Existing category")
+        XCTAssertFalse(model.isUnreviewed(.category))
+        // Payment method genuinely never carried a value on this confirmed
+        // receipt - that is not "overwriting an existing value", so it
+        // still gets prefilled and marked amber.
+        XCTAssertEqual(model.paymentMethodText, "Visa")
+        XCTAssertTrue(model.isUnreviewed(.paymentMethod))
+    }
+
+    /// Applied and left alone, a vendor default reports `suggestion_accepted`
+    /// at save through the same accept/override mechanism every other
+    /// suggestion on this screen uses.
+    func testVendorDefaultLeftAloneReportsAcceptedAtSave() {
+        let model = model(receipt: scannedReceipt())
+        model.applyVendorDefaultIfAvailable([
+            "Maple Foods": VendorDefault(category: "Groceries", paymentMethod: "Visa"),
+        ])
+
+        let outcomes = Dictionary(
+            uniqueKeysWithValues: model.suggestionOutcomes().map { ($0.field, $0.accepted) }
+        )
+        XCTAssertEqual(outcomes[.category], true)
+        XCTAssertEqual(outcomes[.paymentMethod], true)
+    }
+
+    /// Typed over after being applied, it reports `suggestion_overridden`
+    /// instead - the same rule an OCR suggestion is held to.
+    func testVendorDefaultOverriddenAfterApplyingReportsOverriddenAtSave() {
+        let model = model(receipt: scannedReceipt())
+        model.applyVendorDefaultIfAvailable([
+            "Maple Foods": VendorDefault(category: "Groceries", paymentMethod: "Visa"),
+        ])
+        model.categoryText = "Something else"
+
+        let outcomes = Dictionary(
+            uniqueKeysWithValues: model.suggestionOutcomes().map { ($0.field, $0.accepted) }
+        )
+        XCTAssertEqual(outcomes[.category], false)
+        XCTAssertEqual(outcomes[.paymentMethod], true)
+    }
+
+    /// Idempotent: calling it again after it already filled something -
+    /// exactly what the view's onAppear/onChange wiring does - changes
+    /// nothing further.
+    func testVendorDefaultIsIdempotent() {
+        let model = model(receipt: scannedReceipt())
+        let defaults = ["Maple Foods": VendorDefault(category: "Groceries", paymentMethod: "Visa")]
+        model.applyVendorDefaultIfAvailable(defaults)
+        model.markTouched(.category) // the person looked at it
+        model.applyVendorDefaultIfAvailable(defaults) // called again, e.g. on a re-fetch
+
+        XCTAssertEqual(model.categoryText, "Groceries")
+        XCTAssertFalse(model.isUnreviewed(.category), "a second call must not re-amber a field already touched")
+    }
+
+    /// No matching vendor, or a blank vendor field: nothing happens, and
+    /// nothing crashes on an empty dictionary.
+    func testVendorDefaultDoesNothingWithoutAMatch() {
+        let model = model(receipt: scannedReceipt())
+        model.applyVendorDefaultIfAvailable([:])
+        model.applyVendorDefaultIfAvailable(["Some Other Vendor": VendorDefault(category: "X", paymentMethod: nil)])
+        XCTAssertEqual(model.categoryText, "")
+        XCTAssertEqual(model.paymentMethodText, "")
+    }
+
     // MARK: - Save gating
 
     /// The gate is a valid total and nothing else (2026-08-26: the
@@ -464,20 +745,25 @@ final class ConfirmReceiptModelTests: XCTestCase {
         )
     }
 
-    /// Focus clears exactly one field's amber, and the fields carrying no
-    /// suggestion - the three free-text ones - clear nothing.
+    /// Focus clears exactly one field's amber, and the one field carrying
+    /// no suggestion of any kind - notes - clears nothing.
     func testFocusMapsToTheSuggestionItClearsAndNoOther() {
         XCTAssertEqual(ConfirmReceiptModel.EditableField.total.suggestion, .total)
         XCTAssertEqual(ConfirmReceiptModel.EditableField.vendor.suggestion, .vendor)
         XCTAssertEqual(ConfirmReceiptModel.EditableField.hst.suggestion, .hst)
         XCTAssertEqual(ConfirmReceiptModel.EditableField.subtotal.suggestion, .subtotal)
         XCTAssertEqual(ConfirmReceiptModel.EditableField.tip.suggestion, .tip)
-        // Other fees is money-field-shaped like every field above it, but
-        // it carries no suggestion at all (§6) - focusing it clears
-        // nothing, the same as category, payment method and notes.
-        XCTAssertNil(ConfirmReceiptModel.EditableField.otherFees.suggestion)
-        XCTAssertNil(ConfirmReceiptModel.EditableField.category.suggestion)
-        XCTAssertNil(ConfirmReceiptModel.EditableField.paymentMethod.suggestion)
+        // Other fees, category and payment method are money/free-text
+        // fields that carry no OCR suggestion (§6) - but each maps to its
+        // own SuggestedField now (2026-08-28), because each can still gain
+        // the amber marking from a LIVE source (a proposal #1 derived
+        // fill for other fees, a proposal #2 vendor default for the other
+        // two) and focusing the field must clear it the same way focusing
+        // any other suggested field does.
+        XCTAssertEqual(ConfirmReceiptModel.EditableField.otherFees.suggestion, .otherFees)
+        XCTAssertEqual(ConfirmReceiptModel.EditableField.category.suggestion, .category)
+        XCTAssertEqual(ConfirmReceiptModel.EditableField.paymentMethod.suggestion, .paymentMethod)
+        // Notes remains the one field with no suggestion of any kind.
         XCTAssertNil(ConfirmReceiptModel.EditableField.notes.suggestion)
     }
 

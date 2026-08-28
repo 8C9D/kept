@@ -288,6 +288,125 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(suggestions.hstCents.value, 325)
     }
 
+    /// The detail route orders `images` by page (routes/receipts.ts's
+    /// `.orderBy(receiptImages.page)`); this pins that a multi-page
+    /// receipt decodes every page, in that order, rather than only the
+    /// first - the gap proposal #6 exists to close on the receipt detail
+    /// screen.
+    func testDecodesMultiPageImagesInOrder() async throws {
+        let client = try makeClient()
+        let twoPageJSON = detailJSON.replacingOccurrences(
+            of: #"{"page": 1, "downloadUrl": "https://storage.example/presigned/abc"}"#,
+            with: #"{"page": 1, "downloadUrl": "https://storage.example/presigned/abc"}, {"page": 2, "downloadUrl": "https://storage.example/presigned/page2"}"#
+        )
+        transport.enqueue(status: 200, jsonBody: twoPageJSON)
+
+        let detail = try await client.receiptDetail(
+            id: try XCTUnwrap(UUID(uuidString: "0a1b2c3d-0000-4000-8000-000000000001"))
+        )
+
+        XCTAssertEqual(detail.images.map(\.page), [1, 2])
+        XCTAssertEqual(
+            detail.images.map(\.downloadUrl),
+            [
+                URL(string: "https://storage.example/presigned/abc"),
+                URL(string: "https://storage.example/presigned/page2"),
+            ]
+        )
+    }
+
+    // MARK: - Add a page / replace a page's image (proposal #6, 2026-08-28)
+
+    func testAddReceiptImagePostsExactlyObjectKeyAndSha256ToTheImagesRoute() async throws {
+        let client = try makeClient()
+        let receiptId = try XCTUnwrap(UUID(uuidString: "0a1b2c3d-0000-4000-8000-000000000001"))
+        let sha = String(repeating: "a", count: 64)
+        transport.enqueue(status: 201, jsonBody: """
+        {
+          "id": "1a1b2c3d-0000-4000-8000-000000000002",
+          "page": 2,
+          "downloadUrl": "https://storage.example/presigned/page2",
+          "createdAt": "2026-03-20T12:00:00.000Z"
+        }
+        """)
+
+        let image = try await client.addReceiptImage(
+            receiptId: receiptId,
+            objectKey: "userid/2026/03/added.jpg",
+            sha256: sha
+        )
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/api/receipts/\(receiptId.uuidString.lowercased())/images")
+        let body = try XCTUnwrap(request.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), ["objectKey", "sha256"])
+        XCTAssertEqual(json["objectKey"] as? String, "userid/2026/03/added.jpg")
+        XCTAssertEqual(json["sha256"] as? String, sha)
+        // The response decodes through the same ReceiptImage the detail
+        // route uses (page + downloadUrl); the extra id/createdAt keys
+        // the server also sends are simply not declared, and are ignored
+        // rather than failing decode.
+        XCTAssertEqual(image.page, 2)
+        XCTAssertEqual(image.downloadUrl, URL(string: "https://storage.example/presigned/page2"))
+    }
+
+    func testReplaceReceiptImagePutsToTheGivenPageAndAcceptsExactlyObjectKeyAndSha256() async throws {
+        let client = try makeClient()
+        let receiptId = try XCTUnwrap(UUID(uuidString: "0a1b2c3d-0000-4000-8000-000000000001"))
+        let sha = String(repeating: "b", count: 64)
+        transport.enqueue(status: 200, jsonBody: """
+        {
+          "id": "1a1b2c3d-0000-4000-8000-000000000003",
+          "page": 1,
+          "downloadUrl": "https://storage.example/presigned/page1-new",
+          "createdAt": "2026-03-20T12:00:00.000Z"
+        }
+        """)
+
+        let image = try await client.replaceReceiptImage(
+            receiptId: receiptId,
+            page: 1,
+            objectKey: "userid/2026/03/replaced.jpg",
+            sha256: sha
+        )
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.httpMethod, "PUT")
+        XCTAssertEqual(request.url?.path, "/api/receipts/\(receiptId.uuidString.lowercased())/images/1")
+        let body = try XCTUnwrap(request.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), ["objectKey", "sha256"])
+        XCTAssertEqual(json["objectKey"] as? String, "userid/2026/03/replaced.jpg")
+        XCTAssertEqual(json["sha256"] as? String, sha)
+        XCTAssertEqual(image.page, 1)
+        XCTAssertEqual(image.downloadUrl, URL(string: "https://storage.example/presigned/page1-new"))
+    }
+
+    /// The server's own duplicate-image wording (routes/receipts.ts's
+    /// `duplicateImageError()`), surfaced verbatim through the same error
+    /// mapping every other endpoint uses - no bespoke handling for these
+    /// two routes.
+    func testAddReceiptImageSurfacesTheServersDuplicateImage409() async throws {
+        let client = try makeClient()
+        transport.enqueue(
+            status: 409,
+            jsonBody: #"""
+            {"error":{"code":"duplicate_image","message":"An identical image is already attached to one of your receipts"}}
+            """#
+        )
+
+        do {
+            _ = try await client.addReceiptImage(receiptId: UUID(), objectKey: "k", sha256: String(repeating: "a", count: 64))
+            XCTFail("Expected a thrown APIError")
+        } catch let APIError.requestFailed(code, message, status) {
+            XCTAssertEqual(code, "duplicate_image")
+            XCTAssertEqual(message, "An identical image is already attached to one of your receipts")
+            XCTAssertEqual(status, 409)
+        }
+    }
+
     func testDecodesTimestampsWithoutFractionalSeconds() async throws {
         // The decoder's plain ISO 8601 fallback exists to survive a server
         // serialization change; without this test that branch could regress

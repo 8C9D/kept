@@ -126,6 +126,22 @@ struct ReceiptQuery: Equatable {
     /// server's schema is strict and rejects an empty `q`, `category` or
     /// `paymentMethod`.
     var queryItems: [URLQueryItem] {
+        var items = filterQueryItems
+        items.append(URLQueryItem(name: "sort", value: sort.rawValue))
+        items.append(URLQueryItem(name: "order", value: order.rawValue))
+        return items
+    }
+
+    /// The filter half alone, with no `sort`/`order`/paging - what GET
+    /// /api/receipts/summary accepts (proposal #3, 2026-08-28). That
+    /// route's schema is `receiptFilterQuerySchema`, a `z.strictObject`
+    /// with no `sort` or `order` key at all: sending either would 400 an
+    /// aggregate that has no rows to order. `queryItems` above is this
+    /// list plus the two paging-route-only keys, kept as one shared
+    /// builder rather than two, so a new filter added to one can never be
+    /// forgotten on the other and the two requests silently disagree on
+    /// what "the current filter" means.
+    var filterQueryItems: [URLQueryItem] {
         var items: [URLQueryItem] = []
         if let searchTerm {
             items.append(URLQueryItem(name: "q", value: searchTerm))
@@ -145,8 +161,6 @@ struct ReceiptQuery: Equatable {
         if let to {
             items.append(URLQueryItem(name: "to", value: to))
         }
-        items.append(URLQueryItem(name: "sort", value: sort.rawValue))
-        items.append(URLQueryItem(name: "order", value: order.rawValue))
         return items
     }
 }

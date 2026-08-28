@@ -81,14 +81,24 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         case edit
     }
 
-    /// The fields that can carry an OCR suggestion and therefore an amber
-    /// marking. `otherFees` is deliberately absent - it never carries a
-    /// suggestion (§6: no heuristic or LLM can match a residual with no
-    /// consistent printed label), so it can never be unreviewed and never
-    /// starts amber. That absence is the mechanism, not a special case
-    /// threaded through the view.
+    /// The fields that can carry an amber "unreviewed suggestion" marking.
+    /// Originally exactly the fields an OCR/LLM suggestion could prefill;
+    /// widened 2026-08-28 to `otherFees`, `category` and `paymentMethod`,
+    /// which now carry the SAME marking from a different source - a
+    /// proposal #1 derived-amount fill (`otherFees`) or a proposal #2
+    /// vendor default (`category`, `paymentMethod`) - never from a parser.
+    /// §10A.1's rule was always general ("every prefilled field is
+    /// visually marked as a suggestion until touched"), not OCR-specific;
+    /// this enum just catches up to that. None of the three ever starts
+    /// amber at construction (unlike the original six, `otherFees`
+    /// included: §6, no heuristic or LLM can match a residual with no
+    /// consistent printed label) - they can only ever be inserted into
+    /// `unreviewedFields` later, by `applyDerivedFill()`,
+    /// `applyReconciliationDifference(into:)` or
+    /// `applyVendorDefaultIfAvailable(_:)`.
     enum SuggestedField: CaseIterable {
         case total, date, vendor, hst, subtotal, tip
+        case otherFees, category, paymentMethod
 
         /// The server's field name for this suggestion (EventField,
         /// EventVocabulary.swift) - used only by the telemetry layer
@@ -102,6 +112,9 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             case .hst: return .hst
             case .subtotal: return .subtotal
             case .tip: return .tip
+            case .otherFees: return .otherFees
+            case .category: return .category
+            case .paymentMethod: return .paymentMethod
             }
         }
     }
@@ -126,10 +139,15 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         }
 
         /// The suggestion this field carries, if any. Focusing a field is
-        /// looking at it, which clears that amber permanently (§10A.1);
-        /// fields returning nil were never prefilled by a parser -
-        /// `otherFees` included, uniformly with category, payment method
-        /// and notes: it is a human-entered field, never a suggestion.
+        /// looking at it, which clears that amber permanently (§10A.1).
+        /// `otherFees`, `category` and `paymentMethod` map to their own
+        /// SuggestedField cases too (2026-08-28): none of the three ever
+        /// starts amber from a parser, but each can gain the marking
+        /// later - `otherFees` from a proposal #1 derived fill, the other
+        /// two from a proposal #2 vendor default - and this is the same
+        /// focus-clears-it wiring every other suggested field already
+        /// gets, not a new mechanism. `notes` remains the one field with
+        /// no suggestion of any kind.
         var suggestion: SuggestedField? {
             switch self {
             case .total: return .total
@@ -137,7 +155,10 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             case .hst: return .hst
             case .subtotal: return .subtotal
             case .tip: return .tip
-            case .otherFees, .category, .paymentMethod, .notes: return nil
+            case .otherFees: return .otherFees
+            case .category: return .category
+            case .paymentMethod: return .paymentMethod
+            case .notes: return nil
             }
         }
 
@@ -209,18 +230,37 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 
     // MARK: - Suggestion-outcome snapshot (behavioural telemetry, 2026-08-28)
     //
-    // What each field was prefilled with, captured once at open -
-    // suggestionOutcomes() compares the final, saved value against these
-    // to say accepted vs overridden. `suggestedFields` is `unreviewedFields`'s
-    // starting value, snapshotted separately because `unreviewedFields`
-    // itself shrinks as the person looks at things.
-    private let suggestedFields: Set<SuggestedField>
-    private let initialSuggestedTotalCents: Int?
+    // What each field was (most recently) suggested to be, captured at
+    // open and, for the three fields added 2026-08-28
+    // (otherFees/category/paymentMethod), also updated whenever a LIVE
+    // suggestion source fills them - suggestionOutcomes() compares the
+    // final, saved value against whichever of these it last recorded to
+    // say accepted vs overridden. `suggestedFields` is `unreviewedFields`'s
+    // starting value at open, but unlike `unreviewedFields` it is not a
+    // pure snapshot: `markAsMachineSuggested(_:)` below adds to it after
+    // construction too, so a field that only ever became a suggestion
+    // later (a derived fill, a reconciliation split, a vendor default)
+    // still gets its accepted/overridden outcome reported at save through
+    // this identical mechanism - one save-time telemetry path for every
+    // kind of suggestion this screen can offer, rather than the newer
+    // three each inventing their own "was it accepted" question.
+    private var suggestedFields: Set<SuggestedField>
+    private var initialSuggestedTotalCents: Int?
     private let initialSuggestedVendor: String?
-    private let initialSuggestedHstCents: Int?
-    private let initialSuggestedSubtotalCents: Int?
-    private let initialSuggestedTipCents: Int?
+    private var initialSuggestedHstCents: Int?
+    private var initialSuggestedSubtotalCents: Int?
+    private var initialSuggestedTipCents: Int?
+    /// No construction-time value: `otherFees` never carries a suggestion
+    /// at open (§6) - only `applyDerivedFill()` ever sets this, at the
+    /// moment it fills the field.
+    private var initialSuggestedOtherFeesCents: Int?
     private let initialSuggestedPurchasedAtIso: String
+    /// Set only by `applyVendorDefaultIfAvailable(_:)` (proposal #2) -
+    /// nil until a default is actually applied, since category never
+    /// carries a suggestion at construction.
+    private var initialSuggestedCategory: String?
+    /// Same shape as `initialSuggestedCategory`, for payment method.
+    private var initialSuggestedPaymentMethod: String?
 
     // MARK: - Field-edit counting (behavioural telemetry, 2026-08-28)
 
@@ -491,11 +531,21 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// `suggestion_accepted` vs `suggestion_overridden`, one entry per
     /// field that carried a suggestion this session - derived from state
     /// the form already keeps, not tracked separately. "Accepted" means
-    /// the field's final value matches what it was prefilled with;
-    /// "overridden" means it does not - regardless of whether the person
-    /// ever focused the field, because leaving a correct suggestion alone
-    /// untouched is exactly what "accepted" means. An `.edit` form reports
-    /// nothing here: nothing on it was ever a suggestion.
+    /// the field's final value matches what it was (most recently)
+    /// suggested to be; "overridden" means it does not - regardless of
+    /// whether the person ever focused the field, because leaving a
+    /// correct suggestion alone untouched is exactly what "accepted"
+    /// means. Covers every source of a suggestion this screen can offer,
+    /// not only the OCR/LLM merge at open: `otherFees` reports here the
+    /// moment a proposal #1 derived fill or reconciliation split has
+    /// touched it, and `category`/`paymentMethod` report here once a
+    /// proposal #2 vendor default has (`suggestedFields`,
+    /// `markAsMachineSuggested(_:)`). `.edit` can report a nonempty list
+    /// too, unlike before 2026-08-28 - nothing on that form is a parser
+    /// suggestion, but a derived fill or a vendor default can still apply
+    /// to it (both are explicitly extended to the edit form - see each
+    /// method's own doc comment), and whichever field that touches
+    /// becomes exactly as reportable as it would be while confirming.
     func suggestionOutcomes() -> [(field: EventField, accepted: Bool)] {
         SuggestedField.allCases.compactMap { field in
             guard suggestedFields.contains(field) else { return nil }
@@ -510,8 +560,24 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         case .hst: return matchesInitial(initialSuggestedHstCents, hstInput)
         case .subtotal: return matchesInitial(initialSuggestedSubtotalCents, subtotalInput)
         case .tip: return matchesInitial(initialSuggestedTipCents, tipInput)
+        case .otherFees: return matchesInitial(initialSuggestedOtherFeesCents, otherFeesInput)
         case .date: return ReceiptFormat.isoDate(fromPicker: purchasedDate) == initialSuggestedPurchasedAtIso
+        case .category: return normalized(categoryText) == initialSuggestedCategory
+        case .paymentMethod: return normalized(paymentMethodText) == initialSuggestedPaymentMethod
         }
+    }
+
+    /// The bookkeeping every LIVE suggestion source added 2026-08-28 shares
+    /// - amber until touched (`unreviewedFields`, exactly the construction-
+    /// time rule) and enrolled in the save-time accept/override report
+    /// above (`suggestedFields`). Callers set the matching
+    /// `initialSuggested*` storage themselves, immediately before calling
+    /// this, since the type differs per field (Int? for the money fields,
+    /// String? for category and payment method) and a generic setter here
+    /// would need to know which one anyway.
+    private func markAsMachineSuggested(_ field: SuggestedField) {
+        suggestedFields.insert(field)
+        unreviewedFields.insert(field)
     }
 
     /// A suggested amount is "accepted" when the field still parses to
@@ -613,6 +679,254 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         }
     }
 
+    // MARK: - Derived amounts (proposal #1, 2026-08-28)
+    //
+    // The confirm screen's own mirror of the server's `deriveMissingAmount`
+    // (ReceiptArithmetic.swift carries the full reasoning for why this is
+    // the root CLAUDE.md's one standing live-arithmetic exception, not a
+    // new domain rule). Nothing here writes to a field on its own -
+    // `derivableFill`/`reconciliationResult(for:)` only compute what
+    // COULD be offered; `applyDerivedFill()` and
+    // `applyReconciliationDifference(into:)` are the only things that
+    // apply one, and only on an explicit tap the view wires to a button
+    // (spec: "never applied automatically, never on save").
+
+    /// Every one of the five money fields as `ReceiptArithmetic` expects
+    /// them: nil for blank, the parsed cents for anything else. `nil` as
+    /// the WHOLE tuple - not per field - whenever any one of the five is
+    /// `.invalid` text: an invalid amount is its own stated problem
+    /// (`showsArithmeticWarning` already suppresses itself the identical
+    /// way), and offering a derived fill "over" unparseable text would be
+    /// guessing at what the person meant to type rather than reading what
+    /// is actually there.
+    private var moneyFieldValues: (subtotal: Int?, hst: Int?, tip: Int?, otherFees: Int?, total: Int?)? {
+        if subtotalInput == .invalid || hstInput == .invalid || tipInput == .invalid
+            || otherFeesInput == .invalid || totalInput == .invalid {
+            return nil
+        }
+        func cents(_ input: MoneyInput) -> Int? {
+            if case .cents(let value) = input { return value }
+            return nil
+        }
+        return (cents(subtotalInput), cents(hstInput), cents(tipInput), cents(otherFeesInput), cents(totalInput))
+    }
+
+    /// The one-tap-fill affordance: non-nil exactly when one of the five
+    /// money fields is blank and the other four are valid amounts.
+    /// `nil` field-invalid text aside, this is mutually exclusive with
+    /// `reconciliationDifference` below by construction - one is "exactly
+    /// one field missing", the other is "zero fields missing" - so the
+    /// view never has both a fill button and a reconciliation button for
+    /// the same state.
+    var derivableFill: DerivedAmount? {
+        guard let fields = moneyFieldValues else { return nil }
+        return ReceiptArithmetic.deriveMissingAmount(
+            subtotalCents: fields.subtotal,
+            hstCents: fields.hst,
+            tipCents: fields.tip,
+            otherFeesCents: fields.otherFees,
+            totalCents: fields.total
+        )
+    }
+
+    /// The proposal's own labelling requirement: "Tip = total − subtotal −
+    /// HST − fees", not a bare button - the risk it names by name is
+    /// someone tapping without reading and storing an amount the paper
+    /// does not print. Generated from which field `derivableFill` is
+    /// solving for, so the five labels cannot drift from
+    /// `ReceiptArithmetic`'s own five fields the way a hand-maintained
+    /// switch elsewhere in this screen already warns against (SuggestedField's
+    /// own history).
+    var derivableFillLabel: String? {
+        guard let derived = derivableFill else { return nil }
+        let amount = ReceiptFormat.money(cents: derived.cents, currency: currency)
+        switch derived.field {
+        case .subtotal: return "Subtotal = Total − HST − Tip − Other fees (\(amount))"
+        case .hst: return "HST = Total − Subtotal − Tip − Other fees (\(amount))"
+        case .tip: return "Tip = Total − Subtotal − HST − Other fees (\(amount))"
+        case .otherFees: return "Other fees = Total − Subtotal − HST − Tip (\(amount))"
+        case .total: return "Total = Subtotal + HST + Tip + Other fees (\(amount))"
+        }
+    }
+
+    /// Applies the one-tap fill: sets the derived field's text and marks
+    /// it amber, exactly like an OCR suggestion (spec: "the filled value
+    /// goes amber and stays amber... never applied automatically, never on
+    /// save"). Works identically on `.edit` (deliberately: editing after
+    /// confirmation is a stated feature the proposal names by name, "not
+    /// just the confirm screen") - `applyMachineSuggestedAmount` does not
+    /// branch on `purpose`, so a fill on an edit form is amber and
+    /// reportable exactly the way one during confirm is.
+    @discardableResult
+    func applyDerivedFill() -> Bool {
+        guard let derived = derivableFill else { return false }
+        applyMachineSuggestedAmount(derived.field, cents: derived.cents)
+        return true
+    }
+
+    /// The second affordance: which of tip or other fees the reconciliation
+    /// difference could go into. Non-nil only when all five fields are
+    /// filled in (see `moneyFieldValues`) and they do not reconcile - the
+    /// restaurant case, where the likely explanation is a tip or a fee
+    /// nobody entered yet.
+    private var reconciliationDifference: Int? {
+        guard let fields = moneyFieldValues,
+              let subtotal = fields.subtotal, let hst = fields.hst,
+              let tip = fields.tip, let otherFees = fields.otherFees,
+              let total = fields.total
+        else { return nil }
+        return ReceiptArithmetic.reconciliationDifference(
+            subtotalCents: subtotal, hstCents: hst, tipCents: tip,
+            otherFeesCents: otherFees, totalCents: total
+        )
+    }
+
+    /// Which of tip or other fees the reconciliation difference can go
+    /// into, named by the destination the button offers - `total` is
+    /// deliberately not a case here: the proposal names only tip and other
+    /// fees ("the usual cause on a restaurant bill"), and total is never
+    /// the field a mismatch should be blamed on.
+    enum ReconciliationTarget {
+        case tip, otherFees
+
+        /// The corresponding DerivableMoneyField, so
+        /// `applyReconciliationDifference(into:)` can share
+        /// `applyMachineSuggestedAmount(_:cents:)` with `applyDerivedFill()`
+        /// rather than repeating its bookkeeping.
+        var derivableField: DerivableMoneyField {
+            switch self {
+            case .tip: return .tip
+            case .otherFees: return .otherFees
+            }
+        }
+    }
+
+    /// The resulting value at `target` if the reconciliation difference
+    /// were added to whatever it already holds - or nil, refusing the
+    /// offer, when that would leave the field negative. Mirrors
+    /// `deriveMissingAmount`'s own never-negative refusal for tip and
+    /// other fees (ReceiptArithmetic.swift's doc comment states the
+    /// reasoning in full): there is no such thing as a negative tip or a
+    /// rebate filed as an "other fee" on any receipt this app has ever
+    /// seen, so a fill that would produce one is refused rather than
+    /// offered, even though this affordance - unlike `deriveMissingAmount`
+    /// - has no server function to mirror that refusal FROM.
+    func reconciliationResult(for target: ReconciliationTarget) -> Int? {
+        guard let difference = reconciliationDifference else { return nil }
+        let current: Int
+        switch target {
+        case .tip: current = centsOrNil(tipInput) ?? 0
+        case .otherFees: current = centsOrNil(otherFeesInput) ?? 0
+        }
+        let result = current + difference
+        return result >= 0 ? result : nil
+    }
+
+    /// The reconciliation buttons' own label, same reasoning as
+    /// `derivableFillLabel`: named, not bare, so the risk the proposal
+    /// names - tapping without reading - has something concrete to read.
+    func reconciliationLabel(for target: ReconciliationTarget) -> String? {
+        guard let result = reconciliationResult(for: target) else { return nil }
+        let amount = ReceiptFormat.money(cents: result, currency: currency)
+        switch target {
+        case .tip: return "Put the difference in Tip (\(amount))"
+        case .otherFees: return "Put the difference in Other fees (\(amount))"
+        }
+    }
+
+    /// Applies the reconciliation difference to whichever target was
+    /// tapped - same amber treatment, same save-time accept/override
+    /// reporting as `applyDerivedFill()` above, and the identical
+    /// `.edit`-works-too behaviour.
+    @discardableResult
+    func applyReconciliationDifference(into target: ReconciliationTarget) -> Bool {
+        guard let result = reconciliationResult(for: target) else { return false }
+        applyMachineSuggestedAmount(target.derivableField, cents: result)
+        return true
+    }
+
+    /// Shared by `applyDerivedFill()` and
+    /// `applyReconciliationDifference(into:)`: writes `cents` into
+    /// `field`'s text, records it as this session's suggestion baseline
+    /// for the save-time accept/override report (`suggestionOutcomes()`),
+    /// and marks the field amber - the one place "applying a suggested
+    /// amount" is defined, so the two callers cannot drift on what it
+    /// means.
+    private func applyMachineSuggestedAmount(_ field: DerivableMoneyField, cents: Int) {
+        let text = MoneyInput.text(fromCents: cents)
+        switch field {
+        case .subtotal:
+            subtotalText = text
+            initialSuggestedSubtotalCents = cents
+        case .hst:
+            hstText = text
+            initialSuggestedHstCents = cents
+        case .tip:
+            tipText = text
+            initialSuggestedTipCents = cents
+        case .otherFees:
+            otherFeesText = text
+            initialSuggestedOtherFeesCents = cents
+        case .total:
+            totalText = text
+            initialSuggestedTotalCents = cents
+        }
+        markAsMachineSuggested(field.suggestedField)
+    }
+
+    // MARK: - Vendor defaults (proposal #2, 2026-08-28)
+
+    /// Prefills category and payment method from the vendor's own
+    /// remembered defaults (GET /api/receipts/options's `vendorDefaults`,
+    /// APIModels.swift) - amber, editable, and NEVER over what the person
+    /// already typed (checked per field, independently: a vendor whose
+    /// remembered category the person already typed over still offers its
+    /// payment method). Exact, unnormalized match against `vendorText` -
+    /// the 2026-08-26 ruling that these are the person's own free-text
+    /// values, never rewritten, extends to the lookup key too.
+    ///
+    /// Deliberately does NOT take a `ReceiptOptionsStore` - this model
+    /// stays network-free and simulator-testable (spec §10.2), so the
+    /// view hands in only the small lookup this needs, whenever the
+    /// vendor text or the options fetch changes (ConfirmReceiptView's
+    /// `onAppear`/`onChange` wiring). Idempotent and safe to call
+    /// repeatedly: every write here is guarded by the target field still
+    /// being blank, so calling this again after it already filled
+    /// something changes nothing.
+    ///
+    /// Works on `.edit` too, on the same reasoning `applyDerivedFill()`
+    /// states: a confirmed receipt whose category was genuinely left blank
+    /// is not "a confirmed receipt's existing value" being overwritten -
+    /// there is no existing value - and the blank-field guard is exactly
+    /// what "never overwrite a confirmed receipt's existing values" means
+    /// in code.
+    ///
+    /// Why category is defensible to prefill here where an amount would
+    /// not be: category is free text with no tax consequence (root
+    /// CLAUDE.md's own category rule), so a wrong default costs a
+    /// mislabelled row an accountant re-reads. HST is an input tax credit -
+    /// getting it wrong costs a wrong claim - which is exactly why
+    /// `deriveMissingAmount` (arithmetic.ts) is choosy about what it will
+    /// derive and this function is not. Payment method rides the identical
+    /// reasoning: a chosen label, not a tax figure.
+    func applyVendorDefaultIfAvailable(_ vendorDefaults: [String: VendorDefault]) {
+        guard !vendorText.isEmpty, let match = vendorDefaults[vendorText] else { return }
+        if isBlank(categoryText), let category = match.category, !category.isEmpty {
+            categoryText = category
+            initialSuggestedCategory = category
+            markAsMachineSuggested(.category)
+        }
+        if isBlank(paymentMethodText), let paymentMethod = match.paymentMethod, !paymentMethod.isEmpty {
+            paymentMethodText = paymentMethod
+            initialSuggestedPaymentMethod = paymentMethod
+            markAsMachineSuggested(.paymentMethod)
+        }
+    }
+
+    private func isBlank(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     // MARK: - Saving
 
     /// The reason save is disabled, stated below the button rather than
@@ -694,5 +1008,21 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     private func normalized(_ text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+/// Which SuggestedField carries this money field's amber marking - kept
+/// here rather than on ReceiptArithmetic.swift's own enum, so that file
+/// stays exactly what §10.2 asks of a pure computation module (no
+/// knowledge of ConfirmReceiptModel or the view layer above it).
+private extension DerivableMoneyField {
+    var suggestedField: ConfirmReceiptModel.SuggestedField {
+        switch self {
+        case .subtotal: return .subtotal
+        case .hst: return .hst
+        case .tip: return .tip
+        case .otherFees: return .otherFees
+        case .total: return .total
+        }
     }
 }

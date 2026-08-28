@@ -10,6 +10,12 @@ import SwiftUI
 /// through the same keyset paging: the screen never re-orders or
 /// re-filters rows it already has, because that would disagree with the
 /// next page.
+///
+/// A running-totals block sits below the outbox (proposal #3, 2026-08-28):
+/// confirmed-only count, total spent, total HST for the current filter,
+/// re-fetched whenever the filter changes - see `summarySection`'s own
+/// comment for how it reconciles with the pending badge in `listHeader`
+/// below, which is a different, whole-account number by design.
 struct HomeView: View {
     @EnvironmentObject private var session: SessionController
     @EnvironmentObject private var outbox: OutboxController
@@ -56,6 +62,8 @@ struct HomeView: View {
                 }
 
                 outboxSection
+
+                summarySection
 
                 Section {
                     listContent
@@ -479,6 +487,43 @@ struct HomeView: View {
         }
     }
 
+    // MARK: - Running totals (proposal #3, 2026-08-28)
+
+    /// GET /api/receipts/summary's confirmed-only totals for whatever
+    /// filter `model.query` currently applies - count, total spent, total
+    /// HST - with its own pending count stated separately, never folded
+    /// into the money (the proposal's own named risk: "the number invites
+    /// being read as a tax figure... a summary that quietly counted
+    /// pending rows would disagree with the export"). Absent for three
+    /// reasons that all render identically - nothing has loaded yet, the
+    /// page itself failed, or the summary fetch alone failed - because
+    /// this is pure enhancement over the list and never something a
+    /// failure here should announce (ReceiptListModel.summary's own
+    /// comment).
+    ///
+    /// **Reconciling this with `listHeader`'s pending badge below.** Two
+    /// different questions, on purpose, not two numbers that happen to
+    /// disagree: `model.pendingCount` (the header) is this ACCOUNT's total
+    /// unconfirmed receipts, independent of any filter - the nag that
+    /// opens the confirm queue, unchanged by 2026-08-28. `summary.pendingCount`
+    /// here is pending rows WITHIN THE CURRENT FILTER - context for these
+    /// particular totals, not a second nag. They read the same only when
+    /// no filter is narrowing the list; the copy below says "in this view"
+    /// precisely so the two never look like the same claim stated twice.
+    @ViewBuilder
+    private var summarySection: some View {
+        if let summary = model.summary {
+            Section {
+                // GET /api/receipts/summary carries no currency of its own
+                // (it sums across every matching row) - "CAD" the same way
+                // ConfirmReceiptModel's capture-time init hardcodes it:
+                // currency is not editable anywhere in this client (spec,
+                // wave-4 report §6.3) and the server column default is CAD.
+                SummaryRow(summary: summary, currency: "CAD")
+            }
+        }
+    }
+
     // MARK: - List
 
     private var listHeader: some View {
@@ -676,6 +721,50 @@ struct OutboxEntryRow: View {
         case .needsAttention:
             PendingBadge(text: "Needs attention")
         }
+    }
+}
+
+/// The running-totals block (proposal #3, 2026-08-28): count, total spent
+/// and total HST for confirmed receipts in the CURRENT filter, with the
+/// pending count in that same filter stated on its own line - never
+/// blended into the money, per the proposal's own named risk ("the number
+/// invites being read as a tax figure"). Plain text, not amber: this is a
+/// read-only report, not a suggestion anyone confirms.
+struct SummaryRow: View {
+    let summary: ReceiptSummary
+    let currency: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(ReceiptFormat.money(cents: summary.confirmed.totalCents, currency: currency))
+                    .font(.title3.weight(.semibold))
+                    .monospacedDigit()
+                Text(receiptCountLabel)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Text("HST \(ReceiptFormat.money(cents: summary.confirmed.hstCents, currency: currency))")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            // Stated every time a summary shows, zero included: this is
+            // what keeps "confirmed only" a fact about the number above
+            // rather than a caveat that only appears when it is bad news.
+            Text(pendingCaveat)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var receiptCountLabel: String {
+        "· \(summary.confirmed.count) confirmed \(summary.confirmed.count == 1 ? "receipt" : "receipts") in this view"
+    }
+
+    private var pendingCaveat: String {
+        summary.pendingCount == 0
+            ? "No pending receipts in this view."
+            : "Excludes \(summary.pendingCount) pending \(summary.pendingCount == 1 ? "receipt" : "receipts") in this view, not yet confirmed."
     }
 }
 
