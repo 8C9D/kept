@@ -347,3 +347,205 @@ production migration, no App Store submission of any kind. The one
 verification claim in the brief this report could not corroborate from the
 repository is the live-model split-HST check (§1.2, §4); everything else
 checked against the code, not merely restated from a summary.
+
+---
+
+## 8 · Second pass, same day: six approved UX proposals — not deployed
+
+Scope: `docs/proposals/2026-08-28-ux-enhancements.md`'s ten proposals,
+written alongside the round documented in §1-7 above. The owner approved
+**#1-#6**; they are built. **#7-#10 remain unbuilt**, and nothing below
+touches them. Built on top of the round in §1-7, in the same working tree —
+still uncommitted, still undeployed, now with migration `0008` applied to
+the local database on top of `0006`/`0007`.
+
+### 8.1 What was built
+
+- **#1, derive the missing amount.** `deriveMissingAmount`
+  (`server/src/domain/arithmetic.ts`) is the canonical rule; both clients
+  mirror it live (`ios/Kept/Confirm/ReceiptArithmetic.swift`,
+  `web/src/views/ReceiptForm.tsx`'s own `deriveMissingAmount`), plus a
+  reconciliation-split affordance for the all-five-filled-but-unbalanced
+  case (`reconciliationSuggestions` / `reconciliationDifference`). Refuses a
+  negative tip or other-fees result (`NEVER_NEGATIVE_FIELDS`, mirrored by
+  name on iOS) and a value outside the storable cents range. No server
+  route calls the function to write a receipt — read directly, confirmed by
+  its own doc comment and by `grep`ing `deriveMissingAmount(` across
+  `server/src/routes/`, which returns only the domain function and its
+  test.
+- **#2, vendor-remembered defaults.** `GET /api/receipts/options` gains
+  `vendorDefaults` (`vendorDefaultCandidates`, one query, two window
+  functions), confirmed-receipts-only, scoped to vendors the same response
+  already serves in `vendors`. Applied on both clients only into an empty,
+  untouched field (`vendorDefaultFill` on web,
+  `applyVendorDefaultIfAvailable` on iOS).
+- **#3, running totals.** `GET /api/receipts/summary`, sharing
+  `buildReceiptFilterConditions` with `GET /api/receipts` (one function,
+  read directly, called from both route handlers). One `FILTER (WHERE …)`
+  aggregate query; confirmed money and `pendingCount` as two separate
+  fields in the response, never blended. Rendered as a summary line on both
+  clients, degrading to no line on a failed fetch (`ReceiptsTable.tsx`'s
+  `SummaryLine`, `HomeView.swift`'s `summarySection`).
+- **#4, action-report extension.** `parsePathBreakdown` and
+  `editHistograms` (`server/src/domain/actionReport.ts`), fed by a
+  `LEFT JOIN` onto `receipts` in `server/src/db/actionReport.ts`. Every
+  printed rate now carries `(n=…)` (`rateWithN`) — confirmed by diff: the
+  override-rate column printed a bare percentage with no `n` before this
+  change — and a parse-path row under `MIN_READABLE_N` (5) is flagged with
+  a trailing `*` (`thinFlag`).
+- **#5, bulk edit — without delete.** `web/src/bulkEdit.ts` (selection,
+  `runBatch` at concurrency 4, `partitionConfirmable`) wired into
+  `ReceiptsTable.tsx`. No bulk-delete code path exists anywhere in the
+  module — confirmed by reading the whole file, not inferred from the
+  module comment alone, which states the omission is deliberate (no
+  undelete exists anywhere in the app). No new server route: every bulk
+  action is the existing per-row `PATCH /api/receipts/:id`, looped
+  client-side.
+- **#6, add a page / replace an image.** `POST /api/receipts/:id/images`
+  and `PUT /api/receipts/:id/images/:page`
+  (`server/src/routes/receipts.ts`), the page number always server-assigned
+  under a `FOR UPDATE` lock on the parent `receipts` row. Migration
+  `0008_receipt-images-page-partial.sql` drops the plain unique constraint
+  on `(receipt_id, page)` and recreates it as a partial unique index
+  (`WHERE deleted_at IS NULL`) — read directly from the SQL file and
+  confirmed applied to the local database (`\d receipt_images` inside
+  `kept-db` shows the index as `UNIQUE, btree (receipt_id, page) WHERE
+  deleted_at IS NULL`; `drizzle.__drizzle_migrations` carries its row,
+  `id=9`, matching `_journal.json`'s `0008` timestamp). Export gains
+  `pages` (15 columns now, confirmed from `EXPORT_COLUMN_HEADERS`) and
+  bundles every live page (`generateExport.ts`'s `imagesToBundle` loop,
+  budget-checked per page). Both clients' scan-then-upload screens
+  (`ios/Kept/Screens/ReceiptImageUploadModel.swift`/`ReceiptImageUploadView.swift`,
+  `web/src/receiptImages.ts`) reuse the existing scanner/file-picker and the
+  existing presign-then-PUT sequence — no new upload mechanism.
+- **The CORS `PUT` fix.** `server/src/app.ts`'s `allowMethods` gained
+  `PUT`; `server/tests/integration/cors.test.ts` gained a test that drives
+  `OPTIONS` for every method the API uses and asserts each appears in
+  `access-control-allow-methods`.
+
+### 8.2 Prediction versus reality
+
+Written from the brief, before opening the files it described, per the
+project's verify-artifacts-not-reports rule.
+
+- **Predicted:** the new route surface would be exactly `GET
+  /api/receipts/summary`, `POST /api/receipts/:id/images`, `PUT
+  /api/receipts/:id/images/:page`, plus a `vendorDefaults` key added to the
+  existing options response — no bulk-edit server route, since the brief
+  described bulk edit as client-side. **Reality: exact match** — read the
+  whole of `routes/receipts.ts`; no other route exists or changed shape.
+- **Predicted:** the export column list would go from 14 to 15 with `pages`
+  inserted directly after `image_filename`. **Reality: exact match**, read
+  from `EXPORT_COLUMN_HEADERS`.
+- **Predicted:** migration `0008` would be a `DROP CONSTRAINT` /
+  `CREATE UNIQUE INDEX … WHERE deleted_at IS NULL` pair over
+  `receipt_images`. **Reality: exact match**, and confirmed applied to the
+  local database, not only present as a file.
+- **Predicted:** bulk delete would be entirely absent — not a disabled
+  button, not a dead code path. **Reality: exact match**, and the module's
+  own header states the reasoning (no undelete exists anywhere in this
+  app) rather than leaving it to be inferred.
+- **Predicted:** the offline-outbox-for-page-uploads rejection would be
+  recorded in `ReceiptImageUploadModel.swift`'s own doc comment.
+  **Reality: exact match**, and more specific than expected — the comment
+  names a second concrete risk beyond "looks synchronous but isn't": a
+  replace's `objectKey` could outlive the presigned URL it was issued
+  against if queued.
+- **No discrepancy found between the brief and the repository** on any
+  route path, column name, constraint predicate, or test count checked in
+  this pass — everything cited above was read from the code or run as a
+  command, and all of it matched what the brief described.
+
+### 8.3 Verification actually performed, and by whom
+
+- **Server: 578 tests / 49 files, green** (`npm test`, run in this pass).
+  The pre-this-batch count was 500/47 (§3 above); the difference is two new
+  files, `receiptImages.test.ts` and `receiptSummary.test.ts`, plus
+  additions inside `export.test.ts`, `receiptOptions.test.ts`,
+  `actionReport.test.ts`, `arithmetic.test.ts`, `exportFilename.test.ts`,
+  `writeFiles.test.ts`, `cors.test.ts`.
+- **Web: 136 tests / 11 files, green** (`npm test`, run in this pass).
+  Pre-this-batch count was 68/8; three new files, `bulkEdit.test.ts`,
+  `receiptImages.test.ts`, `receiptSummary.test.ts`.
+- **iOS: 365 unit tests, 0 failures** (`xcodebuild test
+  -project Kept.xcodeproj -scheme Kept -destination 'platform=iOS
+  Simulator,name=iPhone 17 Pro' -only-testing:KeptTests`, run in this pass,
+  `** TEST SUCCEEDED **`). Pre-this-batch count was 311 unit tests (§3
+  above); two new files, `ReceiptArithmeticTests.swift` and
+  `ReceiptImageUploadModelTests.swift`, plus additions to existing ones.
+  **`KeptUITests` was not run in this pass** — see §8.4.
+- **Migration `0008` confirmed applied to the local database directly**,
+  not inferred from the file's existence: `docker exec kept-db psql -U kept
+  -d kept -c "\d receipt_images"` shows `receipt_images_receipt_id_page_uq`
+  as `UNIQUE, btree (receipt_id, page) WHERE deleted_at IS NULL`, and
+  `drizzle.__drizzle_migrations` carries a row (`id=9`) whose hash matches
+  `server/drizzle/meta/_journal.json`'s `0008` entry.
+
+### 8.4 What I could not verify, and what it would take
+
+- **The iOS document scanner cannot run in the Simulator, and was not
+  exercised.** `VNDocumentCameraViewController` (the scanner both the
+  original capture flow and this batch's add-a-page/replace-image screens
+  use — `ReceiptImageUploadView.swift`'s `DocumentScannerView`) has no
+  Simulator implementation; Apple's own framework requires a physical
+  device with a camera. `KeptTests` (unit tests, no scanner involved) is
+  what was run; nothing here exercised the actual scan-to-upload journey on
+  Simulator or device.
+- **No end-to-end Simulator UI run (`KeptUITests`) was performed for any
+  iOS feature in this pass** — neither the ones described in §1-7 above nor
+  this batch's. `xcodebuild test -only-testing:KeptTests` was run; the UI
+  target was not.
+- **Nothing in this batch has run against production, in any form.**
+  Migration `0008` exists only on the local development database (§8.3).
+  No `fly deploy` happened. No iOS build carrying any of #1-#6 was
+  archived or uploaded — whatever build is on the phones predates this
+  batch and predates the §1-7 round it sits on top of.
+- **The visual rendering of the amber treatment on derived fills and
+  vendor defaults** (§10A.1's widened rule) was read from the diff and the
+  unit tests that pin `SuggestibleField`/`clientApplied`-style state, not
+  confirmed by eye on either client — the same caveat §1.3/§1.4 above
+  already state for the visual redesign generally.
+- **The bulk-edit UI's actual browser behaviour** (partial failure leaving
+  the right rows selected, the header checkbox's indeterminate state) was
+  read from `bulkEdit.ts`'s unit-tested pure functions
+  (`toggleSelectAll`/`runBatch`) and from `ReceiptsTable.tsx`'s wiring, not
+  driven in a real browser in this pass.
+
+### 8.5 What is owner-only
+
+- Deploying the server and running migration `0008` against production
+  Neon, once `0006`/`0007` (§5 above) have also run there.
+- Everything already queued ahead of this in `CLAUDE.md`'s status section
+  and in §5 above: the 1.0 (1) demo recording and resubmission, the Sign in
+  with Apple `.p8`, the R2 `kept-backups` token, and the App Store Connect
+  privacy label refiling. This batch adds nothing to that queue's order —
+  it sits behind all of it, not beside it.
+
+### 8.6 Anti-pattern self-review (framework §10.2)
+
+- **Duplication:** `deriveMissingAmount` is defined once server-side and
+  mirrored, not shared, on both clients — necessary duplication (a network
+  round trip per keystroke would defeat the affordance), kept honest by an
+  explicit "kept in exact correspondence" comment on the iOS mirror rather
+  than left implicit. `presignAndPut` (web) and the equivalent shared
+  sequence on iOS (`ReceiptImageUploadModel.uploadOnePage`) are each
+  factored out once so the create path and the new add/replace paths share
+  one presign-then-PUT implementation rather than three.
+- **Error-masking:** none found in this batch — `runBatch`
+  (`bulkEdit.ts`) explicitly catches per-worker rejections and reports them
+  as `BatchFailure`s rather than swallowing them or failing the whole
+  batch; the image-upload paths on both clients propagate the server's own
+  `duplicate_image` message rather than inventing or discarding it.
+- **Speculative generality:** none found — `receiptImageSchema` is reused
+  by the create route and both new image routes rather than three near-copies,
+  which is convergent reuse of an existing shape, not new abstraction built
+  ahead of need.
+
+### 8.7 State of this pass
+
+Built and locally verified: server 578/49, web 136/11, iOS 365 unit tests
+(re-run in this pass; UI tests not run), migration `0008` confirmed applied
+locally by direct database inspection. **Not shipped in any sense** — no
+deploy, no production migration, no App Store submission. No discrepancy
+found between the orchestrating brief and the repository on any fact
+checked in this pass (§8.2).
