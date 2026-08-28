@@ -63,15 +63,18 @@ final class SessionController: ObservableObject {
     private let api: any KeptAPI
     private let tokenStore: SessionTokenStore
     private let reauthorization: any AppleReauthorizing
+    private let eventLogger: EventLogger
 
     init(
         api: any KeptAPI,
         tokenStore: SessionTokenStore,
-        reauthorization: any AppleReauthorizing
+        reauthorization: any AppleReauthorizing,
+        eventLogger: EventLogger
     ) {
         self.api = api
         self.tokenStore = tokenStore
         self.reauthorization = reauthorization
+        self.eventLogger = eventLogger
         // Cold launch: a stored token is a live session until the server
         // says otherwise - the first 401 will land in handleSessionRejected.
         do {
@@ -122,6 +125,10 @@ final class SessionController: ObservableObject {
             )
             try tokenStore.save(response.token)
             state = .signedIn
+            // Logged with a session already saved, so the batch this
+            // lands in has a real token to post with - the mirror-image
+            // race signOut() below accepts losing.
+            eventLogger.log(.signIn)
             onSignedIn?()
         } catch {
             // A rejected identity token lands here as a plain request
@@ -150,8 +157,21 @@ final class SessionController: ObservableObject {
         transitionToSignedOut(message: "Your session has expired. Sign in again.")
     }
 
-    /// User-initiated sign-out from the Home menu.
+    /// User-initiated sign-out from the Home menu. `sign_out` is logged
+    /// only here, not from `handleSessionRejected()` or account deletion's
+    /// own sign-out - an expired session and a destroyed account are not
+    /// what the vocabulary means by a person choosing to sign out.
+    ///
+    /// ⚠ A real, accepted race: the event is queued before the token is
+    /// cleared below so it has its best chance of posting with a still-
+    /// valid session, but EventLogger's queue flushes on its own triggers
+    /// (a size threshold, backgrounding, connectivity return) - not
+    /// synchronously with this call - so it can still lose the race and
+    /// go out (or attempt to) after the token is gone. Losing this one
+    /// event to that race is the accepted outcome (spec: "losing
+    /// telemetry is always the acceptable failure"), not a bug to chase.
     func signOut() {
+        eventLogger.log(.signOut)
         transitionToSignedOut(message: nil)
     }
 

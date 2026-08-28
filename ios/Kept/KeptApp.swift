@@ -17,6 +17,7 @@ final class AppEnvironment: ObservableObject {
     let session: SessionController
     let outbox: OutboxController
     let receiptOptions: ReceiptOptionsStore
+    let eventLogger: EventLogger
 
     init() {
         let serverConfig = ServerConfig(defaults: .standard)
@@ -31,12 +32,24 @@ final class AppEnvironment: ObservableObject {
             tokenStore: tokenStore,
             rejectionRelay: rejectionRelay
         )
+        // Behavioural telemetry (2026-08-28). Its own
+        // ConnectivityMonitor/BackgroundContinuation instances, separate
+        // from the outbox's below: both are cheap, stateless wrappers
+        // (NWPathMonitor, UIApplication background-task tokens), and nothing
+        // about sharing them would simplify anything - each type already
+        // owns exactly the lifecycle it needs.
+        let eventLogger = EventLogger(
+            api: api,
+            connectivity: NetworkPathConnectivityMonitor(),
+            backgroundContinuation: AppBackgroundContinuation()
+        )
         let session = SessionController(
             api: api,
             tokenStore: tokenStore,
             // Account deletion re-authorizes with Apple for a code the
             // server can revoke; nothing else in the app uses this.
-            reauthorization: AppleIDReauthorization()
+            reauthorization: AppleIDReauthorization(),
+            eventLogger: eventLogger
         )
         let outbox = OutboxController(
             store: FileOutboxStore(),
@@ -77,6 +90,7 @@ final class AppEnvironment: ObservableObject {
         self.session = session
         self.outbox = outbox
         self.receiptOptions = receiptOptions
+        self.eventLogger = eventLogger
 
         Task { await outbox.start() }
     }
@@ -89,7 +103,7 @@ struct KeptApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(api: environment.api, options: environment.receiptOptions)
+            RootView(api: environment.api, options: environment.receiptOptions, eventLogger: environment.eventLogger)
                 .environmentObject(environment.session)
                 .environmentObject(environment.serverConfig)
                 .environmentObject(environment.outbox)
@@ -99,6 +113,15 @@ struct KeptApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
                         environment.outbox.externalTrigger()
+                    } else if phase == .background {
+                        // The telemetry queue's other flush trigger
+                        // (2026-08-28), alongside its own size threshold
+                        // and connectivity return: give a queue that has
+                        // not yet crossed the threshold its shot at
+                        // reaching the server before the app goes idle,
+                        // inside the background grant EventLogger already
+                        // asks for.
+                        environment.eventLogger.flushForBackgrounding()
                     }
                 }
         }

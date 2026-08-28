@@ -13,11 +13,15 @@ import SwiftUI
 /// ConfirmReceiptModel, where it is tested without a camera.
 struct ConfirmReceiptView: View {
     @ObservedObject var model: ConfirmReceiptModel
-    /// The person's own past categories and payment methods, offered back
-    /// on those two rows. Empty until the fetch lands - or forever, if it
-    /// fails or nothing has been used yet - and the form is complete
-    /// either way (never blocks on the network).
+    /// The person's own past categories, payment methods and vendors,
+    /// offered back on those rows. Empty until the fetch lands - or
+    /// forever, if it fails or nothing has been used yet - and the form
+    /// is complete either way (never blocks on the network).
     @ObservedObject var options: ReceiptOptionsStore
+    /// Behavioural telemetry (2026-08-28) - fire-and-forget by contract
+    /// (EventLogger's own doc comment), so every call site below is a
+    /// plain, unawaited `log()`: nothing here may block or fail visibly.
+    let eventLogger: EventLogger
     let onSaved: () async -> Void
     let onSetAside: () async -> Void
 
@@ -48,6 +52,7 @@ struct ConfirmReceiptView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button(model.dismissLabel) {
+                    logDeferralIfConfirming()
                     Task { await onSetAside() }
                 }
             }
@@ -60,17 +65,75 @@ struct ConfirmReceiptView: View {
             guard model.receiptId != nil else { return }
             await options.refresh()
         }
-        .onChange(of: focusedField) { _, newFocus in
+        .onAppear {
+            // `confirm_opened` (2026-08-28): only for an actual confirm -
+            // `.edit` reopens the same form over a person's own already-
+            // confirmed values, which is a different action
+            // (`receipt_edited` fires on its save instead, below).
+            if model.purpose == .confirm {
+                eventLogger.log(.confirmOpened, receiptId: model.receiptId)
+            }
+        }
+        .onChange(of: focusedField) { oldFocus, newFocus in
             // Focusing a field is looking at it: the amber clears whether
             // or not the person then edits (spec §10A.1).
             if let suggestion = newFocus?.suggestion {
                 model.markTouched(suggestion)
             }
+            // field_edited's per-focus-cycle counting (2026-08-28): the
+            // field being left is checked for an actual change, then the
+            // field being entered gets its own snapshot to be checked
+            // against next time it is left.
+            if let oldFocus {
+                model.fieldDidLoseFocus(oldFocus)
+            }
+            if let newFocus {
+                model.fieldDidGainFocus(newFocus)
+            }
         }
         .sheet(isPresented: $showZoomedImage) {
             if let imageSource = model.imageSource {
-                ZoomableImageSheet(source: imageSource)
+                ZoomableImageSheet(source: imageSource) {
+                    eventLogger.log(.imageZoomed, receiptId: model.receiptId)
+                }
             }
+        }
+    }
+
+    // MARK: - Telemetry (2026-08-28)
+
+    /// `confirm_deferred` fires only for an actual pending-receipt "Later"
+    /// - `.edit`'s "Cancel" leaves nothing pending behind (the receipt was
+    /// already confirmed before this form opened), so it is not a
+    /// deferral of anything and gets no event.
+    private func logDeferralIfConfirming() {
+        guard model.purpose == .confirm else { return }
+        eventLogger.log(.confirmDeferred, receiptId: model.receiptId)
+    }
+
+    /// Everything this screen reports at a successful save: which action
+    /// (`confirm_saved` for a first confirmation, `receipt_edited` for a
+    /// re-edit of an already-confirmed receipt), one `field_edited` per
+    /// field actually edited this session with its count, and one
+    /// `suggestion_accepted`/`suggestion_overridden` per field that
+    /// carried a suggestion - all derived from state ConfirmReceiptModel
+    /// already keeps (fieldEditCounts, suggestionOutcomes()), never from a
+    /// receipt field's value (spec: "no field values, ever").
+    private func logSave() {
+        let receiptId = model.receiptId
+        eventLogger.log(
+            model.purpose == .edit ? .receiptEdited : .confirmSaved,
+            receiptId: receiptId
+        )
+        for (field, count) in model.fieldEditCounts {
+            eventLogger.log(.fieldEdited, field: field, receiptId: receiptId, count: count)
+        }
+        for outcome in model.suggestionOutcomes() {
+            eventLogger.log(
+                outcome.accepted ? .suggestionAccepted : .suggestionOverridden,
+                field: outcome.field,
+                receiptId: receiptId
+            )
         }
     }
 
@@ -83,7 +146,10 @@ struct ConfirmReceiptView: View {
                 ReceiptImageView(source: imageSource)
                     .frame(maxWidth: .infinity, minHeight: 160, maxHeight: 260)
                     .contentShape(Rectangle())
-                    .onTapGesture { showZoomedImage = true }
+                    .onTapGesture {
+                        showZoomedImage = true
+                        eventLogger.log(.imageOpened, receiptId: model.receiptId)
+                    }
                     .accessibilityLabel("Receipt image. Tap to zoom.")
             } else {
                 Text("No image stored for this receipt.")
@@ -127,9 +193,12 @@ struct ConfirmReceiptView: View {
                 if model.showsArithmeticWarning {
                     // Amber, not red, and inside the card: a prompt to
                     // look, not an error - plenty of legitimate receipts
-                    // do not reconcile (spec §7.2, §10A.1).
+                    // do not reconcile (spec §7.2, §10A.1). Four
+                    // components now feed the check (2026-08-28: tip and
+                    // other fees rejoined subtotal and HST), so the
+                    // wording names the total rather than enumerating them.
                     Label(
-                        "Subtotal and HST don't add up to this total. Worth a look.",
+                        "These amounts don't add up to the total. Worth a look.",
                         systemImage: "exclamationmark.triangle"
                     )
                     .font(.footnote)
@@ -169,12 +238,9 @@ struct ConfirmReceiptView: View {
                     // warning: amber, inside the field, never red - a
                     // prompt to look, not a rule. Touching the date clears
                     // this with the tint.
-                    Label(
-                        "The date was read two different ways from this receipt. Worth a look.",
-                        systemImage: "exclamationmark.triangle"
+                    DisagreementNote(
+                        message: "The date was read two different ways from this receipt. Worth a look."
                     )
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
                 }
             }
             .listRowBackground(suggestionBackground(for: .date))
@@ -183,14 +249,22 @@ struct ConfirmReceiptView: View {
             })
             .onChange(of: model.purchasedDate) { _, _ in
                 model.markTouched(.date)
+                model.recordDateEdited()
             }
 
-            SuggestedFieldRow(
+            // Vendor is both a suggestion row and a reusable-value row
+            // (2026-08-28): it carried the amber treatment before it ever
+            // had a menu, and the composed ReusableValueFieldRow keeps
+            // both rather than choosing one at the other's expense.
+            ReusableValueFieldRow(
                 label: "Vendor",
                 text: $model.vendorText,
                 field: .vendor,
                 focus: $focusedField,
-                isUnreviewed: model.isUnreviewed(.vendor)
+                pastValues: options.options.vendors,
+                placeholder: "Not found",
+                isUnreviewed: model.isUnreviewed(.vendor),
+                onReuse: { eventLogger.log(.optionReused, field: .vendor, receiptId: model.receiptId) }
             )
             SuggestedFieldRow(
                 label: "HST",
@@ -198,7 +272,15 @@ struct ConfirmReceiptView: View {
                 field: .hst,
                 focus: $focusedField,
                 isUnreviewed: model.isUnreviewed(.hst),
-                moneyInput: model.hstInput
+                moneyInput: model.hstInput,
+                // The two parsers produced different HST amounts off the
+                // same text (§7.3, 2026-08-28) - free signal on the input
+                // tax credit, the one amount with a direct tax
+                // consequence. Exactly the date note's treatment, reused
+                // rather than duplicated (DisagreementNote above).
+                disagreementNote: model.showsHstDisagreementNote
+                    ? "The HST was read two different ways from this receipt. Worth a look."
+                    : nil
             )
             SuggestedFieldRow(
                 label: "Subtotal",
@@ -207,6 +289,28 @@ struct ConfirmReceiptView: View {
                 focus: $focusedField,
                 isUnreviewed: model.isUnreviewed(.subtotal),
                 moneyInput: model.subtotalInput
+            )
+            SuggestedFieldRow(
+                label: "Tip",
+                text: $model.tipText,
+                field: .tip,
+                focus: $focusedField,
+                isUnreviewed: model.isUnreviewed(.tip),
+                moneyInput: model.tipInput
+            )
+            // Other fees carries no suggestion (§6), so it never starts
+            // amber - `isUnreviewed` is hard false here because there is
+            // no SuggestedField.otherFees to ask; the amber mechanism
+            // itself reads the absence of a suggestion (EditableField
+            // .otherFees.suggestion is nil), this call site just has
+            // nothing to look up.
+            SuggestedFieldRow(
+                label: "Other fees",
+                text: $model.otherFeesText,
+                field: .otherFees,
+                focus: $focusedField,
+                isUnreviewed: false,
+                moneyInput: model.otherFeesInput
             )
         }
     }
@@ -224,14 +328,16 @@ struct ConfirmReceiptView: View {
                 text: $model.categoryText,
                 field: .category,
                 focus: $focusedField,
-                pastValues: options.options.categories
+                pastValues: options.options.categories,
+                onReuse: { eventLogger.log(.optionReused, field: .category, receiptId: model.receiptId) }
             )
             ReusableValueFieldRow(
                 label: "Payment",
                 text: $model.paymentMethodText,
                 field: .paymentMethod,
                 focus: $focusedField,
-                pastValues: options.options.paymentMethods
+                pastValues: options.options.paymentMethods,
+                onReuse: { eventLogger.log(.optionReused, field: .paymentMethod, receiptId: model.receiptId) }
             )
             TextField("Notes", text: $model.notesText, axis: .vertical)
                 .lineLimit(2...5)
@@ -247,6 +353,7 @@ struct ConfirmReceiptView: View {
             Button {
                 Task {
                     if await model.save() {
+                        logSave()
                         await onSaved()
                     }
                 }

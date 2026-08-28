@@ -36,6 +36,21 @@ struct MergedDateSuggestion: Decodable, Hashable {
     let disagreement: Bool
 }
 
+/// HST's merge entry (2026-08-28): the same amount rule as every other
+/// money field - the heuristic's value, or a stated absence, never the
+/// LLM's (§7.3, no fallthrough) - with the date entry's disagreement flag
+/// layered on top. HST is the input tax credit, the one amount with a
+/// direct tax consequence, and it is exactly the field a split-HST receipt
+/// corrupts: a heuristic that reads one half of a printed 5%+8% split
+/// produces a wrong-but-entirely-plausible number that the arithmetic
+/// check cannot catch when the subtotal is also missing. `disagreement` is
+/// free signal from two independent parsers reading the same text, same
+/// reasoning as the date flag; it never changes which value is served.
+struct MergedAmountSuggestion: Decodable, Hashable {
+    let value: Int?
+    let disagreement: Bool
+}
+
 /// The two parse records merged under §7.3's field-level rule, computed by
 /// the server's domain layer. This client renders it and decides nothing
 /// (spec §4.1) - which fields prefill, which start amber, and the date
@@ -50,8 +65,20 @@ struct MergedSuggestions: Decodable, Hashable {
     let vendor: MergedSuggestion<String>
     let purchasedAt: MergedDateSuggestion
     let totalCents: MergedSuggestion<Int>
-    let hstCents: MergedSuggestion<Int>
+    /// Heuristic-only value, plus the disagreement flag (2026-08-28) - see
+    /// MergedAmountSuggestion.
+    let hstCents: MergedAmountSuggestion
     let subtotalCents: MergedSuggestion<Int>
+    /// Heuristic-only, same as the other amounts: no LLM fallthrough
+    /// (§7.3's amended rule extends to this field, 2026-08-28).
+    let tipCents: MergedSuggestion<Int>
+
+    /// Deliberately no `otherFeesCents` here (2026-08-28 product
+    /// feedback): "other fees" is a residual with no consistent printed
+    /// label - delivery, service charges, deposits, a foreign receipt's
+    /// non-HST tax - so no heuristic can match it and no accuracy
+    /// measurement could score a guess against it. It is a human-entered
+    /// field with no suggestion to be amber about.
 }
 
 /// One receipt as the list and detail routes project it.
@@ -65,6 +92,15 @@ struct Receipt: Decodable, Equatable, Hashable, Identifiable {
     let vendor: String?
     let subtotalCents: Int?
     let hstCents: Int?
+    /// Gratuity (2026-08-28 product feedback: tips are common enough on
+    /// real receipts that folding them into "arithmetic doesn't
+    /// reconcile" was the wrong call - they get their own field).
+    let tipCents: Int?
+    /// Every non-HST charge that is neither subtotal nor tip: delivery,
+    /// service charges, deposits, environmental levies, a foreign
+    /// receipt's non-HST tax. Human-entered only - no heuristic or LLM
+    /// suggests it (see MergedSuggestions).
+    let otherFeesCents: Int?
     /// Nullable since wave 4: a batch-scanned pending receipt whose total
     /// the parser could not read stores the absence. A confirmed receipt
     /// always has one (server check constraint).
@@ -95,20 +131,24 @@ struct ReceiptListPage: Decodable, Equatable {
 
 /// GET /api/receipts/options - the free-text values this user has already
 /// used, most recently used first, so the confirm form can offer them
-/// back. Both fields stay free text (engineering rule: no enum, no
+/// back. All three fields stay free text (engineering rule: no enum, no
 /// taxonomy); these are suggestions drawn from the person's own data, not
-/// a vocabulary they must pick from.
+/// a vocabulary they must pick from. `vendors` joined the other two
+/// 2026-08-28, on the same product feedback that added tip and other
+/// fees - vendor names repeat for a small business the same way categories
+/// and payment methods do.
 ///
 /// Codable, not just Decodable: the last fetch is cached on disk so an
 /// offline capture-time confirm still has something to offer.
 struct ReceiptOptions: Codable, Equatable {
     let categories: [String]
     let paymentMethods: [String]
+    let vendors: [String]
 
-    static let none = ReceiptOptions(categories: [], paymentMethods: [])
+    static let none = ReceiptOptions(categories: [], paymentMethods: [], vendors: [])
 
     var isEmpty: Bool {
-        categories.isEmpty && paymentMethods.isEmpty
+        categories.isEmpty && paymentMethods.isEmpty && vendors.isEmpty
     }
 }
 

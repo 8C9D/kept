@@ -10,6 +10,8 @@ enum Fixtures {
         vendor: String? = "Synthetic Vendor",
         subtotalCents: Int? = nil,
         hstCents: Int? = nil,
+        tipCents: Int? = nil,
+        otherFeesCents: Int? = nil,
         totalCents: Int? = 2925,
         currency: String = "CAD",
         category: String? = nil,
@@ -25,6 +27,8 @@ enum Fixtures {
             vendor: vendor,
             subtotalCents: subtotalCents,
             hstCents: hstCents,
+            tipCents: tipCents,
+            otherFeesCents: otherFeesCents,
             totalCents: totalCents,
             currency: currency,
             category: category,
@@ -56,14 +60,17 @@ enum Fixtures {
         dateDisagreement: Bool = false,
         totalCents: Int? = nil,
         hstCents: Int? = nil,
-        subtotalCents: Int? = nil
+        hstDisagreement: Bool = false,
+        subtotalCents: Int? = nil,
+        tipCents: Int? = nil
     ) -> MergedSuggestions {
         MergedSuggestions(
             vendor: MergedSuggestion(value: vendor),
             purchasedAt: MergedDateSuggestion(value: purchasedAt, disagreement: dateDisagreement),
             totalCents: MergedSuggestion(value: totalCents),
-            hstCents: MergedSuggestion(value: hstCents),
-            subtotalCents: MergedSuggestion(value: subtotalCents)
+            hstCents: MergedAmountSuggestion(value: hstCents, disagreement: hstDisagreement),
+            subtotalCents: MergedSuggestion(value: subtotalCents),
+            tipCents: MergedSuggestion(value: tipCents)
         )
     }
 
@@ -73,6 +80,26 @@ enum Fixtures {
         pendingCount: Int = 0
     ) -> ReceiptListPage {
         ReceiptListPage(receipts: receipts, nextCursor: nextCursor, pendingCount: pendingCount)
+    }
+
+    static func exportJob(
+        id: UUID = UUID(),
+        status: ExportJobStatus = .queued,
+        periodStart: String = "2026-01-01",
+        periodEnd: String = "2026-12-31",
+        error: String? = nil,
+        downloadUrl: URL? = nil
+    ) -> ExportJob {
+        ExportJob(
+            id: id,
+            status: status,
+            periodStart: periodStart,
+            periodEnd: periodEnd,
+            error: error,
+            createdAt: Date(timeIntervalSince1970: 1_774_000_000),
+            completedAt: status == .complete ? Date(timeIntervalSince1970: 1_774_000_100) : nil,
+            downloadUrl: downloadUrl
+        )
     }
 
     static func signInResponse(token: String = "session-jwt") -> SignInResponse {

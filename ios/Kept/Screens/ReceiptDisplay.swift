@@ -37,4 +37,12 @@ extension Receipt {
     var displaySubtotalCents: Int? {
         displayedSuggestions?.subtotalCents.value ?? subtotalCents
     }
+
+    var displayTipCents: Int? {
+        displayedSuggestions?.tipCents.value ?? tipCents
+    }
+
+    // No displayOtherFeesCents: other fees carries no suggestion (§6), so
+    // there is nothing for a merge to outrank - every read-only rendering
+    // reads `otherFeesCents` directly, the same as category or notes.
 }

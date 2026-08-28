@@ -21,6 +21,7 @@ struct CaptureFlowView: View {
     /// cached; this screen never asks for a fresh one (it is the offline
     /// path by design).
     @ObservedObject private var options: ReceiptOptionsStore
+    private let eventLogger: EventLogger
     @State private var stage: Stage = .scanning
 
     /// Called on the way out; true when anything might have changed and
@@ -30,6 +31,7 @@ struct CaptureFlowView: View {
     init(
         outbox: OutboxController,
         options: ReceiptOptionsStore,
+        eventLogger: EventLogger,
         onFinished: @escaping (_ didChangeAnything: Bool) -> Void
     ) {
         _captureModel = StateObject(wrappedValue: CaptureFlowModel(
@@ -37,6 +39,7 @@ struct CaptureFlowView: View {
             recognizer: VisionReceiptTextRecognizer()
         ))
         self.options = options
+        self.eventLogger = eventLogger
         self.onFinished = onFinished
     }
 
@@ -46,18 +49,27 @@ struct CaptureFlowView: View {
             DocumentScannerView { outcome in
                 switch outcome {
                 case .cancelled:
+                    eventLogger.log(.captureCancelled)
                     onFinished(false)
                 case .failed:
                     // The scanner failing before any page exists leaves
                     // nothing to save or retry; leaving quietly and letting
                     // the person re-tap Capture beats a dead-end alert.
+                    // Not `.captureCancelled` - the person did not choose
+                    // this - but the vocabulary has no third outcome for
+                    // "the scanner itself errored", and losing that
+                    // distinction in telemetry is the accepted trade.
                     onFinished(false)
                 case .scanned(let pages):
+                    eventLogger.log(.captureCompleted, count: pages.count)
                     stage = .handlingPages
                     Task { await captureModel.savePages(pages) }
                 }
             }
             .ignoresSafeArea()
+            .onAppear {
+                eventLogger.log(.captureStarted)
+            }
 
         case .handlingPages:
             pagesBody
@@ -83,6 +95,7 @@ struct CaptureFlowView: View {
                 ConfirmReceiptView(
                     model: confirmModel,
                     options: options,
+                    eventLogger: eventLogger,
                     onSaved: {
                         // The saveAction already queued the confirmed
                         // receipt durably; straight back to Home, no

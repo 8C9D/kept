@@ -126,6 +126,36 @@
 				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
 			</array>
 		</dict>
+
+		<!--
+			Behavioural telemetry (2026-08-28, POST /api/events): which
+			screen actions happened and how many times - a field was
+			edited three times before save, a suggestion was accepted or
+			overridden - never a field's value. This is Apple's "Product
+			Interaction" under Usage Data, not Other Usage Data, because
+			every event names a specific in-app action. Linked because the
+			server derives the user from the session token and stores
+			every row against that account, the same as everything else in
+			this file - there is no anonymous or aggregated path. Declared
+			for Analytics, not App Functionality: the app works identically
+			whether or not a batch of events ever reaches the server (the
+			queue is fire-and-forget and drops events rather than block or
+			retry), so this data informs product decisions, not the app's
+			own behaviour. Not tracking - it is never linked to data from
+			another company's app or site, and never leaves the Kept API.
+		-->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeProductInteraction</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+			</array>
+		</dict>
 	</array>
 
 	<key>NSPrivacyAccessedAPITypes</key>

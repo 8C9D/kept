@@ -88,6 +88,8 @@ final class FileOutboxStoreTests: XCTestCase {
                 subtotalCents: 10000,
                 hstCents: 1300,
                 totalCents: 11300,
+                tipCents: 1500,
+                otherFeesCents: nil,
                 category: "supplies",
                 paymentMethod: nil,
                 notes: nil
@@ -177,12 +179,21 @@ final class FileOutboxStoreTests: XCTestCase {
         XCTAssertEqual(confirmation.category, "supplies")
         XCTAssertNil(confirmation.paymentMethod)
         XCTAssertNil(confirmation.notes)
+        // The other direction (2026-08-28): tipCents and otherFeesCents
+        // did not exist when this item was written, so neither key is in
+        // the JSON above. Both are Optional, and the synthesized decoder
+        // treats an Optional property's missing key as nil - the same
+        // guarantee that let the retired keys' removal stay decode-safe,
+        // now proven for an added field too.
+        XCTAssertNil(confirmation.tipCents)
+        XCTAssertNil(confirmation.otherFeesCents)
         guard case .uploaded(let parsed, let objectKey) = item.progress else {
             return XCTFail("Expected .uploaded, got \(item.progress)")
         }
         XCTAssertEqual(objectKey, "user/2026/08/x.jpg")
         XCTAssertEqual(parsed.suggestions.totalCents, 11300)
         XCTAssertEqual(parsed.suggestions.vendor, "MAPLE")
+        XCTAssertNil(parsed.suggestions.tipCents)
     }
 
     func testLoadAllOrdersBySequenceNotDirectoryOrder() async throws {

@@ -18,7 +18,12 @@ final class SessionControllerTests: XCTestCase {
     }
 
     private func makeController() -> SessionController {
-        SessionController(api: api, tokenStore: tokenStore, reauthorization: reauthorization)
+        SessionController(
+            api: api,
+            tokenStore: tokenStore,
+            reauthorization: reauthorization,
+            eventLogger: EventLogger(api: api)
+        )
     }
 
     // MARK: - Cold launch

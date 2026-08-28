@@ -77,12 +77,21 @@ struct ParsedReceipt: Codable, Equatable, Sendable {
 /// and `isBusiness` keys, and JSONDecoder ignores keys no property
 /// declares - so a receipt captured before this build still uploads after
 /// the update instead of being stranded on the phone.
+///
+/// The reverse also holds for `tipCents` and `otherFeesCents` (2026-08-28):
+/// both are Optional, and the synthesized decoder treats a missing key on
+/// an Optional property as nil - so an item a pre-tip build already wrote
+/// to disk decodes cleanly with both fields absent, not corrupted or
+/// dropped, and drains through the outbox exactly as it would have before
+/// this field existed.
 struct ConfirmedReceiptFields: Codable, Equatable, Sendable {
     let purchasedAt: String
     let vendor: String?
     let subtotalCents: Int?
     let hstCents: Int?
     let totalCents: Int
+    let tipCents: Int?
+    let otherFeesCents: Int?
     let category: String?
     let paymentMethod: String?
     let notes: String?

@@ -129,6 +129,18 @@ final class ShippedConfigurationTests: XCTestCase {
         XCTAssertTrue(declared.contains("NSPrivacyCollectedDataTypePhotosorVideos"))
         XCTAssertTrue(declared.contains("NSPrivacyCollectedDataTypeOtherUserContent"))
         XCTAssertTrue(declared.contains("NSPrivacyCollectedDataTypeUserID"))
+        // The behavioural-telemetry entry (2026-08-28, POST /api/events):
+        // Product Interaction under Usage Data, declared for Analytics -
+        // see PrivacyInfo.xcprivacy's own comment for why not App
+        // Functionality.
+        XCTAssertTrue(declared.contains("NSPrivacyCollectedDataTypeProductInteraction"))
+        let productInteraction = try XCTUnwrap(
+            collected.first { $0["NSPrivacyCollectedDataType"] as? String == "NSPrivacyCollectedDataTypeProductInteraction" }
+        )
+        XCTAssertEqual(
+            productInteraction["NSPrivacyCollectedDataTypePurposes"] as? [String],
+            ["NSPrivacyCollectedDataTypePurposeAnalytics"]
+        )
     }
 
     func testEveryDeclaredDataTypeIsLinkedToIdentityAndNotUsedForTracking() throws {

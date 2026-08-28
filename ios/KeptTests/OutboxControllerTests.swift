@@ -147,6 +147,8 @@ final class OutboxControllerTests: XCTestCase {
             subtotalCents: 10000,
             hstCents: 1300,
             totalCents: 11300,
+            tipCents: 1500,
+            otherFeesCents: 250,
             category: "groceries",
             paymentMethod: "visa",
             notes: nil
@@ -165,6 +167,8 @@ final class OutboxControllerTests: XCTestCase {
         XCTAssertEqual(request.category, "groceries")
         XCTAssertEqual(request.paymentMethod, "visa")
         XCTAssertEqual(request.totalCents, 11300)
+        XCTAssertEqual(request.tipCents, 1500)
+        XCTAssertEqual(request.otherFeesCents, 250)
         XCTAssertEqual(request.ocrSuggestions.purchasedAt, "2026-01-14") // the parser's, untouched
         XCTAssertEqual(request.ocrRawText, Self.parsedFixture.ocrRawText)
         XCTAssertTrue(store.items.isEmpty)
@@ -213,6 +217,31 @@ final class OutboxControllerTests: XCTestCase {
         XCTAssertEqual(request.ocrRawText, "MAPLE FOODS MARKET\n2026/01/14\nTOTAL 113.00")
         XCTAssertEqual(request.ocrSuggestions.totalCents, 11300)
         XCTAssertEqual(request.capturedAt, ReceiptFormat.timestamp(of: Self.captureInstant))
+    }
+
+    /// The pending path's tip guess end to end: real OCR lines through the
+    /// real ReceiptParser, riding into the create request the same way
+    /// subtotal, HST and total already do (2026-08-28) - not a stubbed
+    /// ReceiptSuggestions value, so this catches a wiring regression the
+    /// other tests, which script the parse result directly, cannot.
+    func testPendingCreateCarriesTheParsedTipGuess() async throws {
+        let textWithTip = RecognizedText(lines: [
+            RecognizedLine(text: "MAPLE FOODS MARKET", verticalCenter: 0.05, height: 0.04),
+            RecognizedLine(text: "2026/01/14", verticalCenter: 0.14, height: 0.015),
+            RecognizedLine(text: "Tip 15.00", verticalCenter: 0.70, height: 0.015),
+            RecognizedLine(text: "TOTAL 128.00", verticalCenter: 0.80, height: 0.02),
+        ])
+        let controller = await makeController(
+            recognizer: StubTextRecognizer(repeating: textWithTip, count: 10)
+        )
+        try await controller.enqueue(imageData: Data("page one bytes".utf8))
+        await settle(controller)
+
+        let request = try XCTUnwrap(api.createReceiptCalls.first)
+        XCTAssertEqual(request.tipCents, 1500)
+        XCTAssertEqual(request.ocrSuggestions.tipCents, 1500)
+        // No heuristic produces other fees; the pending path never sends one.
+        XCTAssertNil(request.otherFeesCents)
     }
 
     func testEnqueueDuringDrainIsPickedUpByTheSamePass() async throws {

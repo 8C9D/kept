@@ -80,6 +80,13 @@ final class APIClient: Sendable {
         _ = try await send(method: "DELETE", path: path, query: [], body: bodyData, requiresSession: true)
     }
 
+    /// DELETE with no body and no response body - `/api/receipts/:id`
+    /// (spec §10B) needs neither, unlike `/api/me`'s optional Apple
+    /// reauthorization code.
+    func delete(_ path: String) async throws {
+        _ = try await send(method: "DELETE", path: path, query: [], body: nil, requiresSession: true)
+    }
+
     /// The one non-API request in the app: uploading image bytes to the
     /// presigned URL the server issued. The URL is absolute (it points at
     /// object storage, not the API), authorization is in its signature -

@@ -1,8 +1,9 @@
 import XCTest
 @testable import Kept
 
-/// The reusable category and payment values (2026-08-26): what fills the
-/// confirm form's two pickers and Home's category filter.
+/// The reusable category, payment and vendor values (2026-08-26; vendors
+/// joined 2026-08-28): what fills the confirm form's pickers and Home's
+/// category filter.
 ///
 /// The three properties that matter are all failure-shaped: it must never
 /// block a screen, never swallow a failed fetch, and never carry one
@@ -33,11 +34,11 @@ final class ReceiptOptionsStoreTests: XCTestCase {
 
     func testAFreshStoreOffersNothingUntilAFetchLands() async {
         api.receiptOptionsHandler = {
-            ReceiptOptions(categories: ["meals", "supplies"], paymentMethods: ["Visa"])
+            ReceiptOptions(categories: ["meals", "supplies"], paymentMethods: ["Visa"], vendors: ["Maple Foods"])
         }
         let store = makeStore()
         // Nothing cached, nothing fetched: the pickers are simply absent
-        // and both fields are plain free text.
+        // and every field is plain free text.
         XCTAssertTrue(store.options.isEmpty)
         XCTAssertNil(store.lastFailure)
 
@@ -45,6 +46,7 @@ final class ReceiptOptionsStoreTests: XCTestCase {
 
         XCTAssertEqual(store.options.categories, ["meals", "supplies"])
         XCTAssertEqual(store.options.paymentMethods, ["Visa"])
+        XCTAssertEqual(store.options.vendors, ["Maple Foods"])
         XCTAssertNil(store.lastFailure)
     }
 
@@ -52,7 +54,11 @@ final class ReceiptOptionsStoreTests: XCTestCase {
     /// what it offers is whatever the last successful fetch left behind.
     func testTheLastFetchIsCachedForAStoreBuiltLater() async {
         api.receiptOptionsHandler = {
-            ReceiptOptions(categories: ["Office  supplies"], paymentMethods: ["Amex"])
+            ReceiptOptions(
+                categories: ["Office  supplies"],
+                paymentMethods: ["Amex"],
+                vendors: ["Food Basics"]
+            )
         }
         await makeStore().refresh()
 
@@ -66,6 +72,7 @@ final class ReceiptOptionsStoreTests: XCTestCase {
         // they never typed.
         XCTAssertEqual(relaunched.options.categories, ["Office  supplies"])
         XCTAssertEqual(relaunched.options.paymentMethods, ["Amex"])
+        XCTAssertEqual(relaunched.options.vendors, ["Food Basics"])
         XCTAssertEqual(api.receiptOptionsCalls, 1, "reading the cache must not touch the network")
     }
 
@@ -77,7 +84,7 @@ final class ReceiptOptionsStoreTests: XCTestCase {
             var errorDescription: String? { "the network went away" }
         }
         api.receiptOptionsHandler = {
-            ReceiptOptions(categories: ["meals"], paymentMethods: [])
+            ReceiptOptions(categories: ["meals"], paymentMethods: [], vendors: ["Corner Cafe"])
         }
         let store = makeStore()
         await store.refresh()
@@ -86,6 +93,7 @@ final class ReceiptOptionsStoreTests: XCTestCase {
         await store.refresh()
 
         XCTAssertEqual(store.options.categories, ["meals"], "stale suggestions beat none")
+        XCTAssertEqual(store.options.vendors, ["Corner Cafe"], "stale suggestions beat none")
         XCTAssertEqual(store.lastFailure, "the network went away")
     }
 
@@ -98,7 +106,9 @@ final class ReceiptOptionsStoreTests: XCTestCase {
         await store.refresh()
         XCTAssertNotNil(store.lastFailure)
 
-        api.receiptOptionsHandler = { ReceiptOptions(categories: ["meals"], paymentMethods: []) }
+        api.receiptOptionsHandler = {
+            ReceiptOptions(categories: ["meals"], paymentMethods: [], vendors: [])
+        }
         await store.refresh()
 
         XCTAssertNil(store.lastFailure)
@@ -107,10 +117,15 @@ final class ReceiptOptionsStoreTests: XCTestCase {
 
     /// Constraint 4, on the one piece of another person's data this type
     /// holds. Sign out on a shared phone and the next account must not be
-    /// offered the last one's category names - from memory or from disk.
+    /// offered the last one's category or vendor names - from memory or
+    /// from disk.
     func testSigningOutLeavesNothingBehindForTheNextAccount() async {
         api.receiptOptionsHandler = {
-            ReceiptOptions(categories: ["business supplies"], paymentMethods: ["Visa"])
+            ReceiptOptions(
+                categories: ["business supplies"],
+                paymentMethods: ["Visa"],
+                vendors: ["Shoppers Drug Mart"]
+            )
         }
         let store = makeStore()
         await store.refresh()

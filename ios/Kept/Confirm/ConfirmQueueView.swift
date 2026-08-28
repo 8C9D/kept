@@ -7,6 +7,7 @@ import SwiftUI
 struct ConfirmQueueView: View {
     @ObservedObject var queue: ConfirmQueueModel
     @ObservedObject var options: ReceiptOptionsStore
+    let eventLogger: EventLogger
     let onFinished: () -> Void
 
     var body: some View {
@@ -35,6 +36,7 @@ struct ConfirmQueueView: View {
                 ConfirmReceiptView(
                     model: model,
                     options: options,
+                    eventLogger: eventLogger,
                     onSaved: { await queue.advanceAfterSave() },
                     onSetAside: { await queue.setAsideCurrent() }
                 )
@@ -85,17 +87,24 @@ struct ConfirmQueueView: View {
 struct ConfirmQueueCover: View {
     @StateObject private var queue: ConfirmQueueModel
     @ObservedObject private var options: ReceiptOptionsStore
+    private let eventLogger: EventLogger
     private let onFinished: () -> Void
 
-    init(api: APIClient, options: ReceiptOptionsStore, onFinished: @escaping () -> Void) {
+    init(
+        api: APIClient,
+        options: ReceiptOptionsStore,
+        eventLogger: EventLogger,
+        onFinished: @escaping () -> Void
+    ) {
         _queue = StateObject(wrappedValue: ConfirmQueueModel(api: api))
         self.options = options
+        self.eventLogger = eventLogger
         self.onFinished = onFinished
     }
 
     var body: some View {
         NavigationStack {
-            ConfirmQueueView(queue: queue, options: options, onFinished: onFinished)
+            ConfirmQueueView(queue: queue, options: options, eventLogger: eventLogger, onFinished: onFinished)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button("Close") { onFinished() }

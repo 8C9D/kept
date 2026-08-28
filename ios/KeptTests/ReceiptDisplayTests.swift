@@ -17,6 +17,7 @@ final class ReceiptDisplayTests: XCTestCase {
             vendor: "Basics",
             subtotalCents: 1000,
             hstCents: 111,
+            tipCents: 90,
             totalCents: 1111,
             status: .pending,
             suggestions: Fixtures.merged(
@@ -24,7 +25,8 @@ final class ReceiptDisplayTests: XCTestCase {
                 purchasedAt: "2026-07-26",
                 totalCents: 1131,
                 hstCents: 131,
-                subtotalCents: 1020
+                subtotalCents: 1020,
+                tipCents: 150
             )
         )
         XCTAssertEqual(receipt.displayVendor, "Food Basics")
@@ -32,6 +34,7 @@ final class ReceiptDisplayTests: XCTestCase {
         XCTAssertEqual(receipt.displayTotalCents, 1131)
         XCTAssertEqual(receipt.displayHstCents, 131)
         XCTAssertEqual(receipt.displaySubtotalCents, 1020)
+        XCTAssertEqual(receipt.displayTipCents, 150)
     }
 
     func testRowFillsFieldsNoSuggestionCovers() {
@@ -63,6 +66,7 @@ final class ReceiptDisplayTests: XCTestCase {
             vendor: "Maple Foods",
             subtotalCents: 10000,
             hstCents: 1300,
+            tipCents: 1500,
             totalCents: 11300,
             status: .confirmed,
             suggestions: Fixtures.merged(
@@ -70,7 +74,8 @@ final class ReceiptDisplayTests: XCTestCase {
                 purchasedAt: "2026-03-22",
                 totalCents: 99999,
                 hstCents: 9999,
-                subtotalCents: 90000
+                subtotalCents: 90000,
+                tipCents: 9000
             )
         )
         XCTAssertEqual(receipt.displayVendor, "Maple Foods")
@@ -78,6 +83,7 @@ final class ReceiptDisplayTests: XCTestCase {
         XCTAssertEqual(receipt.displayTotalCents, 11300)
         XCTAssertEqual(receipt.displayHstCents, 1300)
         XCTAssertEqual(receipt.displaySubtotalCents, 10000)
+        XCTAssertEqual(receipt.displayTipCents, 1500)
     }
 
     func testPendingWithNoSuggestionSetRendersTheRow() {
@@ -108,5 +114,6 @@ final class ReceiptDisplayTests: XCTestCase {
         XCTAssertNil(receipt.displayTotalCents)
         XCTAssertNil(receipt.displayHstCents)
         XCTAssertNil(receipt.displaySubtotalCents)
+        XCTAssertNil(receipt.displayTipCents)
     }
 }

@@ -21,7 +21,16 @@ final class StubKeptAPI: KeptAPI {
     var uploadImageHandler: ((_ target: UploadTarget, _ data: Data, _ contentType: ImageUploadContentType) async throws -> Void)?
     var createReceiptHandler: ((_ request: CreateReceiptRequest) async throws -> Receipt)?
     var confirmReceiptHandler: ((_ id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt)?
+    var deleteReceiptHandler: ((_ id: UUID) async throws -> Void)?
     var deleteAccountHandler: ((_ appleAuthorizationCode: String?) async throws -> Void)?
+    var startExportHandler: ((_ request: ExportRequest) async throws -> ExportJob)?
+    var exportJobsHandler: (() async throws -> [ExportJob])?
+    var exportJobHandler: ((_ id: UUID) async throws -> ExportJob)?
+    /// Defaults to succeeding trivially - most tests exercising something
+    /// else entirely still route through EventLogger incidentally (a
+    /// confirm save, say) and should not have to stub telemetry to avoid
+    /// an UnstubbedCall failure they never meant to test.
+    var postEventsHandler: ((_ request: PostEventsRequest) async throws -> Void)? = { _ in }
 
     /// ReceiptListModel fetches its first page and the pending probe with
     /// `async let`, so two tasks call receiptsPage concurrently; the call
@@ -31,8 +40,12 @@ final class StubKeptAPI: KeptAPI {
     private var recordedReceiptsPageCalls: [(cursor: String?, query: ReceiptQuery, limit: Int?)] = []
     private var recordedCreateReceiptCalls: [CreateReceiptRequest] = []
     private var recordedConfirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] = []
+    private var recordedDeleteReceiptCalls: [UUID] = []
     private var recordedDeleteAccountCalls: [String?] = []
     private var recordedReceiptOptionsCalls = 0
+    private var recordedStartExportCalls: [ExportRequest] = []
+    private var recordedExportJobCalls: [UUID] = []
+    private var recordedPostEventsCalls: [PostEventsRequest] = []
 
     var receiptsPageCalls: [(cursor: String?, query: ReceiptQuery, limit: Int?)] {
         callLock.withLock { recordedReceiptsPageCalls }
@@ -55,6 +68,24 @@ final class StubKeptAPI: KeptAPI {
     /// distinct outcome worth asserting rather than an absent call.
     var deleteAccountCalls: [String?] {
         callLock.withLock { recordedDeleteAccountCalls }
+    }
+
+    var deleteReceiptCalls: [UUID] {
+        callLock.withLock { recordedDeleteReceiptCalls }
+    }
+
+    var startExportCalls: [ExportRequest] {
+        callLock.withLock { recordedStartExportCalls }
+    }
+
+    var exportJobCalls: [UUID] {
+        callLock.withLock { recordedExportJobCalls }
+    }
+
+    /// Every batch actually posted, in order - what the queue/logger
+    /// tests inspect to assert batching, capping and body content.
+    var postEventsCalls: [PostEventsRequest] {
+        callLock.withLock { recordedPostEventsCalls }
     }
 
     func signInWithApple(identityToken: String, displayName: String?) async throws -> SignInResponse {
@@ -101,9 +132,38 @@ final class StubKeptAPI: KeptAPI {
         return try await confirmReceiptHandler(id, request)
     }
 
+    func deleteReceipt(id: UUID) async throws {
+        callLock.withLock { recordedDeleteReceiptCalls.append(id) }
+        guard let deleteReceiptHandler else { throw UnstubbedCall(endpoint: "deleteReceipt") }
+        try await deleteReceiptHandler(id)
+    }
+
     func deleteAccount(appleAuthorizationCode: String?) async throws {
         callLock.withLock { recordedDeleteAccountCalls.append(appleAuthorizationCode) }
         guard let deleteAccountHandler else { throw UnstubbedCall(endpoint: "deleteAccount") }
         try await deleteAccountHandler(appleAuthorizationCode)
+    }
+
+    func startExport(_ request: ExportRequest) async throws -> ExportJob {
+        callLock.withLock { recordedStartExportCalls.append(request) }
+        guard let startExportHandler else { throw UnstubbedCall(endpoint: "startExport") }
+        return try await startExportHandler(request)
+    }
+
+    func exportJobs() async throws -> [ExportJob] {
+        guard let exportJobsHandler else { throw UnstubbedCall(endpoint: "exportJobs") }
+        return try await exportJobsHandler()
+    }
+
+    func exportJob(id: UUID) async throws -> ExportJob {
+        callLock.withLock { recordedExportJobCalls.append(id) }
+        guard let exportJobHandler else { throw UnstubbedCall(endpoint: "exportJob") }
+        return try await exportJobHandler(id)
+    }
+
+    func postEvents(_ request: PostEventsRequest) async throws {
+        callLock.withLock { recordedPostEventsCalls.append(request) }
+        guard let postEventsHandler else { throw UnstubbedCall(endpoint: "postEvents") }
+        try await postEventsHandler(request)
     }
 }

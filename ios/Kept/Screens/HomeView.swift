@@ -20,6 +20,9 @@ struct HomeView: View {
     #endif
     @State private var showCaptureFlow = false
     @State private var showConfirmQueue = false
+    /// Pushes the export screen (2026-08-28 - see Export/ExportView.swift
+    /// for why this exists at all).
+    @State private var showExport = false
     /// Whether the receipt-date range sheet is up. A sheet because a
     /// DatePicker cannot live inside the toolbar Menu that opens it.
     @State private var showDateRangeFilter = false
@@ -36,10 +39,12 @@ struct HomeView: View {
 
     /// Kept only to hand onward to the capture, confirm, and detail flows.
     private let api: APIClient
+    private let eventLogger: EventLogger
 
-    init(api: APIClient, options: ReceiptOptionsStore) {
-        _model = StateObject(wrappedValue: ReceiptListModel(api: api))
+    init(api: APIClient, options: ReceiptOptionsStore, eventLogger: EventLogger) {
+        _model = StateObject(wrappedValue: ReceiptListModel(api: api, eventLogger: eventLogger))
         self.api = api
+        self.eventLogger = eventLogger
         self.options = options
     }
 
@@ -76,6 +81,15 @@ struct HomeView: View {
                             showServerSettings = true
                         }
                         #endif
+                        // Least destructive first, same rule the two
+                        // buttons below already follow: this one changes
+                        // nothing, so it sits above Sign out and Delete
+                        // account rather than among them.
+                        Button {
+                            showExport = true
+                        } label: {
+                            Label("Export", systemImage: "square.and.arrow.up")
+                        }
                         Button("Sign out", role: .destructive) {
                             session.signOut()
                         }
@@ -94,7 +108,17 @@ struct HomeView: View {
                 }
             }
             .navigationDestination(for: Receipt.self) { receipt in
-                ReceiptDetailView(api: api, options: options, receipt: receipt)
+                ReceiptDetailView(api: api, options: options, eventLogger: eventLogger, receipt: receipt) {
+                    // Follows the same refresh path every other mutation
+                    // that can change the list already does (below, and
+                    // the confirm queue's own completion) - a full first-
+                    // page reload rather than surgically removing one row,
+                    // so a deleted receipt cannot linger as a stale row.
+                    await model.loadFirstPage()
+                }
+            }
+            .navigationDestination(isPresented: $showExport) {
+                ExportView(api: api, eventLogger: eventLogger)
             }
             .task {
                 await model.loadFirstPage()
@@ -139,7 +163,7 @@ struct HomeView: View {
             }
             #endif
             .fullScreenCover(isPresented: $showCaptureFlow) {
-                CaptureFlowView(outbox: outbox, options: options) { didChangeAnything in
+                CaptureFlowView(outbox: outbox, options: options, eventLogger: eventLogger) { didChangeAnything in
                     showCaptureFlow = false
                     if didChangeAnything {
                         Task { await model.loadFirstPage() }
@@ -184,7 +208,7 @@ struct HomeView: View {
                 Text("Its scanned image is deleted from this phone and it never reaches your receipts. This cannot be undone.")
             }
             .fullScreenCover(isPresented: $showConfirmQueue) {
-                ConfirmQueueCover(api: api, options: options) {
+                ConfirmQueueCover(api: api, options: options, eventLogger: eventLogger) {
                     showConfirmQueue = false
                     Task {
                         await model.loadFirstPage()

@@ -28,12 +28,16 @@ final class ConfirmReceiptModelTests: XCTestCase {
         vendor: String? = "Maple Foods",
         hstCents: Int? = 1300,
         subtotalCents: Int? = 10000,
+        tipCents: Int? = nil,
+        otherFeesCents: Int? = nil,
         suggestions: MergedSuggestions? = nil
     ) -> Receipt {
         Fixtures.receipt(
             vendor: vendor,
             subtotalCents: subtotalCents,
             hstCents: hstCents,
+            tipCents: tipCents,
+            otherFeesCents: otherFeesCents,
             totalCents: totalCents,
             status: .pending,
             suggestions: suggestions
@@ -42,13 +46,17 @@ final class ConfirmReceiptModelTests: XCTestCase {
 
     /// The served merge matching scannedReceipt(): everything on the
     /// receipt is a parser's work, date included.
-    private func matchingSuggestions(dateDisagreement: Bool = false) -> MergedSuggestions {
+    private func matchingSuggestions(
+        dateDisagreement: Bool = false,
+        hstDisagreement: Bool = false
+    ) -> MergedSuggestions {
         Fixtures.merged(
             vendor: "Maple Foods",
             purchasedAt: "2026-03-20",
             dateDisagreement: dateDisagreement,
             totalCents: 11300,
             hstCents: 1300,
+            hstDisagreement: hstDisagreement,
             subtotalCents: 10000
         )
     }
@@ -145,6 +153,50 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertFalse(model.isUnreviewed(.subtotal))
     }
 
+    // MARK: - Tip and other fees (2026-08-28)
+
+    func testTipStartsAmberLikeEveryOtherSuggestedField() {
+        // Tip gets the full suggestion treatment: amber until touched,
+        // exactly like HST and subtotal.
+        let model = model(receipt: scannedReceipt(
+            suggestions: Fixtures.merged(purchasedAt: "2026-03-20", totalCents: 11300, tipCents: 1500)
+        ))
+        XCTAssertEqual(model.tipText, "15.00")
+        XCTAssertTrue(model.isUnreviewed(.tip))
+
+        model.markTouched(.tip)
+        XCTAssertFalse(model.isUnreviewed(.tip))
+    }
+
+    func testNoTipSuggestionPrefillsEmptyForTheStatedAbsencePlaceholder() {
+        let model = model(receipt: scannedReceipt(
+            suggestions: Fixtures.merged(purchasedAt: "2026-03-20", totalCents: 11300)
+        ))
+        XCTAssertEqual(model.tipText, "")
+        XCTAssertFalse(model.isUnreviewed(.tip))
+    }
+
+    /// Other fees never carries a suggestion (§6: no heuristic or LLM can
+    /// match a residual amount with no consistent printed label), so it
+    /// must never start amber - even when the row itself already carries
+    /// a value, unlike every other money field, whose amber is driven by
+    /// suggestion presence rather than by the field being non-empty. The
+    /// header counter is the observable proof: a row value that could
+    /// have inflated it (the way a row-only vendor does NOT, per
+    /// testRowOnlyValueIsNotMarkedAsAMachineSuggestion) leaves the count
+    /// exactly where it was without it.
+    func testOtherFeesNeverStartsAmberEvenWithARowValuePresent() {
+        let withoutOtherFees = model(receipt: scannedReceipt(
+            suggestions: matchingSuggestions()
+        ))
+        let withOtherFees = model(receipt: scannedReceipt(
+            otherFeesCents: 500,
+            suggestions: matchingSuggestions()
+        ))
+        XCTAssertEqual(withOtherFees.otherFeesText, "5.00")
+        XCTAssertEqual(withOtherFees.unreviewedCount, withoutOtherFees.unreviewedCount)
+    }
+
     // MARK: - Date disagreement (§7.3)
 
     func testDateDisagreementNoteShowsAndClearsWithTheTint() {
@@ -172,6 +224,42 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertFalse(model.showsDateDisagreementNote)
     }
 
+    // MARK: - HST disagreement (§7.3, 2026-08-28)
+
+    func testHstDisagreementNoteShowsAndClearsWithTheTint() {
+        let model = model(receipt: scannedReceipt(
+            suggestions: matchingSuggestions(hstDisagreement: true)
+        ))
+        XCTAssertTrue(model.showsHstDisagreementNote)
+        XCTAssertTrue(model.isUnreviewed(.hst))
+
+        // Touching another field is not looking at HST.
+        model.markTouched(.vendor)
+        XCTAssertTrue(model.showsHstDisagreementNote)
+
+        // Touching HST clears the amber and the note together, exactly
+        // the date note's rule.
+        model.markTouched(.hst)
+        XCTAssertFalse(model.showsHstDisagreementNote)
+        XCTAssertFalse(model.isUnreviewed(.hst))
+    }
+
+    func testNoHstDisagreementMeansNoNote() {
+        let model = model(receipt: scannedReceipt(suggestions: matchingSuggestions()))
+        XCTAssertTrue(model.isUnreviewed(.hst)) // amber, a suggestion exists
+        XCTAssertFalse(model.showsHstDisagreementNote)
+    }
+
+    /// The disagreement flag never changes the served value - only the
+    /// note. The heuristic's 1300 is what prefills either way (§7.3's
+    /// no-fallthrough rule for amounts is unaffected by the new flag).
+    func testHstDisagreementDoesNotChangeThePrefilledValue() {
+        let model = model(receipt: scannedReceipt(
+            suggestions: matchingSuggestions(hstDisagreement: true)
+        ))
+        XCTAssertEqual(model.hstText, "13.00")
+    }
+
     func testCaptureTimeConfirmHasNoServerSuggestionsAndNoDisagreement() async {
         // The capture-time confirm is local-backed: no server row, so the
         // injected suggestion set is the on-device parse alone and a
@@ -192,6 +280,7 @@ final class ConfirmReceiptModelTests: XCTestCase {
 
         XCTAssertNil(model.receiptId)
         XCTAssertFalse(model.showsDateDisagreementNote)
+        XCTAssertFalse(model.showsHstDisagreementNote)
         XCTAssertTrue(model.isUnreviewed(.date))
         XCTAssertEqual(model.totalText, "45.20")
         XCTAssertFalse(model.isUnreviewed(.vendor)) // nothing suggested
@@ -220,6 +309,10 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertEqual(model.vendorText, "Maple Foods")
         XCTAssertEqual(model.hstText, "13.00")
         XCTAssertEqual(model.subtotalText, "100.00")
+        // No suggestion and no row value for either: both start blank,
+        // same as every other field with nothing behind it.
+        XCTAssertEqual(model.tipText, "")
+        XCTAssertEqual(model.otherFeesText, "")
         // The free-text fields the row never carried stay blank; nothing
         // on this form is pre-selected on the person's behalf.
         XCTAssertEqual(model.categoryText, "")
@@ -250,6 +343,49 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertFalse(model.showsArithmeticWarning) // 100 + nothing = 100
     }
 
+    /// The restaurant case that motivated this work (2026-08-28): a
+    /// tipped receipt whose subtotal + HST alone never reached the total
+    /// under the 2026-08-26 field reduction, which knowingly accepted the
+    /// warning as the cost of having nowhere to put a tip. With tip back
+    /// as its own field, the same receipt now reconciles.
+    func testRestaurantReceiptWithTipReconciles() {
+        // Pasta+wine 84.00, HST 10.92, tip 15.00 = 109.92 total.
+        let model = model(receipt: scannedReceipt(
+            totalCents: 10992, hstCents: 1092, subtotalCents: 8400, tipCents: 1500
+        ))
+        XCTAssertFalse(model.showsArithmeticWarning)
+
+        // Blank the tip and the same receipt is back to warning - proof
+        // the check is actually summing it, not just always passing.
+        model.tipText = ""
+        XCTAssertTrue(model.showsArithmeticWarning)
+    }
+
+    func testArithmeticCheckOverAllFourComponents() {
+        // 100 subtotal + 13 HST + 15 tip + 5 other fees = 133 total.
+        let model = model(receipt: scannedReceipt(
+            totalCents: 13300, hstCents: 1300, subtotalCents: 10000,
+            tipCents: 1500, otherFeesCents: 500
+        ))
+        XCTAssertFalse(model.showsArithmeticWarning)
+
+        model.otherFeesText = "6.00"
+        XCTAssertTrue(model.showsArithmeticWarning)
+    }
+
+    func testBlankTipAndOtherFeesBothCountAsZeroInTheCheck() {
+        let model = model(receipt: scannedReceipt(totalCents: 11300, hstCents: 1300, subtotalCents: 10000))
+        XCTAssertFalse(model.showsArithmeticWarning) // 100 + 13 + nothing + nothing = 113
+    }
+
+    func testInvalidTipOrOtherFeesSuppressesTheWarningRatherThanGuessing() {
+        // An invalid amount is its own stated problem (saveBlocker); the
+        // arithmetic check does not also warn about garbage it cannot sum.
+        let model = model(receipt: scannedReceipt(totalCents: 11300, hstCents: 1300, subtotalCents: 10000))
+        model.tipText = "abc"
+        XCTAssertFalse(model.showsArithmeticWarning)
+    }
+
     // MARK: - Save gating
 
     /// The gate is a valid total and nothing else (2026-08-26: the
@@ -278,12 +414,12 @@ final class ConfirmReceiptModelTests: XCTestCase {
 
     // MARK: - Keyboard fields (§10A.1's dismissal rule)
 
-    func testTheDecimalPadFieldsAreExactlyTheThreeMoneyFields() {
+    func testTheDecimalPadFieldsAreExactlyTheFiveMoneyFields() {
         let decimalPad = ConfirmReceiptModel.EditableField.allCases
             .filter(\.usesDecimalPad)
         XCTAssertEqual(
             Set(decimalPad),
-            [.total, .hst, .subtotal]
+            [.total, .hst, .subtotal, .tip, .otherFees]
         )
     }
 
@@ -303,7 +439,7 @@ final class ConfirmReceiptModelTests: XCTestCase {
     }
 
     /// The same question asked of the confirm screen's own fields, through
-    /// the keyboard each one raises: the three decimal pads plus notes, and
+    /// the keyboard each one raises: the five decimal pads plus notes, and
     /// nothing else. A field falling out of this set would ship a keyboard
     /// nothing inside it can close - the device defect this pins.
     ///
@@ -324,7 +460,7 @@ final class ConfirmReceiptModelTests: XCTestCase {
             .filter { keyboardRaised(by: $0).keyboardHasNoExitOfItsOwn }
         XCTAssertEqual(
             Set(needsDone),
-            [.total, .hst, .subtotal, .notes]
+            [.total, .hst, .subtotal, .tip, .otherFees, .notes]
         )
     }
 
@@ -335,6 +471,11 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertEqual(ConfirmReceiptModel.EditableField.vendor.suggestion, .vendor)
         XCTAssertEqual(ConfirmReceiptModel.EditableField.hst.suggestion, .hst)
         XCTAssertEqual(ConfirmReceiptModel.EditableField.subtotal.suggestion, .subtotal)
+        XCTAssertEqual(ConfirmReceiptModel.EditableField.tip.suggestion, .tip)
+        // Other fees is money-field-shaped like every field above it, but
+        // it carries no suggestion at all (§6) - focusing it clears
+        // nothing, the same as category, payment method and notes.
+        XCTAssertNil(ConfirmReceiptModel.EditableField.otherFees.suggestion)
         XCTAssertNil(ConfirmReceiptModel.EditableField.category.suggestion)
         XCTAssertNil(ConfirmReceiptModel.EditableField.paymentMethod.suggestion)
         XCTAssertNil(ConfirmReceiptModel.EditableField.notes.suggestion)
@@ -354,11 +495,134 @@ final class ConfirmReceiptModelTests: XCTestCase {
         )
     }
 
+    // MARK: - Field-edit counting (behavioural telemetry, 2026-08-28)
+
+    /// the owner's ask, verbatim: "a user editing the total amount repeatedly
+    /// signals the total-extraction path is unreliable." Three separate
+    /// focus-in/change/focus-out cycles on the total count as three edits;
+    /// a single cycle on vendor counts as one - never one event per
+    /// keystroke, which is what counting on `totalText`'s every mutation
+    /// would produce instead.
+    func testFieldEditCountingCountsPerFocusCycleNotPerKeystroke() {
+        let model = model(receipt: scannedReceipt(suggestions: matchingSuggestions()))
+
+        model.fieldDidGainFocus(.total)
+        model.totalText = "120.00"
+        model.fieldDidLoseFocus(.total)
+
+        model.fieldDidGainFocus(.total)
+        model.totalText = "125.00"
+        model.fieldDidLoseFocus(.total)
+
+        model.fieldDidGainFocus(.total)
+        model.totalText = "130.00"
+        model.fieldDidLoseFocus(.total)
+
+        model.fieldDidGainFocus(.vendor)
+        model.vendorText = "New Vendor"
+        model.fieldDidLoseFocus(.vendor)
+
+        XCTAssertEqual(model.fieldEditCounts[.total], 3)
+        XCTAssertEqual(model.fieldEditCounts[.vendor], 1)
+    }
+
+    /// Focusing a field without changing it is looking, not editing -
+    /// §10A.1's own distinction, reused here. A focus cycle with no
+    /// change must not inflate the count.
+    func testFocusingAFieldWithoutChangingItCountsNoEdit() {
+        let model = model(receipt: scannedReceipt(suggestions: matchingSuggestions()))
+
+        model.fieldDidGainFocus(.subtotal)
+        model.fieldDidLoseFocus(.subtotal)
+
+        XCTAssertNil(model.fieldEditCounts[.subtotal])
+    }
+
+    /// A field never explicitly given up focus (say, Save tapped while it
+    /// is still the first responder) counts nothing for that dangling
+    /// cycle - there is no matching `fieldDidLoseFocus` to compare
+    /// against, and the conservative default is silence rather than a
+    /// guess.
+    func testAFieldThatNeverLosesFocusCountsNothingForThatCycle() {
+        let model = model(receipt: scannedReceipt(suggestions: matchingSuggestions()))
+
+        model.fieldDidGainFocus(.total)
+        model.totalText = "999.00"
+
+        XCTAssertNil(model.fieldEditCounts[.total])
+    }
+
+    /// The date field raises no keyboard and so has no focus cycle;
+    /// `recordDateEdited()` counts each committed DatePicker change
+    /// directly - already as coarse as a text field's focus cycle.
+    func testDateEditCountingCountsEachChangeDirectly() {
+        let model = model(receipt: scannedReceipt(suggestions: matchingSuggestions()))
+
+        model.recordDateEdited()
+        model.recordDateEdited()
+
+        XCTAssertEqual(model.fieldEditCounts[.purchasedAt], 2)
+    }
+
+    // MARK: - Suggestion outcomes (behavioural telemetry, 2026-08-28)
+
+    /// A field left exactly as suggested is accepted; one typed over is
+    /// overridden - derived from the form's own prefill-vs-final-value
+    /// state, not from whether the person happened to focus the field.
+    func testSuggestionOutcomesDistinguishAcceptedFromOverridden() {
+        let model = model(receipt: scannedReceipt(suggestions: matchingSuggestions()))
+
+        // Vendor left exactly as suggested ("Maple Foods").
+        // HST typed over.
+        model.hstText = "14.00"
+
+        let outcomes = Dictionary(
+            uniqueKeysWithValues: model.suggestionOutcomes().map { ($0.field, $0.accepted) }
+        )
+        XCTAssertEqual(outcomes[.vendor], true)
+        XCTAssertEqual(outcomes[.hst], false)
+        // Every other suggested field (total, subtotal, the date) was
+        // also left alone.
+        XCTAssertEqual(outcomes[.total], true)
+        XCTAssertEqual(outcomes[.subtotal], true)
+        XCTAssertEqual(outcomes[.purchasedAt], true)
+        // otherFees and tip carried no suggestion this session
+        // (matchingSuggestions() leaves tip nil), so they report nothing.
+        XCTAssertNil(outcomes[.otherFees])
+        XCTAssertNil(outcomes[.tip])
+    }
+
+    /// Clearing a suggested field out entirely - not retyping it, just
+    /// deleting it - is still an override: the final value (absent)
+    /// differs from what was suggested.
+    func testClearingASuggestedFieldCountsAsOverridden() {
+        let model = model(receipt: scannedReceipt(suggestions: matchingSuggestions()))
+        model.subtotalText = ""
+
+        let outcomes = Dictionary(
+            uniqueKeysWithValues: model.suggestionOutcomes().map { ($0.field, $0.accepted) }
+        )
+        XCTAssertEqual(outcomes[.subtotal], false)
+    }
+
+    /// `.edit` reopens a person's own already-confirmed values - nothing
+    /// on that form was ever a suggestion, so there is nothing to accept
+    /// or override.
+    func testEditFormReportsNoSuggestionOutcomes() {
+        let receipt = scannedReceipt(suggestions: matchingSuggestions())
+        let model = ConfirmReceiptModel(
+            api: api,
+            detail: Fixtures.detail(receipt: receipt),
+            purpose: .edit
+        )
+        XCTAssertTrue(model.suggestionOutcomes().isEmpty)
+    }
+
     // MARK: - Saving
 
     func testSavePatchesEveryFieldAndConfirms() async {
         api.confirmReceiptHandler = { _, _ in Fixtures.receipt(status: .confirmed) }
-        let model = model(receipt: scannedReceipt())
+        let model = model(receipt: scannedReceipt(tipCents: 1500, otherFeesCents: 250))
         model.vendorText = "  Maple Foods Market  "
         model.categoryText = "Groceries"
         model.paymentMethodText = "Visa"
@@ -375,6 +639,8 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertEqual(call?.request.totalCents, 11300)
         XCTAssertEqual(call?.request.hstCents, 1300)
         XCTAssertEqual(call?.request.subtotalCents, 10000)
+        XCTAssertEqual(call?.request.tipCents, 1500)
+        XCTAssertEqual(call?.request.otherFeesCents, 250)
         XCTAssertEqual(call?.request.vendor, "Maple Foods Market") // trimmed
         XCTAssertEqual(call?.request.category, "Groceries")
         XCTAssertEqual(call?.request.paymentMethod, "Visa")
@@ -385,7 +651,10 @@ final class ConfirmReceiptModelTests: XCTestCase {
     /// absent from the PATCH body. Sending them would be tolerated by the
     /// transitional server shim and silently discarded, which is exactly
     /// the kind of "it works" that hides a client that never got updated.
-    func testThePatchBodyCarriesNoneOfTheRetiredKeys() async throws {
+    /// tipCents and otherFeesCents are the opposite case - present and
+    /// explicit-null-capable, never retired keys - asserted here too so a
+    /// regression can't quietly turn "new field" into "another dropped one".
+    func testThePatchBodyCarriesNoneOfTheRetiredKeysButBothNewOnes() async throws {
         api.confirmReceiptHandler = { _, _ in Fixtures.receipt(status: .confirmed) }
         let model = model(receipt: scannedReceipt())
         _ = await model.save()
@@ -398,6 +667,13 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertNil(body["vendorTaxNumber"])
         XCTAssertNil(body["otherTaxCents"])
         XCTAssertNil(body["isBusiness"])
+        // Present and explicit null (blank fields, this fixture), not
+        // absent: the confirm form always sends the whole form, so a
+        // blank tip or other-fees field means "clear it", not "leave it".
+        XCTAssertTrue(body.keys.contains("tipCents"))
+        XCTAssertTrue(body["tipCents"] is NSNull)
+        XCTAssertTrue(body.keys.contains("otherFeesCents"))
+        XCTAssertTrue(body["otherFeesCents"] is NSNull)
     }
 
     // MARK: - Editing a confirmed receipt (2026-08-26)
@@ -411,6 +687,8 @@ final class ConfirmReceiptModelTests: XCTestCase {
             vendor: "Maple Foods",
             subtotalCents: 10000,
             hstCents: 1300,
+            tipCents: 1500,
+            otherFeesCents: 250,
             totalCents: 11300,
             category: "Groceries",
             paymentMethod: "Visa",
@@ -421,7 +699,8 @@ final class ConfirmReceiptModelTests: XCTestCase {
             suggestions: Fixtures.merged(
                 vendor: "Maple Foods Market",
                 purchasedAt: "2026-03-22",
-                totalCents: 99999
+                totalCents: 99999,
+                tipCents: 999
             )
         )
         let model = ConfirmReceiptModel(
@@ -433,10 +712,16 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertEqual(model.unreviewedCount, 0)
         XCTAssertFalse(model.isUnreviewed(.date))
         XCTAssertFalse(model.isUnreviewed(.vendor))
+        XCTAssertFalse(model.isUnreviewed(.tip))
         XCTAssertFalse(model.dateIsCaptureDayFallback)
         XCTAssertFalse(model.showsDateDisagreementNote)
+        XCTAssertFalse(model.showsHstDisagreementNote)
         XCTAssertEqual(model.vendorText, "Maple Foods")
         XCTAssertEqual(model.totalText, "113.00")
+        // The person's own confirmed tip and other fees, not the stale
+        // suggestion (999) still served alongside them.
+        XCTAssertEqual(model.tipText, "15.00")
+        XCTAssertEqual(model.otherFeesText, "2.50")
         XCTAssertEqual(ReceiptFormat.isoDate(fromPicker: model.purchasedDate), "2026-03-20")
         XCTAssertEqual(model.categoryText, "Groceries")
         XCTAssertEqual(model.paymentMethodText, "Visa")

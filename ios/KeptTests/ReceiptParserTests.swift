@@ -50,6 +50,10 @@ final class ReceiptParserTests: XCTestCase {
         XCTAssertEqual(suggestions.totalCents, 10992)
         XCTAssertEqual(suggestions.subtotalCents, 8400)
         XCTAssertEqual(suggestions.purchasedAt, "2026-01-03")
+        // 2026-08-28: tips get their own field and their own heuristic,
+        // rather than only being "kept out of tax" as the test name
+        // (pre-dating the field) still says.
+        XCTAssertEqual(suggestions.tipCents, 1500)
     }
 
     func testPdfStyleInvoiceWithThousandsSeparators() {
@@ -231,6 +235,83 @@ final class ReceiptParserTests: XCTestCase {
         XCTAssertEqual(suggestions.hstCents, 205)
     }
 
+    // MARK: - Split HST (2026-08-28 product feedback)
+
+    /// the owner's own receipt shape: one harmonized tax printed as two
+    /// provincial-rate HST lines rather than one combined line. Each row
+    /// carries its own distinct percentage marker, so the two must sum
+    /// rather than have the ranking silently pick one and drop the other.
+    /// Predicted before running: 800 + 500 = 1300.
+    func testSplitHstRowsWithDistinctPercentagesSum() {
+        let suggestions = ReceiptParser.parse(lines: [
+            line("Subtotal 100.00", y: 0.60),
+            line("HST 8% 8.00", y: 0.64),
+            line("HST 5% 5.00", y: 0.68),
+            line("TOTAL 113.00", y: 0.72),
+        ])
+        XCTAssertEqual(suggestions.hstCents, 1300)
+        XCTAssertEqual(suggestions.subtotalCents, 10000)
+    }
+
+    /// The receipt the split case must NOT sum: a 13% row that already
+    /// equals the sum of the other two rates (5% + 8%) is the combined
+    /// harmonized amount by itself - summing all three would double-count
+    /// the province's share on top of the row that already carries it.
+    /// Predicted before running: the HST row's own 1300, not 500+800+1300.
+    func testThirteenPercentRowSubsumingFivePlusEightWinsOutright() {
+        let suggestions = ReceiptParser.parse(lines: [
+            line("GST 5% 5.00", y: 0.60),
+            line("TAX 8% 8.00", y: 0.64),
+            line("HST 13% 13.00", y: 0.68),
+            line("TOTAL 100.00", y: 0.72),
+        ])
+        XCTAssertEqual(suggestions.hstCents, 1300)
+    }
+
+    /// Multiple non-zero tax rows with no percentage marker at all carry
+    /// none of the split case's required signal, so the shape must fall
+    /// through untouched to the ranking (HST beats GST beats TAX) -
+    /// exactly today's behaviour, unmodified. Predicted before running:
+    /// 205, the HST row, same as the pre-existing ranking tests.
+    func testMultiRowTaxBlockWithoutPercentagesFallsBackToTheRanking() {
+        let suggestions = ReceiptParser.parse(lines: [
+            line("GST 0.60", y: 0.60),
+            line("TAX 0.80", y: 0.64),
+            line("HST 2.05", y: 0.68),
+            line("TOTAL 20.00", y: 0.72),
+        ])
+        XCTAssertEqual(suggestions.hstCents, 205)
+    }
+
+    /// Two rows sharing one percentage are not a genuine split - the
+    /// guard requires pairwise-distinct rates - so this also falls back
+    /// to the ranking. Predicted before running: 205, the HST row.
+    func testRepeatedPercentageMarkersFallBackToTheRanking() {
+        let suggestions = ReceiptParser.parse(lines: [
+            line("GST 8% 0.60", y: 0.62),
+            line("HST 8% 2.05", y: 0.66),
+            line("TOTAL 20.00", y: 0.72),
+        ])
+        XCTAssertEqual(suggestions.hstCents, 205)
+    }
+
+    /// The wave-5 regression, unmodified by the split case: a GST zero
+    /// still must not shadow a real HST amount. The split case's own
+    /// guard already excludes this shape (a zero row is never gathered,
+    /// leaving only one non-zero candidate), but this receipt is the one
+    /// the original ranking exists to protect, so it is asserted again
+    /// here rather than trusted to the guard's logic alone. Predicted
+    /// before running: 205 - unchanged from before this feature existed.
+    func testWaveFiveZeroGstStillDoesNotShadowHstAfterSplitHstChange() {
+        let suggestions = ReceiptParser.parse(lines: [
+            line("Subtotal $15.79", y: 0.60),
+            line("GST: $0.00", y: 0.64),
+            line("HST: $2.05", y: 0.68),
+            line("Total: $17.84", y: 0.72),
+        ])
+        XCTAssertEqual(suggestions.hstCents, 205)
+    }
+
     func testAllZeroTaxRowsSuggestTheHonestZero() {
         // An exempt receipt genuinely charged no tax: zero is the truth
         // here, not a shadowing artifact.
@@ -240,6 +321,36 @@ final class ReceiptParserTests: XCTestCase {
             line("TOTAL 10.00", y: 0.72),
         ])
         XCTAssertEqual(suggestions.hstCents, 0)
+    }
+
+    // MARK: - Tip heuristic (2026-08-28)
+
+    func testGratuityLabelSuggestsTip() {
+        let suggestions = ReceiptParser.parse(lines: [
+            line("Subtotal 84.00", y: 0.55),
+            line("Gratuity 15.00", y: 0.60),
+            line("TOTAL 99.00", y: 0.65),
+        ])
+        XCTAssertEqual(suggestions.tipCents, 1500)
+    }
+
+    func testDespacedTipLabelStillReadsAsTip() {
+        // Vision's mid-word split, the same shape "Tot al" exercises for
+        // total - the tip heuristic reuses the same despaced-label
+        // machinery rather than a parallel matcher.
+        let split = ReceiptParser.parse(lines: [
+            RecognizedLine(text: "TI P 15.00", verticalCenter: 0.5, height: 0.02),
+        ])
+        XCTAssertEqual(split.tipCents, 1500)
+    }
+
+    func testNoTipLineSuggestsNothing() {
+        let suggestions = ReceiptParser.parse(lines: [
+            line("Subtotal 84.00", y: 0.55),
+            line("HST 10.92", y: 0.60),
+            line("TOTAL 94.92", y: 0.65),
+        ])
+        XCTAssertNil(suggestions.tipCents)
     }
 
     func testMultipleSubtotalRowsPreferTheBottomMost() {

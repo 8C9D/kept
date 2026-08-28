@@ -26,6 +26,7 @@ enum ReceiptParser {
             totalCents: total(in: lines),
             hstCents: hst(in: lines),
             subtotalCents: subtotal(in: lines),
+            tipCents: tip(in: lines),
             purchasedAt: purchaseDate(in: lines),
             vendor: vendor(in: lines)
         )
@@ -77,6 +78,14 @@ enum ReceiptParser {
     private static func hst(in lines: [RecognizedLine]) -> Int? {
         let candidates = lines.filter { !isSubtotalLine($0.text) }
 
+        // Split HST (2026-08-28 product feedback): checked first, and
+        // narrowly guarded to fall through to the ranking below whenever
+        // its shape is anything but the one it was built for - see the
+        // function's own comment for why.
+        if let split = splitOrCombinedHst(in: candidates) {
+            return split
+        }
+
         func amount(labelled label: String, allowZero: Bool, excludingTotalLines: Bool) -> Int? {
             for line in candidates {
                 guard containsWord(label, in: line.text) else { continue }
@@ -105,6 +114,64 @@ enum ReceiptParser {
         return nil
     }
 
+    /// the owner's first-use product feedback (2026-08-28): some receipts
+    /// print a harmonized tax as two provincial-rate lines rather than
+    /// one combined line ("HST 8%" and "HST 5%" separately, 13% total),
+    /// and the ranking above - by design, per its own comment - picks
+    /// whichever one sorts highest and silently drops the other, which is
+    /// exactly the ranking doing its job on a receipt shape it was never
+    /// built for.
+    ///
+    /// This is a narrow, guarded case laid on TOP of the ranking, not a
+    /// replacement for it - the wave-5 device failure the ranking exists
+    /// to prevent (a labelled zero shadowing a real amount) is still live
+    /// on every receipt with one tax row or with rows that don't carry
+    /// their own percentage. So: gather every non-zero HST/GST/TAX-tier
+    /// row (the same pool the ranking draws from, zeros and subtotal/total
+    /// lines excluded exactly as above). Fewer than two rows is exactly
+    /// today's shape - return nil and let the ranking decide it unchanged.
+    /// Two or more only resolve here when EVERY row carries its own,
+    /// pairwise-distinct percentage marker ("13%", "8%", "5%") - that is
+    /// the only signal that can tell a genuine split apart from two
+    /// unrelated tax lines, and without it, guessing would trade a
+    /// visible absence for a wrong-but-plausible amount reaching an
+    /// accountant, which is the one thing the ranking was written to
+    /// avoid. Given that signal: if one row's rate equals the sum of the
+    /// others' (a GST 5% / TAX 8% / HST 13% receipt, the 13% line already
+    /// combined), that row IS the whole tax and wins outright - summing
+    /// all three would double-count the province's share. Otherwise every
+    /// row is its own slice of one harmonized tax and they sum (the owner's
+    /// receipt: 8% + 5% = 13%, never printed combined).
+    private static func splitOrCombinedHst(in candidates: [RecognizedLine]) -> Int? {
+        let nonZeroRows: [(amount: Int, text: String)] = candidates.compactMap { line in
+            let isTaxLabelled = containsWord("hst", in: line.text)
+                || containsWord("gst", in: line.text)
+                || (containsWord("tax", in: line.text) && !containsWord("total", in: line.text))
+            guard
+                isTaxLabelled,
+                let amount = ReceiptAmount.lastAmount(in: line.text),
+                amount != 0
+            else { return nil }
+            return (amount, line.text)
+        }
+        guard nonZeroRows.count >= 2 else { return nil }
+
+        let percentages = nonZeroRows.map { percentage(in: $0.text) }
+        guard percentages.allSatisfy({ $0 != nil }) else { return nil }
+        let rates = percentages.map { $0! }
+        guard Set(rates).count == rates.count else { return nil }
+
+        for index in rates.indices {
+            let othersSum = rates.indices
+                .filter { $0 != index }
+                .reduce(0.0) { $0 + rates[$1] }
+            if abs(rates[index] - othersSum) < 0.01 {
+                return nonZeroRows[index].amount
+            }
+        }
+        return nonZeroRows.reduce(0) { $0 + $1.amount }
+    }
+
     // MARK: - Subtotal
 
     /// The bottom-most subtotal-labelled row. Audited alongside the HST
@@ -119,6 +186,29 @@ enum ReceiptParser {
             return nil
         }
         return ReceiptAmount.lastAmount(in: line.text)
+    }
+
+    // MARK: - Tip
+
+    /// A row labelled TIP or GRATUITY (2026-08-28 product feedback): a
+    /// human-entered amount on most receipts, so a heuristic guess here
+    /// saves the same keystroke subtotal and HST do - and is exactly as
+    /// replaceable, since every value this parser produces is only a
+    /// suggestion a human confirms (spec §3). Same family as subtotal's
+    /// heuristic: last amount on the labelled row, excluding a line that
+    /// mentions a total (uniform with every other labelled-amount rule
+    /// here, even though "total tip" is not phrasing real paper uses).
+    private static func tip(in lines: [RecognizedLine]) -> Int? {
+        let candidates = lines.filter { !isSubtotalLine($0.text) }
+        for line in candidates {
+            guard containsWord("tip", in: line.text) || containsWord("gratuity", in: line.text) else {
+                continue
+            }
+            if containsWord("total", in: line.text) { continue }
+            guard let amount = ReceiptAmount.lastAmount(in: line.text) else { continue }
+            return amount
+        }
+        return nil
     }
 
     // MARK: - Date
@@ -163,6 +253,12 @@ enum ReceiptParser {
 
     // MARK: - Shared text tests
 
+    /// The fixed list every label pattern below is compiled from - the
+    /// one place a new labelled-amount word joins the parser (the tip
+    /// heuristic added "tip" and "gratuity" here, 2026-08-28, rather than
+    /// hand-rolling a parallel matcher).
+    private static let labelWords = ["total", "hst", "gst", "tax", "tip", "gratuity"]
+
     /// Case-insensitive whole-word patterns, compiled once: "total"
     /// matches "TOTAL:" but not "totally" or "subtotal"; "tax" matches
     /// "Tax 13%" but not "taxable". Compiled per word rather than per call
@@ -172,7 +268,7 @@ enum ReceiptParser {
     /// initialization and matching does not mutate the value.
     private nonisolated(unsafe) static let wordPatterns: [String: Regex<Substring>] = {
         var patterns: [String: Regex<Substring>] = [:]
-        for word in ["total", "hst", "gst", "tax"] {
+        for word in labelWords {
             // The words are literal constants, so compilation cannot fail;
             // try! here would still be a crash in a capture path, and a
             // missing entry already degrades to "not found" below.
@@ -191,7 +287,7 @@ enum ReceiptParser {
     /// lookbehind, same as ReceiptDateParser and for the same reason.
     private nonisolated(unsafe) static let despacedWordPatterns: [String: Regex<AnyRegexOutput>] = {
         var patterns: [String: Regex<AnyRegexOutput>] = [:]
-        for word in ["total", "hst", "gst", "tax"] {
+        for word in labelWords {
             if let pattern = try? Regex("(?:^|[^A-Za-z])\(word)(?![A-Za-z])").ignoresCase() {
                 patterns[word] = pattern
             }
@@ -199,14 +295,26 @@ enum ReceiptParser {
         return patterns
     }()
 
+    /// A percentage token on a tax-labelled line ("13%", "8.5 %") - the
+    /// signal `splitOrCombinedHst` uses to tell a genuine multi-line
+    /// harmonized tax apart from unrelated tax rows. Not part of
+    /// `labelWords`: this matches a number-and-percent shape, not a word.
+    /// nonisolated(unsafe) for the same reason as the patterns above.
+    private nonisolated(unsafe) static let percentagePattern = #/(\d+(?:\.\d+)?)\s?%/#
+
+    private static func percentage(in text: String) -> Double? {
+        guard let match = text.firstMatch(of: percentagePattern) else { return nil }
+        return Double(match.1)
+    }
+
     private static func containsWord(_ word: String, in text: String) -> Bool {
         guard
             let pattern = wordPatterns[word],
             let despacedPattern = despacedWordPatterns[word]
         else {
-            // Every caller passes one of the four words above; asking for
-            // another is a programmer error, surfaced in debug builds and
-            // degraded to "not found" in a capture path.
+            // Every caller passes one of the words in labelWords; asking
+            // for another is a programmer error, surfaced in debug builds
+            // and degraded to "not found" in a capture path.
             assertionFailure("No compiled pattern for word: \(word)")
             return false
         }

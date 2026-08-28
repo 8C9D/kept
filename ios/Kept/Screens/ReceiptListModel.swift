@@ -54,9 +54,11 @@ final class ReceiptListModel: ObservableObject {
 
     private var nextCursor: String?
     private let loader: GuardedReceiptLoader
+    private let eventLogger: EventLogger
 
-    init(api: any KeptAPI) {
+    init(api: any KeptAPI, eventLogger: EventLogger) {
         loader = GuardedReceiptLoader(api: api)
+        self.eventLogger = eventLogger
     }
 
     /// First page; also the refresh path - pull-to-refresh re-runs it,
@@ -116,25 +118,25 @@ final class ReceiptListModel: ObservableObject {
         var pending = query
         pending.search = searchText
         guard pending.searchTerm != query.searchTerm else { return }
-        await apply(pending)
+        await apply(pending, logging: .listSearched)
     }
 
     func setStatus(_ status: ReceiptStatus?) async {
         var pending = query
         pending.status = status
-        await apply(pending)
+        await apply(pending, logging: .listFiltered)
     }
 
     func setCategory(_ category: String?) async {
         var pending = query
         pending.category = category
-        await apply(pending)
+        await apply(pending, logging: .listFiltered)
     }
 
     func setPaymentMethod(_ paymentMethod: String?) async {
         var pending = query
         pending.paymentMethod = paymentMethod
-        await apply(pending)
+        await apply(pending, logging: .listFiltered)
     }
 
     /// Both bounds in one call: the range sheet applies its two pickers
@@ -145,19 +147,19 @@ final class ReceiptListModel: ObservableObject {
         var pending = query
         pending.from = from
         pending.to = to
-        await apply(pending)
+        await apply(pending, logging: .listFiltered)
     }
 
     func setSort(_ sort: ReceiptQuery.Sort) async {
         var pending = query
         pending.sort = sort
-        await apply(pending)
+        await apply(pending, logging: .listSorted)
     }
 
     func setOrder(_ order: ReceiptQuery.Order) async {
         var pending = query
         pending.order = order
-        await apply(pending)
+        await apply(pending, logging: .listSorted)
     }
 
     /// Clears every narrowing filter, ordering left alone - the "Show all"
@@ -171,14 +173,18 @@ final class ReceiptListModel: ObservableObject {
         pending.from = nil
         pending.to = nil
         searchText = ""
-        await apply(pending)
+        await apply(pending, logging: .listFiltered)
     }
 
     /// One route for every query change, so none of them can forget to
-    /// start again from page one.
-    private func apply(_ pending: ReceiptQuery) async {
+    /// start again from page one. `logging` is the behavioural-telemetry
+    /// event (2026-08-28) to fire, and only when the query actually
+    /// changed - re-picking the sort already in effect, say, is not a
+    /// person doing anything worth counting.
+    private func apply(_ pending: ReceiptQuery, logging event: EventAction) async {
         guard pending != query else { return }
         query = pending
+        eventLogger.log(event)
         await loadFirstPage()
     }
 

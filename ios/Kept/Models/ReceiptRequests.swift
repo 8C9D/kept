@@ -30,6 +30,11 @@ struct OcrSuggestionsPayload: Encodable, Equatable {
     let totalCents: Int?
     let hstCents: Int?
     let subtotalCents: Int?
+    /// The tip heuristic's guess (2026-08-28), recorded verbatim like
+    /// every other amount for the §7.3 accuracy measurement. No
+    /// `otherFeesCents` key here: nothing heuristic ever suggests it, so
+    /// there is nothing to record.
+    let tipCents: Int?
 
     init(_ suggestions: ReceiptSuggestions) {
         vendor = suggestions.vendor
@@ -37,6 +42,7 @@ struct OcrSuggestionsPayload: Encodable, Equatable {
         totalCents = suggestions.totalCents
         hstCents = suggestions.hstCents
         subtotalCents = suggestions.subtotalCents
+        tipCents = suggestions.tipCents
     }
 
     // The server's strict schema takes absent keys, not explicit nulls, so
@@ -48,10 +54,11 @@ struct OcrSuggestionsPayload: Encodable, Equatable {
         try container.encodeIfPresent(totalCents, forKey: .totalCents)
         try container.encodeIfPresent(hstCents, forKey: .hstCents)
         try container.encodeIfPresent(subtotalCents, forKey: .subtotalCents)
+        try container.encodeIfPresent(tipCents, forKey: .tipCents)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case vendor, purchasedAt, totalCents, hstCents, subtotalCents
+        case vendor, purchasedAt, totalCents, hstCents, subtotalCents, tipCents
     }
 }
 
@@ -67,6 +74,11 @@ struct CreateReceiptRequest: Encodable, Equatable {
     let subtotalCents: Int?
     let hstCents: Int?
     let totalCents: Int?
+    /// Gratuity and every other non-HST charge (2026-08-28). Absent means
+    /// "no such line on this receipt" - the same rule as every other
+    /// money field here.
+    let tipCents: Int?
+    let otherFeesCents: Int?
     let category: String?
     let paymentMethod: String?
     let notes: String?
@@ -89,6 +101,8 @@ struct CreateReceiptRequest: Encodable, Equatable {
         subtotalCents: Int?,
         hstCents: Int?,
         totalCents: Int?,
+        tipCents: Int? = nil,
+        otherFeesCents: Int? = nil,
         category: String? = nil,
         paymentMethod: String? = nil,
         notes: String? = nil,
@@ -103,6 +117,8 @@ struct CreateReceiptRequest: Encodable, Equatable {
         self.subtotalCents = subtotalCents
         self.hstCents = hstCents
         self.totalCents = totalCents
+        self.tipCents = tipCents
+        self.otherFeesCents = otherFeesCents
         self.category = category
         self.paymentMethod = paymentMethod
         self.notes = notes
@@ -123,6 +139,8 @@ struct CreateReceiptRequest: Encodable, Equatable {
         try container.encodeIfPresent(subtotalCents, forKey: .subtotalCents)
         try container.encodeIfPresent(hstCents, forKey: .hstCents)
         try container.encodeIfPresent(totalCents, forKey: .totalCents)
+        try container.encodeIfPresent(tipCents, forKey: .tipCents)
+        try container.encodeIfPresent(otherFeesCents, forKey: .otherFeesCents)
         try container.encodeIfPresent(category, forKey: .category)
         try container.encodeIfPresent(paymentMethod, forKey: .paymentMethod)
         try container.encodeIfPresent(notes, forKey: .notes)
@@ -134,7 +152,7 @@ struct CreateReceiptRequest: Encodable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case purchasedAt, capturedAt, vendor
-        case subtotalCents, hstCents, totalCents
+        case subtotalCents, hstCents, totalCents, tipCents, otherFeesCents
         case category, paymentMethod, notes, status
         case ocrRawText, ocrSuggestions, image
     }
@@ -155,6 +173,8 @@ struct ConfirmReceiptRequest: Encodable, Equatable {
     let subtotalCents: Int?
     let hstCents: Int?
     let totalCents: Int
+    let tipCents: Int?
+    let otherFeesCents: Int?
     let category: String?
     let paymentMethod: String?
     let notes: String?
@@ -168,11 +188,17 @@ struct ConfirmReceiptRequest: Encodable, Equatable {
         subtotalCents = fields.subtotalCents
         hstCents = fields.hstCents
         totalCents = fields.totalCents
+        tipCents = fields.tipCents
+        otherFeesCents = fields.otherFeesCents
         category = fields.category
         paymentMethod = fields.paymentMethod
         notes = fields.notes
     }
 
+    // Every field explicit-encoded, null included - the confirm form
+    // always sends the whole form, so an explicit null here means "clear
+    // the field" (the server's update schema distinguishes absent from
+    // null), never "leave unchanged".
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(purchasedAt, forKey: .purchasedAt)
@@ -180,6 +206,8 @@ struct ConfirmReceiptRequest: Encodable, Equatable {
         try container.encode(subtotalCents, forKey: .subtotalCents)
         try container.encode(hstCents, forKey: .hstCents)
         try container.encode(totalCents, forKey: .totalCents)
+        try container.encode(tipCents, forKey: .tipCents)
+        try container.encode(otherFeesCents, forKey: .otherFeesCents)
         try container.encode(category, forKey: .category)
         try container.encode(paymentMethod, forKey: .paymentMethod)
         try container.encode(notes, forKey: .notes)
@@ -188,7 +216,7 @@ struct ConfirmReceiptRequest: Encodable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case purchasedAt, vendor
-        case subtotalCents, hstCents, totalCents
+        case subtotalCents, hstCents, totalCents, tipCents, otherFeesCents
         case category, paymentMethod, notes, status
     }
 }

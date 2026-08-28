@@ -599,6 +599,8 @@ final class OutboxController: ObservableObject {
                 subtotalCents: confirmed.subtotalCents,
                 hstCents: confirmed.hstCents,
                 totalCents: confirmed.totalCents,
+                tipCents: confirmed.tipCents,
+                otherFeesCents: confirmed.otherFeesCents,
                 category: confirmed.category,
                 paymentMethod: confirmed.paymentMethod,
                 notes: confirmed.notes,
@@ -619,6 +621,11 @@ final class OutboxController: ObservableObject {
             subtotalCents: suggestions.subtotalCents,
             hstCents: suggestions.hstCents,
             totalCents: suggestions.totalCents,
+            // The heuristic's tip guess rides along like every other
+            // amount here; otherFeesCents is omitted (nil) because no
+            // heuristic ever produces one - a pending row simply has none
+            // until a human enters it on confirm.
+            tipCents: suggestions.tipCents,
             ocrRawText: parsed.ocrRawText,
             ocrSuggestions: OcrSuggestionsPayload(suggestions),
             image: CreateReceiptRequest.Image(objectKey: objectKey, sha256: item.sha256)

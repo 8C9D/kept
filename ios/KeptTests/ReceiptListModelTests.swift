@@ -15,7 +15,7 @@ final class ReceiptListModelTests: XCTestCase {
     }
 
     private func makeModel() -> ReceiptListModel {
-        ReceiptListModel(api: api)
+        ReceiptListModel(api: api, eventLogger: EventLogger(api: api))
     }
 
     /// Routes list requests by cursor; unknown cursors fail loudly.

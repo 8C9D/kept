@@ -15,6 +15,7 @@ import SwiftUI
 /// and compiled out of shipped builds.
 struct KeyboardExitUITestHarness: View {
     @ObservedObject var options: ReceiptOptionsStore
+    let eventLogger: EventLogger
     @State private var model: ConfirmReceiptModel?
 
     static var isRequested: Bool {
@@ -28,6 +29,7 @@ struct KeyboardExitUITestHarness: View {
                     ConfirmReceiptView(
                         model: presented,
                         options: options,
+                        eventLogger: eventLogger,
                         onSaved: {},
                         onSetAside: {}
                     )

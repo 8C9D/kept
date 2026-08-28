@@ -15,7 +15,21 @@ protocol KeptAPI: Sendable {
     func uploadImage(to target: UploadTarget, data: Data, contentType: ImageUploadContentType) async throws
     func createReceipt(_ request: CreateReceiptRequest) async throws -> Receipt
     func confirmReceipt(id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt
+    /// Soft delete (spec §10B): tombstones the row and its image, excluded
+    /// from every list, count and export from that moment on, bytes kept
+    /// for CRA's six-year retention. Not the account-deletion hard delete.
+    func deleteReceipt(id: UUID) async throws
     func deleteAccount(appleAuthorizationCode: String?) async throws
+    func startExport(_ request: ExportRequest) async throws -> ExportJob
+    func exportJobs() async throws -> [ExportJob]
+    func exportJob(id: UUID) async throws -> ExportJob
+    /// POST /api/events - behavioural telemetry (EventLogger is the only
+    /// caller). Returns nothing: the response body `{accepted: n}` exists
+    /// for the server's own bookkeeping, not for this client to act on -
+    /// this is a fire-and-forget endpoint by contract (spec, 2026-08-28),
+    /// and a client that inspected the count would be looking for a
+    /// reason to react to it.
+    func postEvents(_ request: PostEventsRequest) async throws
 }
 
 extension APIClient: KeptAPI {
@@ -82,6 +96,18 @@ extension APIClient: KeptAPI {
         try await patch("/api/receipts/\(id.uuidString.lowercased())", body: request)
     }
 
+    /// ⚠ Ordering trap this call site inherits (spec §5, Runbook §6): the
+    /// create route's duplicate-image index keys on (user, sha256), and a
+    /// tombstoned image still holds that slot until this DELETE stamps its
+    /// own `deleted_at` alongside the receipt's. Re-uploading the exact
+    /// same image bytes 409s as `duplicate_image` until the receipt that
+    /// holds them is deleted - so "delete, then recapture" is the only
+    /// order that works for an identical file. A re-photographed paper
+    /// produces different bytes and collides with nothing.
+    func deleteReceipt(id: UUID) async throws {
+        try await delete("/api/receipts/\(id.uuidString.lowercased())")
+    }
+
     /// Destroys the account and every receipt in it. The code is a fresh,
     /// single-use one from a Sign in with Apple re-authorization run moments
     /// earlier, which the server exchanges to revoke the person's Apple
@@ -95,5 +121,41 @@ extension APIClient: KeptAPI {
             let appleAuthorizationCode: String?
         }
         try await delete("/api/me", body: Body(appleAuthorizationCode: appleAuthorizationCode))
+    }
+
+    // MARK: - Export (2026-08-28: iOS export screen, reversing §4.1a/§7.1's
+    // web-only decision - see Export/ExportView.swift for why)
+
+    /// Starts generating a zip for a period; the job runs after this
+    /// returns, and the caller polls `exportJob(id:)`. 409
+    /// `export_already_running` when one is already live for this user -
+    /// refused, not queued (spec §8).
+    func startExport(_ request: ExportRequest) async throws -> ExportJob {
+        try await post("/api/export", body: request)
+    }
+
+    /// The caller's own jobs, newest first - the export screen's history.
+    func exportJobs() async throws -> [ExportJob] {
+        struct Response: Decodable {
+            let jobs: [ExportJob]
+        }
+        let response: Response = try await get("/api/export")
+        return response.jobs
+    }
+
+    /// One job's current state. `status` already carries the server's
+    /// computed `expired`/`stale` outcomes alongside the stored ones - this
+    /// client renders whichever string comes back and decides nothing.
+    func exportJob(id: UUID) async throws -> ExportJob {
+        try await get("/api/export/\(id.uuidString.lowercased())")
+    }
+
+    // MARK: - Events (2026-08-28: behavioural telemetry)
+
+    func postEvents(_ request: PostEventsRequest) async throws {
+        struct Response: Decodable {
+            let accepted: Int
+        }
+        let _: Response = try await post("/api/events", body: request)
     }
 }

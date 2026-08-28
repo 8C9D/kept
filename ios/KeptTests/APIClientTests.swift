@@ -204,6 +204,8 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(first.purchasedAt, "2026-03-20")
         XCTAssertEqual(first.vendor, "Synthetic Vendor Three")
         XCTAssertEqual(first.hstCents, 325)
+        XCTAssertEqual(first.tipCents, 400)
+        XCTAssertEqual(first.otherFeesCents, 150)
         XCTAssertEqual(first.totalCents, 2925)
         XCTAssertEqual(first.status, .confirmed)
         XCTAssertEqual(
@@ -214,6 +216,8 @@ final class APIClientTests: XCTestCase {
         let second = try XCTUnwrap(page.receipts.last)
         XCTAssertNil(second.vendor)
         XCTAssertNil(second.subtotalCents)
+        XCTAssertNil(second.tipCents)
+        XCTAssertNil(second.otherFeesCents)
         XCTAssertEqual(second.status, .pending)
 
         // suggestions: null (neither parser ever saw the receipt) and an
@@ -233,6 +237,8 @@ final class APIClientTests: XCTestCase {
 
         XCTAssertEqual(detail.receipt.vendor, "Synthetic Vendor Three")
         XCTAssertEqual(detail.receipt.totalCents, 2925)
+        XCTAssertEqual(detail.receipt.tipCents, 400)
+        XCTAssertEqual(detail.receipt.otherFeesCents, 150)
         XCTAssertEqual(detail.ocrRawText, "SYNTHETIC OCR TEXT\nTOTAL 29.25")
 
         // The served §7.3 merge, decoded from the exact wire shape - the
@@ -243,6 +249,9 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(suggestions.purchasedAt.value, "2026-03-20")
         XCTAssertTrue(suggestions.purchasedAt.disagreement)
         XCTAssertEqual(suggestions.totalCents.value, 2925)
+        XCTAssertEqual(suggestions.hstCents.value, 325)
+        XCTAssertFalse(suggestions.hstCents.disagreement)
+        XCTAssertEqual(suggestions.tipCents.value, 400)
         // The no-fallthrough absence, exactly as served: {value: null,
         // source: null} must land as nil, the stated-absence prefill.
         XCTAssertNil(suggestions.subtotalCents.value)
@@ -256,6 +265,27 @@ final class APIClientTests: XCTestCase {
             detail.images.first?.downloadUrl,
             URL(string: "https://storage.example/presigned/abc")
         )
+    }
+
+    /// HST's disagreement flag (§7.3, 2026-08-28) decodes true when the
+    /// wire sends it, exactly like `purchasedAt`'s - and the served value
+    /// is unaffected, still the heuristic's.
+    func testDecodesHstDisagreementFlag() async throws {
+        let client = try makeClient()
+        let jsonWithHstDisagreement = detailJSON.replacingOccurrences(
+            of: #""hstCents": {"value": 325, "source": "heuristic", "disagreement": false}"#,
+            with: #""hstCents": {"value": 325, "source": "heuristic", "disagreement": true}"#
+        )
+        transport.enqueue(status: 200, jsonBody: jsonWithHstDisagreement)
+
+        let detail = try await client.receiptDetail(
+            id: try XCTUnwrap(UUID(uuidString: "0a1b2c3d-0000-4000-8000-000000000001"))
+        )
+
+        let suggestions = try XCTUnwrap(detail.receipt.suggestions)
+        XCTAssertTrue(suggestions.hstCents.disagreement)
+        // Disagreement is a side channel; the served value never changes.
+        XCTAssertEqual(suggestions.hstCents.value, 325)
     }
 
     func testDecodesTimestampsWithoutFractionalSeconds() async throws {
@@ -366,11 +396,17 @@ final class APIClientTests: XCTestCase {
         // ruling) and must survive the round trip untouched.
         XCTAssertEqual(options.categories, ["Office  supplies", "meals"])
         XCTAssertEqual(options.paymentMethods, ["Visa"])
+        // Vendors joined the other two 2026-08-28, same derivation and
+        // ordering.
+        XCTAssertEqual(options.vendors, ["Food Basics", "Maple Foods Market"])
     }
 
     func testAnAccountWithNothingUsedYetDecodesAsEmptyNotAFailure() async throws {
         let client = try makeClient()
-        transport.enqueue(status: 200, jsonBody: #"{"categories": [], "paymentMethods": []}"#)
+        transport.enqueue(
+            status: 200,
+            jsonBody: #"{"categories": [], "paymentMethods": [], "vendors": []}"#
+        )
 
         let options = try await client.receiptOptions()
 
@@ -466,6 +502,8 @@ final class APIClientTests: XCTestCase {
           "vendor": "Synthetic Vendor Three",
           "subtotalCents": 2500,
           "hstCents": 325,
+          "tipCents": 400,
+          "otherFeesCents": 150,
           "totalCents": 2925,
           "currency": "CAD",
           "category": "meals",
@@ -483,6 +521,8 @@ final class APIClientTests: XCTestCase {
           "vendor": null,
           "subtotalCents": null,
           "hstCents": null,
+          "tipCents": null,
+          "otherFeesCents": null,
           "totalCents": 4200,
           "currency": "CAD",
           "category": null,
@@ -515,6 +555,8 @@ final class APIClientTests: XCTestCase {
       "vendor": "Synthetic Vendor Three",
       "subtotalCents": 2500,
       "hstCents": 325,
+      "tipCents": 400,
+      "otherFeesCents": 150,
       "totalCents": 2925,
       "currency": "CAD",
       "category": "meals",
@@ -525,8 +567,9 @@ final class APIClientTests: XCTestCase {
         "vendor": {"value": "Synthetic Vendor Three", "source": "llm"},
         "purchasedAt": {"value": "2026-03-20", "source": "heuristic", "disagreement": true},
         "totalCents": {"value": 2925, "source": "heuristic"},
-        "hstCents": {"value": 325, "source": "heuristic"},
+        "hstCents": {"value": 325, "source": "heuristic", "disagreement": false},
         "subtotalCents": {"value": null, "source": null},
+        "tipCents": {"value": 400, "source": "heuristic"},
         "vendorTaxNumber": {"value": null}
       },
       "createdAt": "2026-08-05T10:00:00.000Z",
@@ -542,7 +585,8 @@ final class APIClientTests: XCTestCase {
     private let optionsJSON = """
     {
       "categories": ["Office  supplies", "meals"],
-      "paymentMethods": ["Visa"]
+      "paymentMethods": ["Visa"],
+      "vendors": ["Food Basics", "Maple Foods Market"]
     }
     """
 
