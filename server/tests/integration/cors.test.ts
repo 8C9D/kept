@@ -49,6 +49,32 @@ describe("CORS for the web client", () => {
     expect(response.headers.get("access-control-allow-credentials")).toBeNull();
   });
 
+  /**
+   * Regression, 2026-08-28. `PUT /api/receipts/:id/images/:page` (replacing a
+   * page's image) was the API's first PUT route, and `allowMethods` was not
+   * updated with it. The route worked perfectly under curl - which sends no
+   * preflight - and was dead from the web client, because the browser's
+   * preflight was refused before the request was ever made. A missing method
+   * here is invisible to every test that calls the app directly, which is why
+   * this one goes through OPTIONS.
+   */
+  it("allows every method the API's routes actually use, PUT included", async () => {
+    for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {
+      const response = await harness.app.request("/api/receipts", {
+        method: "OPTIONS",
+        headers: {
+          Origin: WEB_ORIGIN,
+          "Access-Control-Request-Method": method,
+          "Access-Control-Request-Headers": "authorization,content-type",
+        },
+      });
+      expect(response.status).toBe(204);
+      expect(response.headers.get("access-control-allow-methods")).toContain(
+        method,
+      );
+    }
+  });
+
   it("marks an actual response for the configured origin", async () => {
     const response = await harness.app.request("/api/me", {
       headers: { Origin: WEB_ORIGIN },

@@ -1,0 +1,2 @@
+ALTER TABLE "receipt_images" DROP CONSTRAINT "receipt_images_receipt_id_page_uq";--> statement-breakpoint
+CREATE UNIQUE INDEX "receipt_images_receipt_id_page_uq" ON "receipt_images" USING btree ("receipt_id","page") WHERE deleted_at IS NULL;

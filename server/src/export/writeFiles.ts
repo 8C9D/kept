@@ -16,7 +16,13 @@ type ExportColumn = (typeof EXPORT_COLUMN_HEADERS)[number];
 type ExportValue =
   | { kind: "text"; value: string | null }
   /** Integer cents, rendered per encoding: a number in the XLSX, a decimal string elsewhere. */
-  | { kind: "money"; value: Cents | null };
+  | { kind: "money"; value: Cents | null }
+  /**
+   * A plain integer count (2026-08-28, proposal #6: `pages`) - unlike
+   * money, it is never a decimal string anywhere, and unlike an amount
+   * there is no cents-vs-dollars ambiguity to render around.
+   */
+  | { kind: "count"; value: number };
 
 function text(value: string | null): ExportValue {
   return { kind: "text", value };
@@ -24,6 +30,10 @@ function text(value: string | null): ExportValue {
 
 function money(value: Cents | null): ExportValue {
   return { kind: "money", value };
+}
+
+function count(value: number): ExportValue {
+  return { kind: "count", value };
 }
 
 function exportValues(row: ExportRow): Record<ExportColumn, ExportValue> {
@@ -41,6 +51,7 @@ function exportValues(row: ExportRow): Record<ExportColumn, ExportValue> {
     payment_method: text(row.paymentMethod),
     whose: text(row.whose),
     image_filename: text(row.imageFilename),
+    pages: count(row.pages),
     notes: text(row.notes),
   };
 }
@@ -108,6 +119,9 @@ function csvCell(value: ExportValue): string {
   if (value.kind === "money") {
     return value.value === null ? "" : centsToDecimalString(value.value);
   }
+  if (value.kind === "count") {
+    return String(value.value);
+  }
   return value.value ?? "";
 }
 
@@ -140,9 +154,21 @@ export function writeJson(rows: ExportRow[]): string {
   return JSON.stringify(objects, null, 2);
 }
 
+/**
+ * `pages` renders as a digit STRING here too, same as money - not because
+ * of money's float-precision reason, but because this writer's whole
+ * contract (see the file header above) is that the CSV and the JSON carry
+ * the same values cell for cell. A native JSON number for `pages` alone
+ * would make it the one column where the two files disagree in kind, for
+ * no reader-facing benefit; XLSX is the one encoding where it is a real
+ * number, exactly as money is.
+ */
 function jsonCell(value: ExportValue): string | null {
   if (value.kind === "money") {
     return value.value === null ? null : centsToDecimalString(value.value);
+  }
+  if (value.kind === "count") {
+    return String(value.value);
   }
   return value.value;
 }

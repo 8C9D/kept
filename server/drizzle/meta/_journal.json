@@ -57,6 +57,13 @@
       "when": 1787940155964,
       "tag": "0007_user-events",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787953522701,
+      "tag": "0008_receipt-images-page-partial",
+      "breakpoints": true
     }
   ]
 }

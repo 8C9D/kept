@@ -11,7 +11,6 @@ import {
   smallint,
   text,
   timestamp,
-  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -192,7 +191,17 @@ export const receiptImages = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    unique("receipt_images_receipt_id_page_uq").on(t.receiptId, t.page),
+    // Partial, like the sha256 index just below (2026-08-28, migration
+    // 0008, proposal #6 - "add a page, replace an image"). Originally a
+    // plain unique constraint (wave 1); replacing an image soft-deletes the
+    // live row at a page and inserts a new one at the SAME page number, and
+    // a plain unique on (receipt_id, page) would refuse that insert - a
+    // tombstoned row still occupies its slot forever, the identical defect
+    // wave 1 already found and fixed once on the sha256 index below. This
+    // migration applies the same fix to the other index that needed it.
+    uniqueIndex("receipt_images_receipt_id_page_uq")
+      .on(t.receiptId, t.page)
+      .where(sql`deleted_at IS NULL`),
     // Partial: only live images occupy a duplicate slot. Otherwise deleting
     // a receipt and re-capturing the same file would 409 forever against a
     // row the user can no longer see.

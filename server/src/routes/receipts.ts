@@ -30,6 +30,8 @@ import {
   listReceiptsQuerySchema,
   listSortSchema,
   ocrSuggestionsSchema,
+  receiptFilterQuerySchema,
+  receiptImageSchema,
   updateReceiptSchema,
   uploadUrlSchema,
 } from "../http/schemas.js";
@@ -164,11 +166,7 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
       });
     } catch (error) {
       if (isUniqueViolation(error, "receipt_images_user_id_sha256_uq")) {
-        throw new ApiError(
-          409,
-          "duplicate_image",
-          "An identical image is already attached to one of your receipts",
-        );
+        throw duplicateImageError();
       }
       throw error;
     }
@@ -198,7 +196,7 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     const order = query.order ?? DEFAULT_ORDER;
     const spec = LIST_SORTS[sort];
 
-    const conditions = [visibleTo(userId)];
+    const conditions = buildReceiptFilterConditions(userId, query);
     if (query.cursor !== undefined) {
       const cursor = decodeListCursor(query.cursor);
       // A cursor is a position inside one specific ordering. Replaying it
@@ -215,34 +213,6 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
         throw new ApiError(400, "invalid_request", "cursor is not valid");
       }
       conditions.push(afterCursorInSort(spec, order, cursor));
-    }
-    if (query.from !== undefined) {
-      conditions.push(gte(receipts.purchasedAt, query.from));
-    }
-    if (query.to !== undefined) {
-      conditions.push(lte(receipts.purchasedAt, query.to));
-    }
-    if (query.status !== undefined) {
-      conditions.push(eq(receipts.status, query.status));
-    }
-    // Exact match, deliberately: these pair with /options, which serves the
-    // user's own stored strings verbatim. Normalizing here would refuse to
-    // match a value this same server offered.
-    if (query.category !== undefined) {
-      conditions.push(eq(receipts.category, query.category));
-    }
-    if (query.paymentMethod !== undefined) {
-      conditions.push(eq(receipts.paymentMethod, query.paymentMethod));
-    }
-    if (query.q !== undefined) {
-      const pattern = `%${escapeLikePattern(query.q)}%`;
-      conditions.push(
-        or(
-          ilike(receipts.vendor, pattern),
-          ilike(receipts.category, pattern),
-          ilike(receipts.notes, pattern),
-        ),
-      );
     }
 
     // Fetch one row beyond the page: its presence means another page
@@ -303,15 +273,125 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
    * verbatim-vendor rule (spec §7.3) is what keeps the stored strings stable
    * enough to match each other reuse after reuse. Existing clients ignore
    * the new key - the response is additive.
+   *
+   * `vendorDefaults` (2026-08-28, proposal #2) keys the category and
+   * payment method to prefill for a vendor the person has bought from
+   * before - see `vendorDefaultCandidates` below for the query and the
+   * confirmed-only decision. Existing clients ignore this key too.
    */
   router.get("/options", async (c) => {
     const userId = c.get("userId");
-    const [categories, paymentMethods, vendors] = await Promise.all([
-      recentDistinctValues(deps.db, userId, receipts.category),
-      recentDistinctValues(deps.db, userId, receipts.paymentMethod),
-      recentDistinctValues(deps.db, userId, receipts.vendor),
-    ]);
-    return c.json({ categories, paymentMethods, vendors });
+    const [categories, paymentMethods, vendors, vendorDefaultRows] =
+      await Promise.all([
+        recentDistinctValues(deps.db, userId, receipts.category),
+        recentDistinctValues(deps.db, userId, receipts.paymentMethod),
+        recentDistinctValues(deps.db, userId, receipts.vendor),
+        vendorDefaultCandidates(deps.db, userId),
+      ]);
+
+    // Scoped to the vendors this response already serves: a default for a
+    // vendor string the client cannot also see in `vendors` is a default it
+    // has nothing to match against, and this is also what caps the result
+    // at MAX_REUSABLE_OPTIONS the same way the three lists above do, rather
+    // than the confirmed-only query growing unbounded on its own.
+    const knownVendors = new Set(vendors);
+    const vendorDefaults: Record<
+      string,
+      { category: string | null; paymentMethod: string | null }
+    > = {};
+    for (const row of vendorDefaultRows) {
+      if (row.vendor === null || !knownVendors.has(row.vendor)) {
+        continue;
+      }
+      // A vendor whose confirmed receipts never carried either field has
+      // nothing to offer - omitted rather than served as {null, null},
+      // which a client would otherwise have to learn is not a default.
+      if (row.category === null && row.paymentMethod === null) {
+        continue;
+      }
+      vendorDefaults[row.vendor] = {
+        category: row.category,
+        paymentMethod: row.paymentMethod,
+      };
+    }
+
+    return c.json({ categories, paymentMethods, vendors, vendorDefaults });
+  });
+
+  /**
+   * GET /api/receipts/summary - proposal #2's companion route, #3 itself:
+   * the same running-totals question `checkReceiptArithmetic` answers for
+   * one receipt, asked over a whole filtered list instead.
+   *
+   * Takes exactly the filter parameters GET / accepts (`receiptFilterQuerySchema`)
+   * and none of its paging ones - an aggregate has no pages to turn - and
+   * reuses that route's own `buildReceiptFilterConditions` rather than a
+   * second filter implementation that could quietly drift from it (the
+   * brief's own named risk: "two filter implementations that can disagree
+   * is precisely the bug this route would otherwise introduce").
+   *
+   * ⚠ The risk the proposal names by name: "the number invites being read
+   * as a tax figure... it must exclude [pending receipts], matching the
+   * export's rule exactly." Nothing with status = 'pending' may ever reach
+   * an export (spec §5.2a, §6); a summary that quietly folded pending rows
+   * into its totals would disagree with the export sitting next to it. So
+   * this never serves one blended number - `confirmed` is the count and
+   * summed money fields over confirmed rows only, and `pendingCount` is the
+   * same filter's pending rows, counted and nothing else, so a client can
+   * say "$X, and N pending, not counted" instead of a figure someone could
+   * mistake for a finished claim.
+   *
+   * One query, not two: every count and sum is a `FILTER (WHERE ...)`
+   * aggregate in the same SELECT, so the confirmed and pending halves are
+   * computed from one snapshot of the filtered rows rather than two
+   * queries that could race a concurrent write between them.
+   *
+   * `COALESCE(..., 0)` on every sum: a filter matching zero confirmed rows
+   * must answer 0, not null - a client rendering "$0.00" is correct, and a
+   * null would hand every client an absence to special-case that is really
+   * just a zero.
+   *
+   * Registered ABOVE /:id for the same reason /options is (see that
+   * route's comment): the :id handler 404s a non-uuid, so a literal path
+   * declared after it would be shadowed.
+   */
+  router.get("/summary", async (c) => {
+    const query = parseOrThrow(receiptFilterQuerySchema, c.req.query());
+    const userId = c.get("userId");
+    const conditions = buildReceiptFilterConditions(userId, query);
+
+    const rows = await deps.db
+      .select({
+        confirmedCount: sql<number>`count(*) filter (where ${receipts.status} = ${"confirmed"})::int`,
+        subtotalCents: sql<number>`coalesce(sum(${receipts.subtotalCents}) filter (where ${receipts.status} = ${"confirmed"}), 0)::int`,
+        hstCents: sql<number>`coalesce(sum(${receipts.hstCents}) filter (where ${receipts.status} = ${"confirmed"}), 0)::int`,
+        tipCents: sql<number>`coalesce(sum(${receipts.tipCents}) filter (where ${receipts.status} = ${"confirmed"}), 0)::int`,
+        otherFeesCents: sql<number>`coalesce(sum(${receipts.otherFeesCents}) filter (where ${receipts.status} = ${"confirmed"}), 0)::int`,
+        totalCents: sql<number>`coalesce(sum(${receipts.totalCents}) filter (where ${receipts.status} = ${"confirmed"}), 0)::int`,
+        pendingCount: sql<number>`count(*) filter (where ${receipts.status} = ${"pending"})::int`,
+      })
+      .from(receipts)
+      .where(and(...conditions));
+
+    const row = rows[0];
+    if (row === undefined) {
+      // An aggregate with no GROUP BY always yields exactly one row, even
+      // over zero matching receipts; its absence means something is
+      // genuinely broken.
+      throw new Error("Summary aggregate query returned no row");
+    }
+
+    return c.json({
+      confirmed: {
+        count: row.confirmedCount,
+        subtotalCents: row.subtotalCents,
+        hstCents: row.hstCents,
+        tipCents: row.tipCents,
+        otherFeesCents: row.otherFeesCents,
+        totalCents: row.totalCents,
+      },
+      pendingCount: row.pendingCount,
+    });
   });
 
   /** GET /api/receipts/:id - one receipt plus presigned image downloads. */
@@ -366,6 +446,204 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
       ocrSuggestions: receipt.ocrSuggestions,
       images,
     });
+  });
+
+  /**
+   * POST /api/receipts/:id/images - add a page to an existing receipt
+   * (proposal #6, 2026-08-28: "`receipt_images` has had a `page` column
+   * since wave 1 and nothing has ever written page 2"). The image is
+   * uploaded to storage first via POST /api/receipts/upload-url, exactly
+   * like the create route's image, and this route only records where it
+   * landed - the same two-step shape.
+   *
+   * `page` is assigned by the SERVER, never taken from the request: the
+   * receipt's current maximum LIVE page plus one. A client-chosen page
+   * number is a client-chosen primary key, and two devices adding a page to
+   * the same receipt at the same moment would collide on it. The receipt
+   * row is locked FOR UPDATE for the read-then-insert below, which is what
+   * turns "two devices at once" into "one goes first, the other computes
+   * its next page from the first's result" instead of a TOCTOU race where
+   * both read the same max and both insert page N+1.
+   *
+   * Scoped to the caller's own receipt exactly like every other :id route -
+   * a receipt that does not exist, or exists but is someone else's, is a
+   * 404 either way (spec §3 constraint 4). This check is why the row lock
+   * is taken on `receipts`, not on `receiptImages`: adding a page inserts a
+   * row that does not exist yet, so there is no existing receipt_images row
+   * whose own user_id could do the scoping the way the replace route below
+   * gets to rely on.
+   */
+  router.post("/:id/images", async (c) => {
+    const id = uuidParamOrNotFound(c.req.param("id"));
+    const body = parseOrThrow(receiptImageSchema, await readJsonBody(c));
+    const userId = c.get("userId");
+
+    if (!isIssuedObjectKey(body.objectKey, userId)) {
+      throw new ApiError(
+        400,
+        "invalid_request",
+        "objectKey was not issued for this user",
+      );
+    }
+
+    let created: typeof receiptImages.$inferSelect;
+    try {
+      created = await deps.db.transaction(async (tx) => {
+        const receiptRows = await tx
+          .select({ id: receipts.id })
+          .from(receipts)
+          .where(and(eq(receipts.id, id), visibleTo(userId)))
+          .for("update");
+        if (receiptRows.length === 0) {
+          throw notFoundError();
+        }
+
+        const maxPageRows = await tx
+          .select({ maxPage: sql<number | null>`max(${receiptImages.page})` })
+          .from(receiptImages)
+          .where(
+            and(
+              eq(receiptImages.receiptId, id),
+              eq(receiptImages.userId, userId),
+              isNull(receiptImages.deletedAt),
+            ),
+          );
+        // Every receipt is created with a page-1 image (the create route
+        // requires one), so maxPage is null only if that invariant has
+        // already broken - in which case starting again at page 1 is the
+        // correct recovery, not a second failure on top of the first.
+        const nextPage = (maxPageRows[0]?.maxPage ?? 0) + 1;
+
+        const inserted = await tx
+          .insert(receiptImages)
+          .values({
+            receiptId: id,
+            userId,
+            page: nextPage,
+            objectKey: body.objectKey,
+            sha256: body.sha256,
+          })
+          .returning();
+        const image = inserted[0];
+        if (image === undefined) {
+          // An insert with .returning() always yields the row; its absence
+          // means something is genuinely broken.
+          throw new Error("Image insert returned no row");
+        }
+        return image;
+      });
+    } catch (error) {
+      if (isUniqueViolation(error, "receipt_images_user_id_sha256_uq")) {
+        throw duplicateImageError();
+      }
+      throw error;
+    }
+
+    return c.json(await imageResponse(deps.storage, userId, created), 201);
+  });
+
+  /**
+   * PUT /api/receipts/:id/images/:page - replace the bytes behind one page
+   * (proposal #6, 2026-08-28). The repair path for the §8 sharp edge: a
+   * receipt whose image object is missing - a presigned PUT that failed or
+   * was interrupted, followed by a create the client still sent - jams
+   * every export of its period, and until this route existed the only
+   * remedy was deleting the receipt and capturing it again, which throws
+   * away its vendor, date, total and HST from every future export.
+   *
+   * Soft-deletes the live row at that page and inserts a new one at the
+   * same page number, in one transaction - the same retention rule every
+   * other delete in this codebase follows: the old row is kept, `deleted_at`
+   * stamped, never hard-deleted. This is exactly why migration 0008 exists:
+   * `receipt_images_receipt_id_page_uq` was a plain unique constraint
+   * (wave 1), so a tombstoned row would still occupy its (receipt_id, page)
+   * slot forever and this insert would 23505 against its own just-deleted
+   * predecessor. The migration makes that index partial on
+   * `deleted_at IS NULL`, the identical fix wave 1 already made once on the
+   * sha256 index below.
+   *
+   * ⚠ Mind the sha256 constraint here too. Soft-deleting the OLD row first,
+   * in the same transaction as the insert, is what lets an identical
+   * re-upload of the SAME broken bytes succeed (the tombstoned row no
+   * longer occupies the slot) - the same delete-first-then-capture ordering
+   * spec §5 and Runbook §6 already teach for a whole-receipt recapture,
+   * applied here to one page. A re-photographed piece of paper produces
+   * different bytes and collides with nothing, ordering or not. What still
+   * 409s, correctly, is a file whose bytes are byte-identical to some OTHER
+   * live image this user owns - a real duplicate, not a repair - and that
+   * answers the same named `duplicate_image` error the create and add-page
+   * routes do, never a raw constraint violation.
+   *
+   * Scoping deliberately does NOT re-check the `receipts` table the way the
+   * add-page route above does. The UPDATE's WHERE clause requires
+   * `receiptImages.userId = <caller>` in addition to matching the page, and
+   * `user_id` is denormalized onto this table for exactly this reason (spec
+   * §5: "a constraint that needs a join is not a constraint") - a row can
+   * only match if this caller already owns the receipt it belongs to, so a
+   * foreign receipt id or a foreign or nonexistent page both fall out as
+   * zero rows updated, the same 404 the detail route gives.
+   */
+  router.put("/:id/images/:page", async (c) => {
+    const id = uuidParamOrNotFound(c.req.param("id"));
+    const page = pageParamOrBadRequest(c.req.param("page"));
+    const body = parseOrThrow(receiptImageSchema, await readJsonBody(c));
+    const userId = c.get("userId");
+
+    if (!isIssuedObjectKey(body.objectKey, userId)) {
+      throw new ApiError(
+        400,
+        "invalid_request",
+        "objectKey was not issued for this user",
+      );
+    }
+
+    let created: typeof receiptImages.$inferSelect;
+    try {
+      created = await deps.db.transaction(async (tx) => {
+        const replaced = await tx
+          .update(receiptImages)
+          .set({ deletedAt: new Date() })
+          .where(
+            and(
+              eq(receiptImages.receiptId, id),
+              eq(receiptImages.userId, userId),
+              eq(receiptImages.page, page),
+              isNull(receiptImages.deletedAt),
+            ),
+          )
+          .returning({ id: receiptImages.id });
+        if (replaced.length === 0) {
+          // No live image at this page for this user: either the receipt
+          // is not theirs, the receipt does not exist, or this page never
+          // existed. All three are "not found", never "forbidden" (spec §3
+          // constraint 4).
+          throw notFoundError();
+        }
+
+        const inserted = await tx
+          .insert(receiptImages)
+          .values({
+            receiptId: id,
+            userId,
+            page,
+            objectKey: body.objectKey,
+            sha256: body.sha256,
+          })
+          .returning();
+        const image = inserted[0];
+        if (image === undefined) {
+          throw new Error("Image insert returned no row");
+        }
+        return image;
+      });
+    } catch (error) {
+      if (isUniqueViolation(error, "receipt_images_user_id_sha256_uq")) {
+        throw duplicateImageError();
+      }
+      throw error;
+    }
+
+    return c.json(await imageResponse(deps.storage, userId, created), 200);
   });
 
   /**
@@ -514,6 +792,55 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
 }
 
 /**
+ * The WHERE conditions GET / and GET /summary both filter on
+ * (`receiptFilterQuerySchema`, `http/schemas.ts`): scoped to the session
+ * user, then every optional filter the two routes accept identically.
+ * Defined once so a summary that disagreed with the list sitting next to it
+ * - counting a receipt the list's own filter would have excluded, or the
+ * reverse - is structurally impossible rather than a thing a future edit to
+ * one route quietly stops matching the other.
+ *
+ * Deliberately returns the cursor-free half only: keyset paging is a
+ * GET-/-only concept (an aggregate has no pages), so the cursor condition
+ * is pushed onto this array by the list handler itself, after the fact.
+ */
+function buildReceiptFilterConditions(
+  userId: string,
+  query: z.infer<typeof receiptFilterQuerySchema>,
+): (SQL | undefined)[] {
+  const conditions = [visibleTo(userId)];
+  if (query.from !== undefined) {
+    conditions.push(gte(receipts.purchasedAt, query.from));
+  }
+  if (query.to !== undefined) {
+    conditions.push(lte(receipts.purchasedAt, query.to));
+  }
+  if (query.status !== undefined) {
+    conditions.push(eq(receipts.status, query.status));
+  }
+  // Exact match, deliberately: these pair with /options, which serves the
+  // user's own stored strings verbatim. Normalizing here would refuse to
+  // match a value this same server offered.
+  if (query.category !== undefined) {
+    conditions.push(eq(receipts.category, query.category));
+  }
+  if (query.paymentMethod !== undefined) {
+    conditions.push(eq(receipts.paymentMethod, query.paymentMethod));
+  }
+  if (query.q !== undefined) {
+    const pattern = `%${escapeLikePattern(query.q)}%`;
+    conditions.push(
+      or(
+        ilike(receipts.vendor, pattern),
+        ilike(receipts.category, pattern),
+        ilike(receipts.notes, pattern),
+      ),
+    );
+  }
+  return conditions;
+}
+
+/**
  * The API shape of a receipt. A projection rather than the raw row, for the
  * same reason /api/me has one: user_id and deleted_at are internal, and the
  * row's shape should be free to change without changing the API's.
@@ -562,6 +889,67 @@ function receiptResponse(row: typeof receipts.$inferSelect) {
  */
 function servedSuggestions(merged: MergedSuggestions) {
   return { ...merged, vendorTaxNumber: { value: null, source: null } };
+}
+
+/**
+ * 409 for a sha256 that already occupies another live image's uniqueness
+ * slot (spec §5's partial index). One message, in one place, for every
+ * route that can hit it - the create route, add-a-page, and replace - so
+ * the wording that turns a raw constraint violation into a comprehensible
+ * answer cannot drift between them.
+ */
+function duplicateImageError(): ApiError {
+  return new ApiError(
+    409,
+    "duplicate_image",
+    "An identical image is already attached to one of your receipts",
+  );
+}
+
+/**
+ * The API shape of a receipt image row: what add-a-page and replace both
+ * return. Re-checked on the way out for the same reason the detail route's
+ * `images` projection is (see that route's comment) - this is a place a
+ * stored key becomes a URL, so it is asked again here rather than trusted
+ * from the insert that just happened in this same request.
+ */
+async function imageResponse(
+  storage: ObjectStorage,
+  userId: string,
+  row: typeof receiptImages.$inferSelect,
+) {
+  assertIssuedObjectKey(row.objectKey, userId);
+  return {
+    id: row.id,
+    page: row.page,
+    downloadUrl: await storage.presignDownload(row.objectKey),
+    createdAt: row.createdAt,
+  };
+}
+
+/**
+ * A page number is a positive 1-based ordering (spec §5), not an opaque id:
+ * unlike a uuid, there is no isolation reason to blur "malformed" into 404,
+ * so a page that cannot possibly be valid is a plain 400. Whether THIS
+ * page exists on THIS user's receipt is a separate question the route
+ * answers afterward, as a 404.
+ *
+ * Bounded to what the `page` column (smallint) can hold, same reasoning as
+ * `centsSchema` bounding to the money columns' range: a boundary that stops
+ * short of what the layer behind it accepts is not a boundary, and an
+ * unbounded value would reach Postgres as a 500 instead of a 400.
+ */
+const MAX_SMALLINT = 32767;
+
+function pageParamOrBadRequest(param: string): number {
+  if (!/^[1-9]\d*$/.test(param) || Number(param) > MAX_SMALLINT) {
+    throw new ApiError(
+      400,
+      "invalid_request",
+      "page must be a positive integer",
+    );
+  }
+  return Number(param);
 }
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -732,6 +1120,78 @@ async function recentDistinctValues(
     }
     return row.value;
   });
+}
+
+interface VendorDefaultCandidate {
+  vendor: string | null;
+  category: string | null;
+  paymentMethod: string | null;
+}
+
+/**
+ * Proposal #2 (2026-08-28): per vendor, the category and payment method
+ * from that vendor's most recent receipt that has them - independently per
+ * field, not "the vendor's single most recent receipt's two fields", so a
+ * category set three visits ago still offers itself even if last week's
+ * visit to the same vendor left the field blank. Same recency philosophy as
+ * `recentDistinctValues` just above: what was chosen most recently is what
+ * is offered.
+ *
+ * **Confirmed receipts only - deliberately, and not the same rule
+ * `recentDistinctValues` uses.** That function counts a pending receipt's
+ * value on the reasoning that "a value typed at capture is still a value
+ * the person chose" for the OPTIONS LIST it feeds - a pick-list the person
+ * is about to look at and choose from themselves. A default is different in
+ * kind: it PREFILLS a field on a different receipt without the person
+ * having looked at this one yet, and a pending receipt's category may
+ * itself be nothing more than an unreviewed heuristic guess sitting in a
+ * text field no human has confirmed. Sourcing a default from a value
+ * nobody has confirmed risks compounding one unreviewed guess into a second
+ * one. And unlike HST, the stakes of getting this wrong are asymmetric in
+ * the other direction too: category is free text with no tax consequence
+ * (spec's category rule), so a wrong default costs a mislabelled row an
+ * accountant re-reads, never a wrong claim - which is exactly why
+ * prefilling it at all is defensible where prefilling an amount is not
+ * (deriveMissingAmount's own doc comment, arithmetic.ts). Confirmed-only is
+ * the more conservative reading of "chose" for a value about to be reused
+ * elsewhere without a second look.
+ *
+ * One query, not one per vendor: two window functions, each partitioned by
+ * vendor and ordered so the first row in the window is the most recent row
+ * carrying a non-null value for that one column (`(column IS NULL)`
+ * ascending puts every non-null row before every null row within a vendor,
+ * then `created_at DESC` picks the most recent of those) - falling through
+ * to a null window value only when every one of that vendor's confirmed
+ * receipts left the column blank. `DISTINCT ON (vendor)` then collapses the
+ * (unchanged, per-partition-constant) window columns to one row per vendor.
+ * The route scopes the result to the vendors it is already serving before
+ * turning it into a response - see routes/receipts.ts's /options handler.
+ */
+async function vendorDefaultCandidates(
+  db: Db,
+  userId: string,
+): Promise<VendorDefaultCandidate[]> {
+  return db
+    .selectDistinctOn([receipts.vendor], {
+      vendor: receipts.vendor,
+      category: sql<string | null>`first_value(${receipts.category}) over (
+        partition by ${receipts.vendor}
+        order by (${receipts.category} is null), ${receipts.createdAt} desc
+      )`,
+      paymentMethod: sql<string | null>`first_value(${receipts.paymentMethod}) over (
+        partition by ${receipts.vendor}
+        order by (${receipts.paymentMethod} is null), ${receipts.createdAt} desc
+      )`,
+    })
+    .from(receipts)
+    .where(
+      and(
+        visibleTo(userId),
+        eq(receipts.status, "confirmed"),
+        isNotNull(receipts.vendor),
+      ),
+    )
+    .orderBy(receipts.vendor, desc(receipts.createdAt));
 }
 
 /**

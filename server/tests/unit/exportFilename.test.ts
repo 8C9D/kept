@@ -84,6 +84,49 @@ describe("exportImageFilename", () => {
       }),
     ).toThrow(InvalidDateError);
   });
+
+  /**
+   * Proposal #6 (2026-08-28): page 1 - the default, and every pre-existing
+   * single-page row - gets NO suffix, so a receipt that has only ever had
+   * one page is byte-identical to what this function produced before
+   * multi-page support existed.
+   */
+  it("adds no suffix for page 1, whether stated or omitted", () => {
+    const omitted = exportImageFilename({
+      purchasedAt: "2026-01-14",
+      vendor: "Staples",
+      receiptId: RECEIPT_ID,
+      extension: "jpg",
+    });
+    const stated = exportImageFilename({
+      purchasedAt: "2026-01-14",
+      vendor: "Staples",
+      receiptId: RECEIPT_ID,
+      extension: "jpg",
+      page: 1,
+    });
+    expect(omitted).toBe("2026-01-14_Staples_3f9a1c2e.jpg");
+    expect(stated).toBe(omitted);
+  });
+
+  it("adds a _p{page} suffix for every page after the first", () => {
+    const page2 = exportImageFilename({
+      purchasedAt: "2026-01-14",
+      vendor: "Staples",
+      receiptId: RECEIPT_ID,
+      extension: "jpg",
+      page: 2,
+    });
+    const page3 = exportImageFilename({
+      purchasedAt: "2026-01-14",
+      vendor: "Staples",
+      receiptId: RECEIPT_ID,
+      extension: "jpg",
+      page: 3,
+    });
+    expect(page2).toBe("2026-01-14_Staples_3f9a1c2e_p2.jpg");
+    expect(page3).toBe("2026-01-14_Staples_3f9a1c2e_p3.jpg");
+  });
 });
 
 describe("exportImagePath", () => {
@@ -95,5 +138,16 @@ describe("exportImagePath", () => {
       extension: "jpg",
     });
     expect(path).toBe("2026/01/2026-01-14_Staples_3f9a1c2e.jpg");
+  });
+
+  it("places a later page beside page 1 in the same yyyy/mm folder", () => {
+    const path = exportImagePath({
+      purchasedAt: "2026-01-14",
+      vendor: "Staples",
+      receiptId: RECEIPT_ID,
+      extension: "jpg",
+      page: 2,
+    });
+    expect(path).toBe("2026/01/2026-01-14_Staples_3f9a1c2e_p2.jpg");
   });
 });

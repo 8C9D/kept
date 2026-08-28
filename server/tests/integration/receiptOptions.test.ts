@@ -23,6 +23,10 @@ interface OptionsResponse {
   categories: string[];
   paymentMethods: string[];
   vendors: string[];
+  vendorDefaults: Record<
+    string,
+    { category: string | null; paymentMethod: string | null }
+  >;
 }
 
 let token: string;
@@ -170,7 +174,12 @@ describe("GET /api/receipts/options", () => {
     const body = (await (
       await harness.request(token, "GET", "/api/receipts/options")
     ).json()) as OptionsResponse;
-    expect(body).toEqual({ categories: [], paymentMethods: [], vendors: [] });
+    expect(body).toEqual({
+      categories: [],
+      paymentMethods: [],
+      vendors: [],
+      vendorDefaults: {},
+    });
   });
 
   it("hands back the free text unnormalized, doubled spaces and all", async () => {
@@ -201,5 +210,159 @@ describe("GET /api/receipts/options", () => {
   it("refuses without a session", async () => {
     const response = await harness.request(null, "GET", "/api/receipts/options");
     expect(response.status).toBe(401);
+  });
+});
+
+/**
+ * GET /api/receipts/options's `vendorDefaults` (proposal #2, 2026-08-28):
+ * per vendor, the category and payment method to prefill from that
+ * vendor's history. Confirmed-only, deliberately - see
+ * `vendorDefaultCandidates`'s own comment in routes/receipts.ts for why
+ * that differs from `vendors`/`categories`/`paymentMethods` above, which
+ * count a pending receipt's value on purpose.
+ */
+describe("GET /api/receipts/options vendorDefaults", () => {
+  it("sources a default from the vendor's most recent confirmed receipt", async () => {
+    await capture(
+      token,
+      userId,
+      { vendor: "Loblaws", category: "groceries", paymentMethod: "cash", status: "confirmed" },
+      at(1),
+    );
+    await capture(
+      token,
+      userId,
+      { vendor: "Loblaws", category: "household", paymentMethod: "visa", status: "confirmed" },
+      at(2),
+    );
+
+    const options = (await (
+      await harness.request(token, "GET", "/api/receipts/options")
+    ).json()) as OptionsResponse;
+    expect(options.vendorDefaults.Loblaws).toEqual({
+      category: "household",
+      paymentMethod: "visa",
+    });
+  });
+
+  it("selects category and payment method independently, each from its own most recent qualifying receipt", async () => {
+    // The most recent Loblaws receipt sets a payment method but leaves
+    // category blank; an older one had a category. The default for each
+    // field comes from the most recent receipt THAT HAS that field, not
+    // from one single "most recent receipt" for the vendor.
+    await capture(
+      token,
+      userId,
+      { vendor: "Loblaws", category: "groceries", paymentMethod: null, status: "confirmed" },
+      at(1),
+    );
+    await capture(
+      token,
+      userId,
+      { vendor: "Loblaws", category: null, paymentMethod: "debit", status: "confirmed" },
+      at(2),
+    );
+
+    const options = (await (
+      await harness.request(token, "GET", "/api/receipts/options")
+    ).json()) as OptionsResponse;
+    expect(options.vendorDefaults.Loblaws).toEqual({
+      category: "groceries",
+      paymentMethod: "debit",
+    });
+  });
+
+  it("is absent for a vendor that only has pending receipts", async () => {
+    // A pending receipt's category may be an unreviewed guess - it counts
+    // toward the /options pick-list (this file's tests above), but never
+    // sources a default that prefills a DIFFERENT receipt sight unseen.
+    const body = receiptBody({
+      vendor: "Pending Vendor",
+      category: "guessed category",
+      paymentMethod: "guessed method",
+    });
+    delete (body as Record<string, unknown>).totalCents;
+    const response = await harness.request(token, "POST", "/api/receipts", {
+      ...body,
+      image: imageFor(userId, "bb".repeat(32)),
+    });
+    expect(response.status).toBe(201);
+    expect(((await response.json()) as { status: string }).status).toBe("pending");
+
+    const options = (await (
+      await harness.request(token, "GET", "/api/receipts/options")
+    ).json()) as OptionsResponse;
+    expect(options.vendors).toContain("Pending Vendor");
+    expect(options.vendorDefaults).not.toHaveProperty("Pending Vendor");
+  });
+
+  it("is absent for a vendor whose confirmed receipts never set category or payment method", async () => {
+    await capture(
+      token,
+      userId,
+      { vendor: "Bare Vendor", category: null, paymentMethod: null, status: "confirmed" },
+    );
+
+    const options = (await (
+      await harness.request(token, "GET", "/api/receipts/options")
+    ).json()) as OptionsResponse;
+    expect(options.vendors).toContain("Bare Vendor");
+    expect(options.vendorDefaults).not.toHaveProperty("Bare Vendor");
+  });
+
+  it("excludes a soft-deleted receipt from sourcing a default", async () => {
+    await capture(
+      token,
+      userId,
+      { vendor: "Staples", category: "office supplies", paymentMethod: "visa", status: "confirmed" },
+      at(1),
+    );
+    const laterButDeleted = await capture(
+      token,
+      userId,
+      { vendor: "Staples", category: "electronics", paymentMethod: "amex", status: "confirmed" },
+      at(2),
+    );
+    expect(
+      (await harness.request(token, "DELETE", `/api/receipts/${laterButDeleted}`)).status,
+    ).toBe(204);
+
+    const options = (await (
+      await harness.request(token, "GET", "/api/receipts/options")
+    ).json()) as OptionsResponse;
+    expect(options.vendorDefaults.Staples).toEqual({
+      category: "office supplies",
+      paymentMethod: "visa",
+    });
+  });
+
+  it("never sources one user's default from another user's receipts", async () => {
+    await capture(
+      token,
+      userId,
+      { vendor: "Shared Name Co", category: "mine", paymentMethod: "my card", status: "confirmed" },
+    );
+    const other = await harness.signIn("vendor-defaults-other-user");
+    await capture(
+      other.token,
+      other.userId,
+      { vendor: "Shared Name Co", category: "theirs", paymentMethod: "their card", status: "confirmed" },
+    );
+
+    const mine = (await (
+      await harness.request(token, "GET", "/api/receipts/options")
+    ).json()) as OptionsResponse;
+    expect(mine.vendorDefaults["Shared Name Co"]).toEqual({
+      category: "mine",
+      paymentMethod: "my card",
+    });
+
+    const theirs = (await (
+      await harness.request(other.token, "GET", "/api/receipts/options")
+    ).json()) as OptionsResponse;
+    expect(theirs.vendorDefaults["Shared Name Co"]).toEqual({
+      category: "theirs",
+      paymentMethod: "their card",
+    });
   });
 });

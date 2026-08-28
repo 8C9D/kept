@@ -1,6 +1,6 @@
 import { ZipArchive, type Archiver } from "archiver";
 import { PassThrough } from "node:stream";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { listExportableReceipts } from "../db/receiptQueries.js";
 import { receiptImages, users } from "../db/schema.js";
@@ -79,14 +79,20 @@ export async function generateExport(
     input.period,
   );
 
-  // Page-1 image per receipt, in one query. Every receipt is created with
-  // an image, so a missing one is a data-integrity failure and the export
-  // must fail loudly rather than ship an accountant a broken click-through.
-  const imagesByReceipt = new Map<string, string>();
+  // Every LIVE page of every exportable receipt, in one query - not just
+  // page 1 (proposal #6, 2026-08-28: "a receipt whose page 2 never reaches
+  // the accountant is worse than no multi-page support at all"). Ordered by
+  // page so each receipt's images arrive page-1-first, which is what lets
+  // the loop below pick page 1 out with a single `find`.
+  const imagesByReceipt = new Map<
+    string,
+    { page: number; objectKey: string }[]
+  >();
   if (receipts.length > 0) {
     const imageRows = await deps.db
       .select({
         receiptId: receiptImages.receiptId,
+        page: receiptImages.page,
         objectKey: receiptImages.objectKey,
       })
       .from(receiptImages)
@@ -97,28 +103,53 @@ export async function generateExport(
             receipts.map((receipt) => receipt.id),
           ),
           eq(receiptImages.userId, input.userId),
-          eq(receiptImages.page, 1),
           isNull(receiptImages.deletedAt),
         ),
-      );
+      )
+      .orderBy(asc(receiptImages.page));
     for (const image of imageRows) {
-      imagesByReceipt.set(image.receiptId, image.objectKey);
+      const forReceipt = imagesByReceipt.get(image.receiptId);
+      if (forReceipt === undefined) {
+        imagesByReceipt.set(image.receiptId, [
+          { page: image.page, objectKey: image.objectKey },
+        ]);
+      } else {
+        forReceipt.push({ page: image.page, objectKey: image.objectKey });
+      }
     }
   }
 
-  // Each entry pairs the spreadsheet row with where its image lives in
-  // storage; the storage key is transport detail, not export data, so it
-  // stays out of ExportRow itself.
-  const bundle = receipts.map((receipt) => {
-    const imageObjectKey = imagesByReceipt.get(receipt.id);
-    if (imageObjectKey === undefined) {
+  // One entry per FILE the zip will carry, not per receipt: a three-page
+  // receipt contributes one spreadsheet row (below) but three of these. The
+  // spreadsheet's own imageFilename is unaffected either way - it always
+  // names page 1 (spec §8) - so a receipt that has only ever had one page
+  // produces exactly the entries it always has.
+  interface ImageToBundle {
+    receiptId: string;
+    page: number;
+    objectKey: string;
+    filename: string; // path inside the zip, e.g. images/2026/01/x.jpg
+  }
+  const imagesToBundle: ImageToBundle[] = [];
+  const rows: ExportRow[] = [];
+  for (const receipt of receipts) {
+    const images = imagesByReceipt.get(receipt.id) ?? [];
+    const page1 = images.find((image) => image.page === 1);
+    if (page1 === undefined) {
+      // Every receipt is created with a page-1 image, so a missing one is a
+      // data-integrity failure - the export must fail loudly rather than
+      // ship an accountant a broken click-through. This check is unchanged
+      // by proposal #6: it is still keyed to page 1 specifically, since
+      // that is the page the spreadsheet's own imageFilename column names.
       throw new Error(`Receipt ${receipt.id} has no page-1 image`);
     }
-    // The export is the other place a stored key is dereferenced, so it
-    // asks the same ownership question the detail route does. A zip is
+    // The export is the other place a stored key is dereferenced, so every
+    // page asks the same ownership question the detail route does. A zip is
     // exactly the wrong artifact to discover a mislabelled key in: it
     // leaves the server and lands in an accountant's inbox.
-    assertIssuedObjectKey(imageObjectKey, input.userId);
+    for (const image of images) {
+      assertIssuedObjectKey(image.objectKey, input.userId);
+    }
     // Only confirmed receipts export, and the receipts_confirmed_complete_ck
     // constraint guarantees a confirmed receipt has a total. Null here means
     // that guarantee broke, and the job must fail loudly rather than hand an
@@ -126,7 +157,7 @@ export async function generateExport(
     if (receipt.totalCents === null) {
       throw new Error(`Confirmed receipt ${receipt.id} is missing its total`);
     }
-    const row: ExportRow = {
+    rows.push({
       receiptId: receipt.id,
       date: receipt.purchasedAt,
       vendor: receipt.vendor,
@@ -141,17 +172,38 @@ export async function generateExport(
       category: receipt.category,
       paymentMethod: receipt.paymentMethod,
       whose: user.displayName,
+      // Page 1 keeps its existing, un-suffixed name (spec §8): passing
+      // page: 1 through exportImagePath is a no-op for the filename, which
+      // is what makes this byte-identical to every export before this
+      // feature existed.
       imageFilename: `images/${exportImagePath({
         purchasedAt: receipt.purchasedAt,
         vendor: receipt.vendor,
         receiptId: receipt.id,
-        extension: extensionOf(imageObjectKey),
+        extension: extensionOf(page1.objectKey),
+        page: 1,
       })}`,
+      pages: images.length,
       notes: receipt.notes,
-    };
-    return { row, imageObjectKey };
-  });
-  const rows = bundle.map((entry) => entry.row);
+    });
+    for (const image of images) {
+      imagesToBundle.push({
+        receiptId: receipt.id,
+        page: image.page,
+        objectKey: image.objectKey,
+        // Page 1 gets the identical path just computed for imageFilename;
+        // every later page sits beside it in the same images/yyyy/mm/
+        // folder with a `_p{page}` suffix on the same deterministic pattern.
+        filename: `images/${exportImagePath({
+          purchasedAt: receipt.purchasedAt,
+          vendor: receipt.vendor,
+          receiptId: receipt.id,
+          extension: extensionOf(image.objectKey),
+          page: image.page,
+        })}`,
+      });
+    }
+  }
 
   const label = periodLabel(input.period);
   const xlsx = await writeXlsx(rows);
@@ -161,13 +213,14 @@ export async function generateExport(
   // The budget is checked before each append, so the refusal lands before
   // the memory is spent, not after. Measured in bytes rather than in
   // JavaScript string length, which undercounts every non-ASCII vendor name.
+  // Every page counts, since every page is bytes in the zip (proposal #6).
   let totalBytes =
     xlsx.byteLength + Buffer.byteLength(csv) + Buffer.byteLength(json);
   const zip = await buildZip(async (archive) => {
     archive.append(Buffer.from(xlsx), { name: `receipts-${label}.xlsx` });
     archive.append(csv, { name: `receipts-${label}.csv` });
     archive.append(json, { name: `receipts-${label}.json` });
-    for (const { row, imageObjectKey } of bundle) {
+    for (const image of imagesToBundle) {
       // Named, because the storage layer's own answer is not actionable. A
       // receipt can point at an object that was never uploaded - the create
       // route validates the key's *shape*, and a presigned PUT that failed
@@ -182,7 +235,7 @@ export async function generateExport(
       // silently absent is worse than refusing (see the page-1 check above).
       let bytes;
       try {
-        bytes = await deps.storage.download(imageObjectKey);
+        bytes = await deps.storage.download(image.objectKey);
       } catch (error) {
         // ⚠ Only a genuinely absent object is described as one. Storage can
         // also time out, refuse credentials, or be down, and reporting any of
@@ -199,24 +252,27 @@ export async function generateExport(
           throw error;
         }
         throw new Error(
-          // Leads with the remedy that KEEPS the receipt. An earlier draft
-          // led with "delete that receipt", which reads as the instruction
-          // and takes the vendor, the date, the total and the HST out of
-          // every future export - the loss this whole finding exists to
-          // avoid. Deleting is still named, because it is what unblocks a
-          // year-end export when the paper is genuinely gone, and it is
-          // named second with its cost attached.
+          // Leads with the REPAIR now, not with deletion (proposal #6,
+          // 2026-08-28): PUT /api/receipts/:id/images/:page can replace
+          // just this page's bytes without touching the receipt's vendor,
+          // date, total or HST, which an earlier version of this message
+          // could not offer because that route did not exist yet - the
+          // only remedy was deleting the whole receipt and losing all four.
+          // Deleting is still named, second, with its cost attached, for
+          // the person who would rather start over or whose paper is gone.
           //
-          // The ordering inside the keep-it path is not a preference: an
-          // identical re-captured photo is refused while the old receipt is
-          // still live, because the duplicate-image index only frees its
-          // slot once that row is tombstoned.
-          `Receipt ${row.receiptId} has no image in storage, so this export ` +
-            `cannot be completed - its photo never finished uploading. ` +
-            `If you still have the paper, delete that receipt and capture it ` +
-            `again; deleting it first is what lets the same photo be ` +
-            `accepted. If the paper is gone, deleting the receipt will let ` +
-            `the export run without it.`,
+          // The ordering inside the delete-and-recapture path is not a
+          // preference: an identical re-captured photo is refused while the
+          // old receipt is still live, because the duplicate-image index
+          // only frees its slot once that row is tombstoned.
+          `Receipt ${image.receiptId} has no image in storage for page ` +
+            `${image.page}, so this export cannot be completed - that ` +
+            `page's photo never finished uploading. Replace that page's ` +
+            `image to repair it without losing the receipt's vendor, ` +
+            `date, total or HST. If you would rather start over, delete ` +
+            `the receipt and capture it again; deleting it first is what ` +
+            `lets an identical photo be accepted. If the paper is gone, ` +
+            `deleting the receipt will let the export run without it.`,
           { cause: error },
         );
       }
@@ -226,7 +282,7 @@ export async function generateExport(
           `Export exceeds the ${Math.floor(limits.maxTotalBytes / (1024 * 1024))} MiB size limit; export a shorter period`,
         );
       }
-      archive.append(Buffer.from(bytes), { name: row.imageFilename });
+      archive.append(Buffer.from(bytes), { name: image.filename });
     }
   });
 

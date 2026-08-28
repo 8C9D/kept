@@ -5,7 +5,7 @@ import type { ExportRow } from "../../src/export/exportRows.js";
 import { writeCsv, writeJson, writeXlsx } from "../../src/export/writeFiles.js";
 
 const HEADER =
-  "receipt_id,date,vendor,subtotal,hst,tip,other_fees,total,currency,category,payment_method,whose,image_filename,notes";
+  "receipt_id,date,vendor,subtotal,hst,tip,other_fees,total,currency,category,payment_method,whose,image_filename,pages,notes";
 
 function row(overrides: Partial<ExportRow> = {}): ExportRow {
   return {
@@ -22,6 +22,7 @@ function row(overrides: Partial<ExportRow> = {}): ExportRow {
     paymentMethod: "visa",
     whose: "Synthetic User A",
     imageFilename: "images/2026/01/2026-01-14_Staples_3f9a1c2e.jpg",
+    pages: 1,
     notes: null,
     ...overrides,
   };
@@ -33,7 +34,7 @@ describe("writeCsv", () => {
     const lines = csv.trimEnd().split("\r\n");
     expect(lines[0]).toBe(HEADER);
     expect(lines[1]).toBe(
-      "3f9a1c2e-8b4d-4f6a-9c0d-1e2f3a4b5c6d,2026-01-14,Staples,100.00,13.00,20.00,5.00,113.00,CAD,office supplies,visa,Synthetic User A,images/2026/01/2026-01-14_Staples_3f9a1c2e.jpg,",
+      "3f9a1c2e-8b4d-4f6a-9c0d-1e2f3a4b5c6d,2026-01-14,Staples,100.00,13.00,20.00,5.00,113.00,CAD,office supplies,visa,Synthetic User A,images/2026/01/2026-01-14_Staples_3f9a1c2e.jpg,1,",
     );
   });
 
@@ -80,8 +81,25 @@ describe("writeJson", () => {
       payment_method: "visa",
       whose: "Synthetic User A",
       image_filename: "images/2026/01/2026-01-14_Staples_3f9a1c2e.jpg",
+      pages: "1",
       notes: null,
     });
+  });
+
+  /**
+   * `pages` (2026-08-28, proposal #6) is a plain count, but this writer's
+   * whole contract is that the CSV and the JSON carry the same values cell
+   * for cell (see "carries the same values the CSV carries" below) - so it
+   * renders as a digit STRING here too, same as money, rather than becoming
+   * the one column where the two files disagree in kind. XLSX is the one
+   * encoding where it is a real number.
+   */
+  it("renders pages as a digit string, matching the CSV's own rendering", () => {
+    const parsed = JSON.parse(writeJson([row({ pages: 3 })])) as {
+      pages: unknown;
+    }[];
+    expect(parsed[0]?.pages).toBe("3");
+    expect(typeof parsed[0]?.pages).toBe("string");
   });
 
   /**
@@ -152,7 +170,9 @@ describe("formula-shaped fields stay byte-faithful", () => {
     expect(fields[2]).toBe("=1+1");
     expect(fields[9]).toBe("+1+1");
     expect(fields[10]).toBe("-Rogers Communications");
-    expect(fields[13]).toBe("@SUM(A1:A2)");
+    // Index 14, not 13: pages (2026-08-28, proposal #6) sits between
+    // image_filename and notes, shifting notes one column to the right.
+    expect(fields[14]).toBe("@SUM(A1:A2)");
   });
 
   it("stores the same field in the XLSX as a string cell, never a formula", async () => {
@@ -201,5 +221,31 @@ describe("the XLSX money columns", () => {
     // Columns 4, 5, 6, 7, 8: subtotal, hst, tip, other_fees, total.
     expect(formatted).toEqual([4, 5, 6, 7, 8]);
     expect(dataRow.getCell(8).value).toBe(113);
+  });
+});
+
+/**
+ * `pages` (2026-08-28, proposal #6): a plain integer count, rendered
+ * without any of money's decimal treatment in any of the three encodings.
+ */
+describe("the pages column", () => {
+  it("renders as plain digits in the CSV, not a decimal string", () => {
+    const csv = writeCsv([row({ pages: 3 })]);
+    const dataLine = csv.trimEnd().split("\r\n")[1];
+    expect(dataLine?.split(",")[13]).toBe("3");
+  });
+
+  it("is a numeric XLSX cell carrying no money format", async () => {
+    const bytes = await writeXlsx([row({ pages: 2 })]);
+    const workbook = new ExcelJS.Workbook();
+    type LoadInput = Parameters<typeof workbook.xlsx.load>[0];
+    await workbook.xlsx.load(Buffer.from(bytes) as unknown as LoadInput);
+    const sheet = workbook.getWorksheet("Receipts");
+    if (sheet === undefined) {
+      throw new Error("Receipts worksheet missing from the written XLSX");
+    }
+    const cell = sheet.getRow(2).getCell(14);
+    expect(cell.value).toBe(2);
+    expect(cell.numFmt).not.toBe("0.00");
   });
 });

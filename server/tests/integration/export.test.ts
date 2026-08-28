@@ -154,7 +154,7 @@ describe("the export pipeline", () => {
     const csv = zip.readAsText("receipts-2026.csv");
     const lines = csv.trimEnd().split("\r\n");
     expect(lines[0]).toBe(
-      "receipt_id,date,vendor,subtotal,hst,tip,other_fees,total,currency,category,payment_method,whose,image_filename,notes",
+      "receipt_id,date,vendor,subtotal,hst,tip,other_fees,total,currency,category,payment_method,whose,image_filename,pages,notes",
     );
     expect(lines).toHaveLength(3); // header + 2 rows
     const includedLine = lines.find((line) => line.startsWith(included.id));
@@ -162,11 +162,14 @@ describe("the export pipeline", () => {
     expect(includedLine).toContain("Café Dépôt");
     expect(includedLine).toContain("100.00,13.00,20.00,5.00,113.00,CAD");
     expect(includedLine).toContain("visa,Synthetic User A,images/2026/01/");
+    // Single-page receipt: pages reads 1, right after image_filename.
+    expect(includedLine).toMatch(/\.jpg,1,$/);
     const nullLine = lines.find((line) => line.startsWith(nullFields.id));
     // vendor, subtotal, hst empty; tip and other_fees also empty (never set
     // on this fixture) - five empty cells before the total.
     expect(nullLine).toContain(",,,,,42.00,CAD");
     expect(nullLine).toContain("unknown-vendor");
+    expect(nullLine).toMatch(/\.jpg,1,$/);
     expect(csv).not.toContain("Pending Vendor");
     expect(csv).not.toContain("Deleted Vendor");
     expect(csv).not.toContain("Out Of Period");
@@ -195,6 +198,7 @@ describe("the export pipeline", () => {
       category: "office supplies",
       payment_method: "visa",
       whose: "Synthetic User A",
+      pages: "1", // a digit string, matching the CSV's own rendering
       notes: null,
     });
     const nullJson = json.find((r) => r.receipt_id === nullFields.id);
@@ -205,6 +209,7 @@ describe("the export pipeline", () => {
       tip: null,
       other_fees: null,
       total: "42.00",
+      pages: "1",
     });
     // The retired columns are gone from every encoding, not blanked.
     for (const retired of [
@@ -236,6 +241,8 @@ describe("the export pipeline", () => {
     expect(firstDataRow?.getCell(8).numFmt).toBe("0.00");
     expect(firstDataRow?.getCell(6).value).toBe(20); // tip, numeric
     expect(firstDataRow?.getCell(7).value).toBe(5); // other_fees, numeric
+    expect(firstDataRow?.getCell(14).value).toBe(1); // pages, numeric, single page
+    expect(firstDataRow?.getCell(14).numFmt).not.toBe("0.00");
 
     // Every image_filename cell resolves to a real entry in images/, and
     // the bytes are the ones uploaded for that receipt.
@@ -254,6 +261,97 @@ describe("the export pipeline", () => {
     expect(new TextDecoder().decode(imageBytes as Buffer)).toBe(
       `synthetic image bytes ${"a1".repeat(32)}`,
     );
+  });
+
+  /**
+   * Proposal #6 (2026-08-28): "a multi-page receipt whose page 2 never
+   * reaches the accountant is worse than no multi-page support at all."
+   * Every live page must be a real file in the zip, image_filename must
+   * keep naming page 1 unsuffixed, and pages must read the true count.
+   */
+  it("bundles every page of a multi-page receipt, naming page 1 unsuffixed and every later page with a _p{n} suffix", async () => {
+    const receipt = await createReceiptWithImage(
+      token,
+      userId,
+      "e1".repeat(32),
+      {
+        purchasedAt: "2026-04-02",
+        vendor: "Hotel Foo",
+        totalCents: 30000,
+        status: "confirmed",
+      },
+    );
+
+    // Add pages 2 and 3 through the real route under test, uploading real
+    // bytes for each so the zip has something genuine to bundle.
+    for (const sha of ["e2".repeat(32), "e3".repeat(32)]) {
+      const objectKey = imageFor(userId, sha).objectKey;
+      await harness.storage.upload(
+        objectKey,
+        new TextEncoder().encode(`synthetic image bytes ${sha}`),
+        "image/jpeg",
+      );
+      const added = await harness.request(
+        token,
+        "POST",
+        `/api/receipts/${receipt.id}/images`,
+        { objectKey, sha256: sha },
+      );
+      expect(added.status).toBe(201);
+    }
+
+    const started = await harness.request(token, "POST", "/api/export", {
+      periodStart: "2026-01-01",
+      periodEnd: "2026-12-31",
+    });
+    const { id: jobId } = (await started.json()) as JobResponse;
+    const job = await pollUntilSettled(token, jobId);
+    expect(job.status).toBe("complete");
+    expect(job.error).toBeNull();
+
+    const zipKey = decodeURIComponent(
+      (job.downloadUrl as string).replace("https://fake-r2.test/download/", ""),
+    );
+    const zip = new AdmZip(Buffer.from(await harness.storage.download(zipKey)));
+    const entryNames = zip.getEntries().map((entry) => entry.entryName);
+
+    const page1 = "images/2026/04/2026-04-02_Hotel-Foo_" +
+      receipt.id.replaceAll("-", "").slice(0, 8) + ".jpg";
+    const page2 = "images/2026/04/2026-04-02_Hotel-Foo_" +
+      receipt.id.replaceAll("-", "").slice(0, 8) + "_p2.jpg";
+    const page3 = "images/2026/04/2026-04-02_Hotel-Foo_" +
+      receipt.id.replaceAll("-", "").slice(0, 8) + "_p3.jpg";
+    expect(entryNames).toContain(page1);
+    expect(entryNames).toContain(page2);
+    expect(entryNames).toContain(page3);
+
+    expect(
+      new TextDecoder().decode(zip.readFile(page1) as Buffer),
+    ).toBe(`synthetic image bytes ${"e1".repeat(32)}`);
+    expect(
+      new TextDecoder().decode(zip.readFile(page2) as Buffer),
+    ).toBe(`synthetic image bytes ${"e2".repeat(32)}`);
+    expect(
+      new TextDecoder().decode(zip.readFile(page3) as Buffer),
+    ).toBe(`synthetic image bytes ${"e3".repeat(32)}`);
+
+    // One spreadsheet row for the receipt, not three - image_filename still
+    // names page 1 only, and pages carries the true count.
+    const csv = zip.readAsText("receipts-2026.csv");
+    const lines = csv.trimEnd().split("\r\n");
+    const row = lines.find((line) => line.startsWith(receipt.id));
+    expect(row).toBeDefined();
+    expect(row).toContain(page1);
+    expect(row).not.toContain(page2);
+    expect(row).not.toContain(page3);
+    expect(row).toMatch(new RegExp(`${page1.replace(/\//g, "\\/").replace(/\./g, "\\.")},3,$`));
+
+    const json = JSON.parse(zip.readAsText("receipts-2026.json")) as Record<
+      string,
+      unknown
+    >[];
+    const jsonRow = json.find((r) => r.receipt_id === receipt.id);
+    expect(jsonRow).toMatchObject({ image_filename: page1, pages: "3" });
   });
 
   it("derives the period from the user's fiscal year settings", async () => {
@@ -277,7 +375,7 @@ describe("the export pipeline", () => {
     );
   });
 
-  it("records a loud failure when an image is missing from storage, naming the receipt that caused it", async () => {
+  it("records a loud failure when an image is missing from storage, naming the receipt and page that caused it", async () => {
     // Created via the API but its bytes never uploaded: generation must
     // fail and say why, not ship a zip with a broken click-through.
     //
@@ -304,31 +402,35 @@ describe("the export pipeline", () => {
 
     expect(job.status).toBe("failed");
     expect(job.downloadUrl).toBeNull();
-    // The row is findable...
+    // The row is findable, and now so is the page...
     expect(job.error).toContain(receiptId);
-    // ...and the remedy named is one this server can actually perform. There
-    // is no way to re-attach an image to an existing receipt: the PATCH
-    // schema has no `image` key and `/upload-url` mints a fresh key every
-    // call. So the message must not say "re-attach" - an earlier draft did,
-    // and it sent the person looking for a control that does not exist.
-    expect(job.error).not.toMatch(/re-attach/i);
-    // And it leads with the remedy that keeps the receipt. A message whose
-    // first instruction is "delete that receipt" takes the vendor, date,
-    // total and HST out of every future export - the loss this finding
-    // exists to avoid - so the keep-it path must come first.
-    const keepIt = job.error?.indexOf("If you still have the paper") ?? -1;
+    expect(job.error).toMatch(/page 1/);
+    // ...and it leads with the REPAIR (proposal #6, 2026-08-28:
+    // PUT /api/receipts/:id/images/:page can now replace just this page's
+    // bytes), which did not exist when this message was first written and
+    // is why "delete and recapture" used to be the only remedy at all.
+    expect(job.error).toMatch(/replace/i);
+    const replaceAt = job.error?.search(/replace/i) ?? -1;
     const deleteIt = job.error?.indexOf("If the paper is gone") ?? -1;
-    expect(keepIt).toBeGreaterThan(-1);
-    expect(deleteIt).toBeGreaterThan(keepIt);
-    // The destructive remedy is still named, with its cost attached.
+    expect(replaceAt).toBeGreaterThan(-1);
+    expect(deleteIt).toBeGreaterThan(replaceAt);
+    // Losing nothing is stated explicitly, and it is what makes replace the
+    // better option than the old delete-and-recapture path.
+    expect(job.error).toMatch(
+      /without losing the receipt's vendor, date, total or HST/,
+    );
+    // Deleting and recapturing is still named, second, as the fallback for
+    // someone who would rather start over or whose paper is gone - with its
+    // cost attached rather than erased.
+    expect(job.error).toMatch(/delete the receipt and capture it again/);
     expect(job.error).toMatch(/let\s+the export run without it/);
     // The storage layer's own text does not reach the export screen. Asserted
     // against the object key rather than the fake's wording: the key is what
     // the real client's failure could carry, and it is a user id plus a path.
     expect(job.error).not.toContain(userId);
     expect(job.error).not.toMatch(/\.jpg/);
-    // No receipt field beyond the id: this string is also logged, and the
-    // §10B invariant is that server logs carry no receipt contents.
+    // No receipt field beyond the id and page: this string is also logged,
+    // and the §10B invariant is that server logs carry no receipt contents.
     expect(job.error).not.toContain("2026-03-15");
     expect(job.error).not.toContain("Test Vendor");
   });

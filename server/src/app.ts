@@ -180,7 +180,13 @@ export function createApp(deps: AppDependencies): Hono {
       "*",
       cors({
         origin: (origin) => (webOrigins.includes(origin) ? origin : null),
-        allowMethods: ["GET", "POST", "PATCH", "DELETE"],
+        // Every method any route actually uses. PUT joined the list on
+        // 2026-08-28 with the first PUT route (replacing a page's image).
+        // A method missing here fails at the browser's *preflight*, so the
+        // request never reaches the server: the route then looks broken from
+        // the web client while testing perfectly under curl, which sends no
+        // preflight at all. That is exactly how this one was found.
+        allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
         allowHeaders: ["Authorization", "Content-Type"],
         maxAge: 600,
       }),

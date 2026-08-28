@@ -126,6 +126,21 @@ export const uploadUrlSchema = z.strictObject({
 });
 
 /**
+ * One image's storage location and integrity check, in the exact shape
+ * `POST /api/receipts/upload-url` issues. Every route that attaches bytes
+ * to a receipt validates this same shape: the create route's `image` key,
+ * `POST /api/receipts/:id/images` (add a page, proposal #6, 2026-08-28) and
+ * `PUT /api/receipts/:id/images/:page` (replace a page, same proposal).
+ * Defined once so the objectKey/sha256 regex cannot drift between them.
+ */
+export const receiptImageSchema = z.strictObject({
+  objectKey: z.string().min(1).max(500),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/, {
+    error: "must be a lowercase hex sha-256 digest",
+  }),
+});
+
+/**
  * What the on-device parser suggested, recorded verbatim for the §7.3
  * accuracy measurement. Absent and null both mean "the parser found
  * nothing" - the client sends what it has. Deliberately not strict about
@@ -177,12 +192,7 @@ export const createReceiptSchema = z
     ...retiredReceiptFields,
     // The image is uploaded to storage first (spec §6); creating the receipt
     // records where it landed and what it hashed to.
-    image: z.strictObject({
-      objectKey: z.string().min(1).max(500),
-      sha256: z.string().regex(/^[0-9a-f]{64}$/, {
-        error: "must be a lowercase hex sha-256 digest",
-      }),
-    }),
+    image: receiptImageSchema,
   })
   .superRefine((body, ctx) => {
     if (body.status !== "confirmed") {
@@ -240,16 +250,34 @@ export const listSortSchema = z.enum([
 ]);
 export const listOrderSchema = z.enum(["asc", "desc"]);
 
-export const listReceiptsQuerySchema = z.strictObject({
+/**
+ * The filter parameters GET /api/receipts and GET /api/receipts/summary
+ * (proposal #3, 2026-08-28) accept identically. Defined once, in one strict
+ * schema, so the two routes can never validate two different sets of query
+ * keys - `routes/receipts.ts`'s `buildReceiptFilterConditions` turns this
+ * same parsed shape into WHERE conditions for both, which is the other half
+ * of that guarantee: one filter implementation, not two that can disagree.
+ *
+ * Exact-match over the stored free text (`category`, `paymentMethod`),
+ * case-sensitive and unnormalized: these pair with GET /api/receipts/options,
+ * which serves the user's own values verbatim, so anything else would
+ * refuse to match what it offered.
+ */
+export const receiptFilterQuerySchema = z.strictObject({
   from: isoDateSchema.optional(),
   to: isoDateSchema.optional(),
   status: receiptStatusSchema.optional(),
-  // Exact-match over the stored free text, case-sensitive and unnormalized:
-  // these pair with GET /api/receipts/options, which serves the user's own
-  // values verbatim, so anything else would refuse to match what it offered.
   category: z.string().min(1).max(200).optional(),
   paymentMethod: z.string().min(1).max(100).optional(),
   q: z.string().min(1).max(200).optional(),
+});
+
+/**
+ * The list adds sorting and paging on top of the shared filter above -
+ * summary has neither: an aggregate has no pages and no order to render
+ * rows in.
+ */
+export const listReceiptsQuerySchema = receiptFilterQuerySchema.extend({
   sort: listSortSchema.optional(),
   order: listOrderSchema.optional(),
   // Backlog imports make lists large on day one; pages are mandatory, with
