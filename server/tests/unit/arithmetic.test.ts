@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  checkHstRatePlausibility,
   checkReceiptArithmetic,
   deriveMissingAmount,
 } from "../../src/domain/arithmetic.js";
@@ -265,5 +266,118 @@ describe("deriveMissingAmount", () => {
       totalCents: null,
     });
     expect(result).toEqual({ field: "totalCents", cents: -11300 });
+  });
+});
+
+/**
+ * Proposal #7's plausibility hint: catches a heuristic reading one half of a
+ * split-printed 13% HST (8% provincial + 5% federal, Ontario) as though it
+ * were the whole tax. Deliberately narrow - see the function's own doc
+ * comment for the false-positive reasoning this suite exists to pin down.
+ */
+describe("checkHstRatePlausibility", () => {
+  it("is not applicable without a subtotal", () => {
+    expect(
+      checkHstRatePlausibility({ subtotalCents: null, hstCents: cents(800) }),
+    ).toBe("not-applicable");
+  });
+
+  it("is not applicable without an HST amount", () => {
+    expect(
+      checkHstRatePlausibility({ subtotalCents: cents(10000), hstCents: null }),
+    ).toBe("not-applicable");
+  });
+
+  it("is not applicable with a zero subtotal - no rate to anchor", () => {
+    expect(
+      checkHstRatePlausibility({ subtotalCents: cents(0), hstCents: cents(0) }),
+    ).toBe("not-applicable");
+  });
+
+  it("is not applicable with a negative subtotal", () => {
+    expect(
+      checkHstRatePlausibility({
+        subtotalCents: cents(-10000),
+        hstCents: cents(-800),
+      }),
+    ).toBe("not-applicable");
+  });
+
+  it("does not flag a legitimate 5% GST-only receipt", () => {
+    // A lone GST row is a real tax (§7.3's own ranking treats it that way) -
+    // flagging near-5% would fire on every GST-only-province receipt.
+    expect(
+      checkHstRatePlausibility({ subtotalCents: cents(10000), hstCents: cents(500) }),
+    ).toBe("plausible");
+  });
+
+  it("does not flag a legitimate 13% Ontario receipt", () => {
+    expect(
+      checkHstRatePlausibility({
+        subtotalCents: cents(10000),
+        hstCents: cents(1300),
+      }),
+    ).toBe("plausible");
+  });
+
+  it("does not flag a legitimate 15% Atlantic-province receipt", () => {
+    expect(
+      checkHstRatePlausibility({
+        subtotalCents: cents(10000),
+        hstCents: cents(1500),
+      }),
+    ).toBe("plausible");
+  });
+
+  it("does not flag a genuinely exempt (0%) receipt", () => {
+    expect(
+      checkHstRatePlausibility({ subtotalCents: cents(10000), hstCents: cents(0) }),
+    ).toBe("plausible");
+  });
+
+  it("flags an 8% receipt as looking like half a split", () => {
+    expect(
+      checkHstRatePlausibility({ subtotalCents: cents(10000), hstCents: cents(800) }),
+    ).toBe("looks-like-half-split");
+  });
+
+  it("flags the exact lower boundary of the tolerance (7.75%)", () => {
+    expect(
+      checkHstRatePlausibility({ subtotalCents: cents(10000), hstCents: cents(775) }),
+    ).toBe("looks-like-half-split");
+  });
+
+  it("does not flag just below the lower boundary (7.74%)", () => {
+    expect(
+      checkHstRatePlausibility({ subtotalCents: cents(10000), hstCents: cents(774) }),
+    ).toBe("plausible");
+  });
+
+  it("flags the exact upper boundary of the tolerance (8.25%)", () => {
+    expect(
+      checkHstRatePlausibility({ subtotalCents: cents(10000), hstCents: cents(825) }),
+    ).toBe("looks-like-half-split");
+  });
+
+  it("does not flag just above the upper boundary (8.26%)", () => {
+    expect(
+      checkHstRatePlausibility({ subtotalCents: cents(10000), hstCents: cents(826) }),
+    ).toBe("plausible");
+  });
+
+  it("holds the same boundary at a different subtotal scale", () => {
+    // $1,000 subtotal - the boundary is a RATE, not a fixed cents offset.
+    expect(
+      checkHstRatePlausibility({
+        subtotalCents: cents(100000),
+        hstCents: cents(7750), // exactly 7.75%
+      }),
+    ).toBe("looks-like-half-split");
+    expect(
+      checkHstRatePlausibility({
+        subtotalCents: cents(100000),
+        hstCents: cents(7749), // just under 7.75%
+      }),
+    ).toBe("plausible");
   });
 });

@@ -361,6 +361,37 @@ export const listCursorSchema = z
   });
 
 /**
+ * GET /api/receipts/possible-duplicates - proposal #8 (2026-08-28): does the
+ * caller already have a live receipt on this date, for this total, from
+ * (roughly) this vendor? All three arrive as query parameters like every
+ * other GET filter in this file, so `totalCents` needs the same string-to-
+ * cents translation `cursorSortKeyFormats.total` above uses for a cursor's
+ * sort key - digits first so `Number()` cannot quietly accept "1e9", " 12"
+ * or "0x10", then piped through the same storable-cents schema every
+ * request BODY money field uses - rather than the JSON-number `centsSchema`
+ * itself, which a query string (no number type) cannot satisfy directly.
+ *
+ * `vendor` is optional, and its ABSENCE is a deliberate value read by the
+ * route as "compare against no vendor" (routes/receipts.ts's
+ * possible-duplicates handler decides a null vendor matches a null vendor,
+ * with the reasoning in that route's own comment), not as "ignore vendor
+ * entirely".
+ *
+ * `excludeId` lets a caller confirming an already-created pending receipt
+ * ask "does anything ELSE match" instead of matching itself.
+ */
+export const possibleDuplicatesQuerySchema = z.strictObject({
+  purchasedAt: isoDateSchema,
+  totalCents: z
+    .string()
+    .regex(/^-?\d+$/, { error: "must be an integer number of cents" })
+    .transform(Number)
+    .pipe(centsSchema),
+  vendor: vendorText.optional(),
+  excludeId: z.uuid().optional(),
+});
+
+/**
  * Two ways to name an export period (spec §8, §12): a fiscal year - the
  * server derives the dates from the user's configured year end at request
  * time - or an explicit date range (the seam a future quarterly picker

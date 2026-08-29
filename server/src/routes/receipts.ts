@@ -10,6 +10,7 @@ import {
   isNotNull,
   isNull,
   lte,
+  ne,
   or,
   sql,
   type SQL,
@@ -30,6 +31,7 @@ import {
   listReceiptsQuerySchema,
   listSortSchema,
   ocrSuggestionsSchema,
+  possibleDuplicatesQuerySchema,
   receiptFilterQuerySchema,
   receiptImageSchema,
   updateReceiptSchema,
@@ -394,6 +396,80 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     });
   });
 
+  /**
+   * GET /api/receipts/possible-duplicates - proposal #8 (2026-08-28), built
+   * as a QUERY, never a blocker. §5's `(user_id, sha256)` partial unique
+   * index only catches a byte-identical re-upload; it can never catch a
+   * re-photographed piece of paper, because two photographs of one receipt
+   * share no pixels. Same date + same total + (roughly) the same vendor is
+   * the answer to that - the client calls this at confirm time and WARNS;
+   * nothing here refuses a save, ever. A false positive is real and cheap to
+   * dismiss (two identical coffees on one day is a normal Tuesday), and
+   * blocking on it would be worse than the duplicate it is meant to catch.
+   *
+   * **Vendor comparison is normalized here, deliberately unlike every other
+   * filter in this file.** `buildReceiptFilterConditions`'s category and
+   * paymentMethod filters below are exact-match on purpose, because they
+   * pair with /options, which hands back the person's OWN stored strings
+   * verbatim - normalizing there would refuse to match a value this server
+   * just offered. A duplicate warning is a different job: the case this
+   * route exists to catch is two scans of the SAME paper landing as
+   * "Tim Hortons" and "TIM HORTONS", which an exact match would treat as
+   * unrelated. So vendor is compared case-and-whitespace-insensitively
+   * (trimmed, folded) inside the SQL predicate below, and ONLY for this
+   * comparison - what any route stores or returns is never normalized; the
+   * response below still carries every matched receipt's vendor exactly as
+   * stored (`receiptResponse`).
+   *
+   * **A null vendor matches a null vendor - decided.** `vendor` is optional
+   * because the confirm screen's vendor field can itself be blank (an
+   * illegible receipt), and that is exactly the shape a re-scanned
+   * illegible receipt takes twice: two live receipts, same date, same
+   * total, neither one naming a vendor. Omitting the parameter is read as
+   * "compare against no vendor", matching only the caller's OWN receipts
+   * that also have none - not as "ignore vendor entirely", which would make
+   * this route warn on every same-date-same-total receipt regardless of
+   * vendor, a much noisier signal than the proposal asks for.
+   *
+   * Scoped to the caller and excludes soft-deleted rows via the same
+   * `visibleTo` every other read uses (spec §3 constraint 3, tested
+   * explicitly in the isolation test below). `excludeId` lets a caller
+   * re-checking an already-created pending receipt ask "does anything ELSE
+   * match" instead of matching itself.
+   *
+   * Registered ABOVE /:id, the same shadowing reason as /options and
+   * /summary just above.
+   */
+  router.get("/possible-duplicates", async (c) => {
+    const query = parseOrThrow(possibleDuplicatesQuerySchema, c.req.query());
+    const userId = c.get("userId");
+
+    const conditions = [
+      visibleTo(userId),
+      eq(receipts.purchasedAt, query.purchasedAt),
+      eq(receipts.totalCents, query.totalCents),
+      query.vendor !== undefined
+        ? sql`lower(trim(${receipts.vendor})) = lower(trim(${query.vendor}))`
+        : isNull(receipts.vendor),
+    ];
+    if (query.excludeId !== undefined) {
+      conditions.push(ne(receipts.id, query.excludeId));
+    }
+
+    const rows = await deps.db
+      .select()
+      .from(receipts)
+      .where(and(...conditions))
+      .orderBy(desc(receipts.createdAt))
+      // A defensive cap, not a real pagination need: three exact-matched
+      // fields (date, total, and vendor unless omitted) make a large result
+      // pathological rather than expected - the same reasoning
+      // MAX_REUSABLE_OPTIONS states below for a different query.
+      .limit(MAX_POSSIBLE_DUPLICATES);
+
+    return c.json({ receipts: rows.map(receiptResponse) });
+  });
+
   /** GET /api/receipts/:id - one receipt plus presigned image downloads. */
   router.get("/:id", async (c) => {
     const id = uuidParamOrNotFound(c.req.param("id"));
@@ -644,6 +720,147 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     }
 
     return c.json(await imageResponse(deps.storage, userId, created), 200);
+  });
+
+  /**
+   * POST /api/receipts/:id/restore - undo a soft delete (proposal #9,
+   * 2026-08-28: swipe-to-delete is landing on iOS, and a delete that is only
+   * "recoverable in principle" - the row is still there, but nothing exposes
+   * getting it back - makes a swipe a one-gesture accident against a tax
+   * record). Clears `deleted_at` on the receipt AND on the image rows
+   * tombstoned WITH it, scoped to the caller, in one transaction.
+   *
+   * **A POST action route, not `PATCH {deletedAt: null}` or a DELETE-style
+   * body.** Restoring is not a field edit: it can legitimately FAIL (the
+   * trap below), and it touches a second table in the same transaction -
+   * exactly the two reasons add-a-page and replace-a-page above are their
+   * own routes instead of folding into PATCH.
+   *
+   * **Not time-limited, decided.** §10B's retention window is six years,
+   * and this is not `DELETE /api/me`'s hard, irreversible destruction - a
+   * soft-deleted receipt is a retained record, kept for exactly the same
+   * reason an un-deleted one is, so there is no principled cutoff before
+   * which a restore should start refusing. (Nothing sweeps a soft-deleted
+   * row today either; if that ever changes, this route changes with it.)
+   *
+   * **Only images tombstoned by THIS delete come back - never one
+   * tombstoned earlier by a page replace.** A receipt's images can be
+   * tombstoned two different ways: `PUT .../images/:page` retires a
+   * superseded page (spec §5) at whatever moment that replace happened, and
+   * `DELETE /:id` retires every LIVE image at the moment of deletion,
+   * stamping the receipt and those images with the exact same `deleted_at`
+   * value in one transaction (see the DELETE handler above - `deletedAt` is
+   * one `new Date()` shared by both updates). That shared timestamp is what
+   * this route matches on: only image rows whose `deleted_at` equals the
+   * receipt's OWN `deleted_at` are un-tombstoned. A row retired earlier by a
+   * replace keeps an earlier timestamp and is left alone, correctly still
+   * retired as the superseded version it is - restoring the receipt must
+   * not resurrect a page image the person had already replaced before ever
+   * deleting the receipt.
+   *
+   * ⚠ **THE TRAP, and handling it is most of this route.** Both of
+   * `receipt_images`' unique indexes are partial, `WHERE deleted_at IS
+   * NULL` (spec §5) - which is what lets a slot be reused after a delete.
+   * So: delete a receipt, re-capture the identical file (now allowed - the
+   * slot freed), then try to restore the FIRST receipt - its tombstoned
+   * image's sha256 now collides with the second receipt's LIVE row.
+   * Un-tombstoning it would violate the very constraint that made the
+   * recapture possible. This can only be discovered at the UPDATE, so it is
+   * caught there and turned into a clean, named 409 rather than a raw
+   * constraint violation reaching the caller - in the same spirit as §8's
+   * missing-image export failure and the create/add-page/replace routes'
+   * own `duplicate_image` 409. It happens inside the SAME transaction as the
+   * receipt's own un-delete, so a failure here leaves the receipt DELETED,
+   * never restored without its images.
+   *
+   * Scoping is deliberately INDISTINGUISHABLE across three cases - an id
+   * that does not exist, one that belongs to someone else, and one that
+   * exists and is the caller's own but is not currently deleted - all three
+   * are the same 404. A 400 that said "this receipt isn't deleted" would
+   * confirm to a caller that an id exists and belongs to them: the exact
+   * cross-user leak `notFoundError()` exists to prevent everywhere else in
+   * this file (spec §3 constraint 3, the detail route's own rule).
+   */
+  router.post("/:id/restore", async (c) => {
+    const id = uuidParamOrNotFound(c.req.param("id"));
+    const userId = c.get("userId");
+
+    let restored: typeof receipts.$inferSelect;
+    try {
+      restored = await deps.db.transaction(async (tx) => {
+        const rows = await tx
+          .select()
+          .from(receipts)
+          .where(
+            and(
+              eq(receipts.id, id),
+              eq(receipts.userId, userId),
+              isNotNull(receipts.deletedAt),
+            ),
+          )
+          .for("update");
+        const existing = rows[0];
+        if (existing === undefined) {
+          // Nonexistent, someone else's, or not currently deleted - one
+          // answer for all three (see the doc comment above).
+          throw notFoundError();
+        }
+        if (existing.deletedAt === null) {
+          // Guaranteed non-null by isNotNull() above; narrows the type for
+          // TS and, if it is ever somehow wrong, fails loudly instead of
+          // matching every other receipt's null deletedAt below.
+          throw new Error("Receipt selected as deleted has a null deletedAt");
+        }
+        const tombstonedAt = existing.deletedAt;
+
+        const updated = await tx
+          .update(receipts)
+          .set({ deletedAt: null })
+          .where(and(eq(receipts.id, id), eq(receipts.userId, userId)))
+          .returning();
+        const receipt = updated[0];
+        if (receipt === undefined) {
+          // Selected FOR UPDATE moments ago in this same transaction; its
+          // absence means something is genuinely broken.
+          throw new Error("Receipt restore update returned no row");
+        }
+
+        const restoredImages = await tx
+          .update(receiptImages)
+          .set({ deletedAt: null })
+          .where(
+            and(
+              eq(receiptImages.receiptId, id),
+              eq(receiptImages.userId, userId),
+              eq(receiptImages.deletedAt, tombstonedAt),
+            ),
+          )
+          .returning({ id: receiptImages.id });
+        if (restoredImages.length === 0) {
+          // Every receipt is created with a page-1 image (the create route
+          // requires one), and DELETE /:id tombstones every image live at
+          // the moment of deletion with the receipt's own deletedAt - so
+          // finding none tombstoned alongside this receipt means that
+          // invariant has already broken, not that this receipt
+          // legitimately has zero images to bring back.
+          throw new Error(
+            `Restoring receipt ${id} found no images tombstoned alongside it`,
+          );
+        }
+
+        return receipt;
+      });
+    } catch (error) {
+      if (
+        isUniqueViolation(error, "receipt_images_user_id_sha256_uq") ||
+        isUniqueViolation(error, "receipt_images_receipt_id_page_uq")
+      ) {
+        throw restoreConflictError();
+      }
+      throw error;
+    }
+
+    return c.json(receiptResponse(restored));
   });
 
   /**
@@ -907,6 +1124,28 @@ function duplicateImageError(): ApiError {
 }
 
 /**
+ * 409 for the trap POST /:id/restore's own doc comment names: restoring
+ * would un-tombstone an image whose sha256 (or, defensively, page number -
+ * see that route's comment on why both indexes are checked) now collides
+ * with a DIFFERENT live image, because the same bytes were re-captured -
+ * or the same page re-added on a new receipt - after this receipt was
+ * deleted and before it was restored. Named, not raw: the person is told
+ * what happened and what they can do about it, the same treatment
+ * `duplicateImageError` above gives a live duplicate and the spirit of
+ * §8's missing-image export failure.
+ */
+function restoreConflictError(): ApiError {
+  return new ApiError(
+    409,
+    "restore_conflict",
+    "This receipt can't be restored: one of its images was re-captured " +
+      "onto a different receipt after this one was deleted, so restoring " +
+      "it would collide with that receipt's live image. Delete or replace " +
+      "the other receipt's image first, or leave this receipt deleted.",
+  );
+}
+
+/**
  * The API shape of a receipt image row: what add-a-page and replace both
  * return. Re-checked on the way out for the same reason the detail route's
  * `images` projection is (see that route's comment) - this is a place a
@@ -955,6 +1194,9 @@ function pageParamOrBadRequest(param: string): number {
 const DEFAULT_PAGE_SIZE = 50;
 const DEFAULT_SORT: ListSort = "purchasedAt";
 const DEFAULT_ORDER: ListOrder = "desc";
+
+/** How many matches GET /possible-duplicates returns - see that route's comment. */
+const MAX_POSSIBLE_DUPLICATES = 20;
 
 type ListSort = z.infer<typeof listSortSchema>;
 type ListOrder = z.infer<typeof listOrderSchema>;
