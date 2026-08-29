@@ -561,6 +561,30 @@ button.link.status-pending:hover, button.link.status-confirmed:hover { text-deco
 }
 .field-grid p.warning.derive-note button.link:hover:not(:disabled) { color: var(--ink); }
 
+/* Proposal #8's near-duplicate warning (ReceiptForm.tsx's
+   `PossibleDuplicatesNote`): the same `.warning` amber band as every
+   other inline note on this form (a `div` here, not a `p`, because it
+   holds a list rather than one line), each match on its own row with its
+   "Open" link tinted to match, same reasoning as the derive-note button
+   just above. */
+.field-grid .duplicate-warning p { margin: 0; }
+.field-grid .duplicate-warning ul {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.field-grid .duplicate-warning li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8em;
+}
+.field-grid .duplicate-warning button.link { color: var(--warning-ink); flex-shrink: 0; }
+.field-grid .duplicate-warning button.link:hover:not(:disabled) { color: var(--ink); }
+
 .detail-actions { margin-top: 1.1rem; display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
 .delete-confirm {
   display: inline-flex;

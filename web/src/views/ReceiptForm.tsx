@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import type { KeptApi } from "../api.js";
+import { duplicateLookupParams, lookupPossibleDuplicates } from "../duplicates.js";
 import { logEvent } from "../events.js";
 import {
   MAX_STORABLE_CENTS,
@@ -493,8 +495,13 @@ export function vendorDefaultFill(
  * vendor default. `suggestedFields` below still reads only the
  * server-sourced half of this set; `ReceiptFieldsForm`'s `amber()` helper
  * is what unions it with the client-sourced half (`clientApplied` state).
+ *
+ * Exported so a caller (ReceiptDetail.tsx, ConfirmQueue.tsx) can type the
+ * accumulator it hands `summarizeFieldEdits`/`logFieldEditTelemetry` below
+ * for the client-sourced half - see `onSuggestionApplied` on
+ * `ReceiptFieldsForm`.
  */
-type SuggestibleField =
+export type SuggestibleField =
   | "vendor"
   | "purchasedAt"
   | "subtotal"
@@ -587,6 +594,107 @@ export function hstDisagreementNote(
 }
 
 /**
+ * Proposal #7 (docs/proposals/2026-08-28-ux-enhancements.md #7, approved):
+ * a live mirror of the server's `checkHstRatePlausibility`
+ * (server/src/domain/arithmetic.ts) - read that function's doc comment
+ * first for the full false-positive reasoning behind the narrow scope;
+ * this restates only enough to keep the two functions in step rather than
+ * re-deriving the reasoning here.
+ *
+ * Flags ONLY an effective rate within ±0.25 percentage points of 8% - the
+ * Ontario PROVINCIAL half of a 13% split standing alone, which has no
+ * legitimate reading as a Canadian federal-program tax figure the way 5%
+ * does. Deliberately does NOT widen to "anything that isn't 13%": 5% is a
+ * real standalone rate (GST-only provinces, and nothing in this system
+ * knows the province), and a grocery basket mixing taxable and zero-rated
+ * items legitimately runs well under 13% - groceries being most receipts,
+ * flagging broadly would make this noise on exactly what people capture
+ * most. The residual false positive is stated, not hidden, by the server's
+ * own comment: a genuinely correct 13% receipt whose basket is ~38%
+ * zero-rated reconciles near 8% too - which is exactly why this is an
+ * advisory amber prompt-to-look, never a block or an auto-correction.
+ *
+ * Integer cross-multiplication, exactly like the server - never a float
+ * division - so the band edge does not move with rounding. That is not
+ * just a principle here: at the server's own $100.00/$7.75 boundary
+ * (exactly 7.75%, the lower edge, which SHOULD flag), a naive
+ * `Math.abs(hst/subtotal - 0.08) <= 0.0025` computes a difference of
+ * 0.0025000000000000022 - a hair over the tolerance - and wrongly excludes
+ * it. The test suite pins this exact case.
+ */
+export type HstRatePlausibility =
+  | "not-applicable"
+  | "plausible"
+  | "looks-like-half-split";
+
+/** The provincial half of a 13%-split HST (8% + 5% federal = 13%), in basis points. */
+const HALF_SPLIT_RATE_BPS = 800;
+/** ±0.25 percentage points - mirrors the server's own tolerance exactly. */
+const HALF_SPLIT_TOLERANCE_BPS = 25;
+
+export function checkHstRatePlausibility(input: {
+  subtotalCents: number | null;
+  hstCents: number | null;
+}): HstRatePlausibility {
+  // No subtotal, no HST, or a subtotal that cannot anchor a rate (zero or
+  // a refund's negative) - there is no ratio to evaluate, the server
+  // function's own first check.
+  if (
+    input.subtotalCents === null ||
+    input.hstCents === null ||
+    input.subtotalCents <= 0
+  ) {
+    return "not-applicable";
+  }
+  // hst/subtotal within [target-tol, target+tol]/10000
+  // <=> hst*10000 within [target-tol, target+tol] * subtotal
+  const scaledHst = input.hstCents * 10_000;
+  const lowerBound =
+    (HALF_SPLIT_RATE_BPS - HALF_SPLIT_TOLERANCE_BPS) * input.subtotalCents;
+  const upperBound =
+    (HALF_SPLIT_RATE_BPS + HALF_SPLIT_TOLERANCE_BPS) * input.subtotalCents;
+  return scaledHst >= lowerBound && scaledHst <= upperBound
+    ? "looks-like-half-split"
+    : "plausible";
+}
+
+/**
+ * The note's own gate: `suggestionDisagreement`'s exact rule - pending
+ * only, untouched, §10A.1's "touching a field clears the tint and the note
+ * together" - fed a live-computed plausibility flag instead of a
+ * server-suggestion disagreement flag. This is the shared helper both
+ * `dateDisagreementNote` and `hstDisagreementNote` above already use,
+ * reused here rather than a third copy of the same gating logic. "hst" is
+ * the field this note is about, the same choice `hstDisagreementNote`
+ * makes for the same reason (HST is the input tax credit a half-split
+ * corrupts) - and pending-only matches the proposal's own framing of this
+ * as "free signal in the same family as the date-disagreement flag": a
+ * sanity check on an unconfirmed OCR read, not a running critique of a
+ * value a human has already confirmed.
+ *
+ * A mid-keystroke unparseable subtotal or HST box silences the check
+ * rather than guessing, the same rule `arithmeticMismatch` follows above.
+ */
+export function hstRateHintNote(
+  receipt: Receipt,
+  draft: ReceiptDraft,
+  touched: ReadonlySet<keyof ReceiptDraft>,
+): boolean {
+  const subtotal = tryParseMoney(draft.subtotal);
+  const hst = tryParseMoney(draft.hst);
+  const plausibility =
+    subtotal === INVALID_MONEY || hst === INVALID_MONEY
+      ? "not-applicable"
+      : checkHstRatePlausibility({ subtotalCents: subtotal, hstCents: hst });
+  return suggestionDisagreement(
+    receipt,
+    touched,
+    "hst",
+    plausibility === "looks-like-half-split",
+  );
+}
+
+/**
  * The two save-time telemetry summaries POST /api/events wants (2026-08-28,
  * events.ts) - "a user editing the total amount repeatedly signals the
  * total-extraction path is unreliable," the owner's own framing for why this
@@ -600,10 +708,24 @@ export function hstDisagreementNote(
  * of the telemetry feature genuinely worth a test that needs no DOM and no
  * React render, matching `arithmeticMismatch`'s own reasoning above.
  *
- * `suggestionOutcomes` reuses `suggestedFields` - the exact set already
- * driving the amber tint - and calls a field "accepted" when it was never
- * edited and "overridden" when it was, at least once. Not a value
- * comparison: re-typing the exact suggested value still counts as an
+ * `suggestionOutcomes` unions `suggestedFields` - the server's OCR merge,
+ * the exact set already driving the amber tint's server-sourced half - with
+ * `clientAppliedFields`, the client-sourced half (a derived-amount fill,
+ * proposal #1, or a vendor default, proposal #2 - `ReceiptFieldsForm`'s
+ * `onSuggestionApplied` callback, accumulated by the caller exactly like
+ * `edits` is). This is the fix for the asymmetry the owner ruled on
+ * 2026-08-28: those two sources used to fire `suggestion_accepted` the
+ * instant the fill was applied, which could never emit `overridden` for a
+ * fill someone then corrected - structurally always-accepted on this
+ * client while iOS's save-time snapshot scored the same fields honestly.
+ * Folding them into this one save-time mechanism, the one iOS has always
+ * used, is the whole fix: both clients now decide accepted/overridden the
+ * same way, for every suggestion source, so `npm run action-report`'s
+ * override rate means the same thing on both.
+ *
+ * A field "accepted" when it was never edited after carrying a suggestion
+ * and "overridden" when it was, at least once. Not a value comparison:
+ * re-typing the exact suggested (or filled) value still counts as an
  * override, the same "touching clears it permanently" rule the amber tint
  * itself follows (§10A.1), rather than a second, looser definition of
  * "changed" that could disagree with what the person saw on screen.
@@ -611,6 +733,7 @@ export function hstDisagreementNote(
 export function summarizeFieldEdits(
   receipt: Receipt,
   edits: readonly (keyof ReceiptDraft)[],
+  clientAppliedFields: ReadonlySet<SuggestibleField> = new Set(),
 ): {
   fieldEditCounts: { field: keyof ReceiptDraft; count: number }[];
   suggestionOutcomes: { field: SuggestibleField; accepted: boolean }[];
@@ -620,9 +743,10 @@ export function summarizeFieldEdits(
     counts.set(field, (counts.get(field) ?? 0) + 1);
   }
   const edited = new Set(edits);
+  const suggested = new Set([...suggestedFields(receipt), ...clientAppliedFields]);
   return {
     fieldEditCounts: [...counts].map(([field, count]) => ({ field, count })),
-    suggestionOutcomes: [...suggestedFields(receipt)].map((field) => ({
+    suggestionOutcomes: [...suggested].map((field) => ({
       field,
       accepted: !edited.has(field),
     })),
@@ -641,8 +765,13 @@ export function summarizeFieldEdits(
 export function logFieldEditTelemetry(
   receipt: Receipt,
   edits: readonly (keyof ReceiptDraft)[],
+  clientAppliedFields?: ReadonlySet<SuggestibleField>,
 ): void {
-  const { fieldEditCounts, suggestionOutcomes } = summarizeFieldEdits(receipt, edits);
+  const { fieldEditCounts, suggestionOutcomes } = summarizeFieldEdits(
+    receipt,
+    edits,
+    clientAppliedFields,
+  );
   for (const { field, count } of fieldEditCounts) {
     logEvent({ action: "field_edited", field, count, receiptId: receipt.id });
   }
@@ -655,13 +784,25 @@ export function logFieldEditTelemetry(
   }
 }
 
+/**
+ * Proposal #8's debounce: comfortably longer than a keystroke gap, short
+ * enough that the warning still feels like it belongs to what was just
+ * typed rather than an unrelated later event. Applies to date, vendor and
+ * total together - one timer, not three - so typing a vendor right after
+ * a date does not fire two overlapping lookups.
+ */
+const DUPLICATE_LOOKUP_DEBOUNCE_MS = 500;
+
 export function ReceiptFieldsForm({
   receipt,
   draft,
   setDraft,
   options,
+  api,
+  onOpenReceipt,
   disabled,
   onFieldEdited,
+  onSuggestionApplied,
 }: {
   /** For its id (to reset "touched" on a new receipt), status and
    * suggestions - which fields start amber reads off this, not the draft. */
@@ -670,6 +811,16 @@ export function ReceiptFieldsForm({
   setDraft: (update: (draft: ReceiptDraft) => ReceiptDraft) => void;
   /** Past values offered under Vendor, Category and Payment method. */
   options: ReceiptOptions;
+  /** Proposal #8's near-duplicate lookup - GET /api/receipts/possible-duplicates. */
+  api: KeptApi;
+  /**
+   * Opens another receipt for comparison (proposal #8's "offer a way to
+   * open the matching receipt"). Both call sites (ConfirmQueue.tsx,
+   * ReceiptDetail.tsx) already have a way to switch the app's view to a
+   * receipt's detail screen - this is that, handed down rather than this
+   * component owning navigation it has no other reason to know about.
+   */
+  onOpenReceipt: (id: string) => void;
   disabled?: boolean;
   /**
    * Fired once per keystroke, before `setDraft` - the raw signal
@@ -680,6 +831,19 @@ export function ReceiptFieldsForm({
    * lets the screen that owns Save decide what to do with the sequence.
    */
   onFieldEdited?: (field: keyof ReceiptDraft) => void;
+  /**
+   * Fired once, the moment a field first receives a CLIENT-applied
+   * suggestion - a derived-amount fill (proposal #1) or a vendor default
+   * (proposal #2) - never on every render, and never on a re-fill of a
+   * field this already fired for (mirrors `clientApplied` state's own
+   * "once added, stays added" rule below). The caller (ReceiptDetail.tsx,
+   * ConfirmQueue.tsx) accumulates these into the same kind of ref
+   * `onFieldEdited` feeds, and hands the set to `logFieldEditTelemetry` at
+   * save - this is the whole fix for the accepted/overridden asymmetry
+   * the owner ruled on: applying a fill is no longer itself an "accepted"
+   * event, only save-time evidence of what carried a suggestion.
+   */
+  onSuggestionApplied?: (field: SuggestibleField) => void;
 }) {
   // §10A.1: "touching a field clears its tint permanently." Tracked here,
   // not derived from draft-vs-suggestion equality, because a permanent
@@ -702,10 +866,53 @@ export function ReceiptFieldsForm({
   const [clientApplied, setClientApplied] = useState<ReadonlySet<SuggestibleField>>(
     () => new Set(),
   );
+  // Proposal #8's matches, if any - reset alongside touched/clientApplied
+  // whenever a different receipt loads, same reasoning as those two: a
+  // stale match from the PREVIOUS receipt must not flash on screen while
+  // the new receipt's own (debounced) lookup is still in flight.
+  const [duplicates, setDuplicates] = useState<readonly Receipt[]>([]);
   useEffect(() => {
     setTouched(new Set());
     setClientApplied(new Set());
+    setDuplicates([]);
   }, [receipt.id]);
+
+  // Proposal #8 (2026-08-28, approved): warn when a live receipt already
+  // exists with this date, vendor and total - a re-photographed piece of
+  // paper shares no pixels with its first scan, so the (user_id, sha256)
+  // constraint can never catch it (§5, §11's deferral, now built).
+  // Debounced so it does not fire on every keystroke; `duplicateLookupParams`
+  // (duplicates.ts) is what decides there is enough to look up at all, and
+  // always carries `excludeId: receipt.id` - both screens that render this
+  // form only ever open a receipt that already exists server-side, so
+  // omitting it would always match the receipt against itself, the
+  // obvious bug named in the brief this was built from. `cancelled` guards
+  // against a stale response landing after a later keystroke has already
+  // started a newer lookup. `lookupPossibleDuplicates` itself never
+  // throws - a failed lookup is silent, an assist rather than a gate - so
+  // there is nothing to catch here.
+  useEffect(() => {
+    const params = duplicateLookupParams(
+      { purchasedAt: draft.purchasedAt, total: draft.total, vendor: draft.vendor },
+      receipt.id,
+    );
+    if (params === null) {
+      setDuplicates([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void lookupPossibleDuplicates(api, params).then((found) => {
+        if (!cancelled) {
+          setDuplicates(found);
+        }
+      });
+    }, DUPLICATE_LOOKUP_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [api, receipt.id, draft.purchasedAt, draft.total, draft.vendor]);
 
   const suggested = suggestedFields(receipt);
   const amber = (field: SuggestibleField): string | undefined =>
@@ -728,6 +935,7 @@ export function ReceiptFieldsForm({
   // confirm queue and a pending receipt opened straight from the table.
   const dateDisagreement = dateDisagreementNote(receipt, touched);
   const hstDisagreement = hstDisagreementNote(receipt, touched);
+  const hstRateHint = hstRateHintNote(receipt, draft, touched);
 
   // Proposal #1: at most one of these is ever non-null for a given draft -
   // `deriveMissingAmount` requires exactly one field blank,
@@ -742,12 +950,21 @@ export function ReceiptFieldsForm({
    * applying the suggestion is not the person editing it: the whole point
    * (proposal #1's own risk mitigation) is that the filled value lands
    * amber and STAYS amber until a person actually looks at and touches it,
-   * never silently on save. */
+   * never silently on save.
+   *
+   * Does NOT log `suggestion_accepted` here (2026-08-28, the owner's ruling -
+   * see `summarizeFieldEdits`'s doc comment above): applying a fill is an
+   * offer taken, not a save-time outcome - the person can still go on to
+   * edit the field before saving, which must score as `overridden`, and
+   * firing `accepted` at apply-time would make that impossible. Reports
+   * through `onSuggestionApplied` instead, so the caller can fold this
+   * field into the same save-time accepted/overridden mechanism the
+   * server's own suggestions already use. */
   function applyDerivedAmount(offer: DerivedAmount) {
     const key = offer.field;
     setDraft((d) => ({ ...d, [key]: formatCents(offer.cents) }));
     setClientApplied((current) => (current.has(key) ? current : new Set(current).add(key)));
-    logEvent({ action: "suggestion_accepted", field: key, receiptId: receipt.id });
+    onSuggestionApplied?.(key);
   }
 
   // Proposal #2: live, not just on load - a vendor typed or corrected mid-
@@ -755,6 +972,11 @@ export function ReceiptFieldsForm({
   // one that arrived already matching from a suggestion. `vendorDefaultFill`
   // is what actually enforces "empty and untouched only"; this effect is
   // just wiring its result to `setDraft` and to the amber/telemetry state.
+  //
+  // Does NOT log `suggestion_accepted` here (2026-08-28, same ruling as
+  // `applyDerivedAmount` above) - `onSuggestionApplied` reports the field
+  // instead, so the caller scores it at save time alongside every other
+  // suggestion source rather than the instant the default lands.
   useEffect(() => {
     const fill = vendorDefaultFill(draft, touched, options.vendorDefaults);
     if (fill.category === null && fill.paymentMethod === null) {
@@ -772,16 +994,12 @@ export function ReceiptFieldsForm({
       return next;
     });
     if (fill.category !== null) {
-      logEvent({ action: "suggestion_accepted", field: "category", receiptId: receipt.id });
+      onSuggestionApplied?.("category");
     }
     if (fill.paymentMethod !== null) {
-      logEvent({
-        action: "suggestion_accepted",
-        field: "paymentMethod",
-        receiptId: receipt.id,
-      });
+      onSuggestionApplied?.("paymentMethod");
     }
-  }, [draft, touched, options.vendorDefaults, receipt.id, setDraft]);
+  }, [draft, touched, options.vendorDefaults, receipt.id, setDraft, onSuggestionApplied]);
 
   return (
     <div className="field-grid">
@@ -808,6 +1026,11 @@ export function ReceiptFieldsForm({
         offer={derived?.field === "total" ? derived : null}
         onApply={applyDerivedAmount}
       />
+      {/* Proposal #8: date + total (and vendor once typed) are what the
+          lookup keys on, so this sits beside Total rather than any one of
+          the three fields - "worth a look, not a blocker," the same
+          register as the arithmetic warning above it. */}
+      <PossibleDuplicatesNote duplicates={duplicates} onOpenReceipt={onOpenReceipt} />
       <label className={amber("purchasedAt")}>
         Purchase date
         <input
@@ -849,6 +1072,13 @@ export function ReceiptFieldsForm({
         <p className="warning">
           The two parsers read different HST amounts from this receipt -
           check the paper before confirming.
+        </p>
+      )}
+      {hstRateHint && (
+        <p className="warning">
+          HST is close to 8% of subtotal - the size of Ontario&apos;s
+          PROVINCIAL half alone. If the receipt shows a 5%+8% split, check
+          for a combined 13% before confirming.
         </p>
       )}
       <AmountDeriveNote
@@ -973,5 +1203,54 @@ function AmountDeriveNote({
         Fill
       </button>
     </p>
+  );
+}
+
+/**
+ * Proposal #8's warning: states exactly what matched - date, vendor,
+ * total, nothing the person did not already put in the box - with a way
+ * to open each match and compare, and deliberately no way to dismiss or
+ * refuse the save from here. There is no ignore/dismiss control: editing
+ * any of the three fields the lookup keys on re-runs it and naturally
+ * clears a match that no longer applies (the same "live, not a permanent
+ * flag" register as `arithmeticMismatch`'s own warning above), and adding
+ * a separate dismiss would be a second way to make this go away that says
+ * nothing about whether the person actually looked.
+ */
+function PossibleDuplicatesNote({
+  duplicates,
+  onOpenReceipt,
+}: {
+  duplicates: readonly Receipt[];
+  onOpenReceipt: (id: string) => void;
+}) {
+  if (duplicates.length === 0) {
+    return null;
+  }
+  return (
+    <div className="warning duplicate-warning">
+      <p>
+        {duplicates.length === 1
+          ? "A receipt with this date, vendor and total already exists - is this the same one?"
+          : `${duplicates.length} receipts with this date, vendor and total already exist - is this the same one?`}
+      </p>
+      <ul>
+        {duplicates.map((match) => (
+          <li key={match.id}>
+            <span>
+              {match.purchasedAt} · {match.vendor ?? "no vendor"} ·{" "}
+              {formatCents(match.totalCents)}
+            </span>
+            <button
+              type="button"
+              className="link"
+              onClick={() => onOpenReceipt(match.id)}
+            >
+              Open
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

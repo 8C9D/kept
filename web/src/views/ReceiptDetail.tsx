@@ -21,6 +21,7 @@ import {
   logFieldEditTelemetry,
   patchFromDraft,
   type ReceiptDraft,
+  type SuggestibleField,
 } from "./ReceiptForm.js";
 
 /**
@@ -37,12 +38,16 @@ export function ReceiptDetailView({
   options,
   onBack,
   onChanged,
+  onOpenReceipt,
 }: {
   api: KeptApi;
   receiptId: string;
   options: ReceiptOptionsHandle;
   onBack: () => void;
   onChanged: () => void;
+  /** Proposal #8: "open the matching receipt" - switches this same screen
+   * to a different receipt's id, App.tsx owns the view state this drives. */
+  onOpenReceipt: (id: string) => void;
 }) {
   const [receipt, setReceipt] = useState<ReceiptDetail | null>(null);
   const [draft, setDraft] = useState<ReceiptDraft | null>(null);
@@ -54,6 +59,14 @@ export function ReceiptDetailView({
   // turns it into save-time counts and suggestion outcomes. A ref, not
   // state: nothing here should ever trigger a re-render on its own.
   const editsRef = useRef<(keyof ReceiptDraft)[]>([]);
+  // Every field `ReceiptFieldsForm.onSuggestionApplied` has reported since
+  // this receipt loaded - a derived-amount fill or a vendor default that
+  // landed on this draft. Handed to `logFieldEditTelemetry` alongside
+  // `editsRef` at save, so those two client-sourced suggestion sources get
+  // scored accepted/overridden by the same save-time mechanism the
+  // server's own OCR suggestions use (2026-08-28 ruling - see
+  // ReceiptForm.tsx's `summarizeFieldEdits`).
+  const clientAppliedRef = useRef<Set<SuggestibleField>>(new Set());
   // Which image write is in flight, if any - "add" for the add-a-page
   // control, or the page number being replaced. Not a plain boolean: the
   // per-page Replace button needs to know whether IT is the one running,
@@ -79,6 +92,7 @@ export function ReceiptDetailView({
           setReceipt(loaded);
           setDraft(draftForDisplay(loaded));
           editsRef.current = [];
+          clientAppliedRef.current = new Set();
           logEvent({ action: "receipt_viewed", receiptId: loaded.id });
         }
       } catch (caught) {
@@ -131,12 +145,13 @@ export function ReceiptDetailView({
       options.noteSaved(updated);
       onChanged();
       logEvent({ action: "receipt_edited", receiptId: receipt.id });
-      logFieldEditTelemetry(receipt, editsRef.current);
+      logFieldEditTelemetry(receipt, editsRef.current, clientAppliedRef.current);
       // Reset after a successful save only - a failed one leaves the
       // person still mid-edit, and the next successful save should still
       // count everything since the receipt loaded, not just since the
       // failure.
       editsRef.current = [];
+      clientAppliedRef.current = new Set();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -282,7 +297,10 @@ export function ReceiptDetailView({
             draft={draft}
             setDraft={(update) => setDraft((d) => (d === null ? d : update(d)))}
             options={options.values}
+            api={api}
+            onOpenReceipt={onOpenReceipt}
             onFieldEdited={(field) => editsRef.current.push(field)}
+            onSuggestionApplied={(field) => clientAppliedRef.current.add(field)}
           />
           {error !== null && <p className="error">{error}</p>}
           {notice !== null && <p className="muted">{notice}</p>}

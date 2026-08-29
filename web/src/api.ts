@@ -52,6 +52,23 @@ export type ExportRequest =
   | { periodStart: string; periodEnd: string };
 
 /**
+ * GET /api/receipts/possible-duplicates - proposal #8 (2026-08-28,
+ * approved). Mirrors `possibleDuplicatesQuerySchema` (server/src/http/
+ * schemas.ts) field for field: that schema is `z.strictObject`, so an
+ * extra key this client might otherwise be tempted to add (a status
+ * filter, a currency) is a 400, not a no-op - `possibleDuplicatesQuery`
+ * below exists to be the one place that sends EXACTLY this shape and
+ * nothing else. `totalCents` travels as a query-string integer, same
+ * "money is integer cents" rule as everywhere else in this client.
+ */
+export interface PossibleDuplicateParams {
+  purchasedAt: string;
+  totalCents: number;
+  vendor?: string;
+  excludeId?: string;
+}
+
+/**
  * The typed client. A thin seam: every method is one route, the shapes are
  * the server's, and nothing here retries, caches, or interprets - the
  * views decide what a failure means where the person can see it.
@@ -129,6 +146,22 @@ export class KeptApi {
     return this.request<ReceiptSummary>(
       "GET",
       `/api/receipts/summary${query === "" ? "" : `?${query}`}`,
+    );
+  }
+
+  /**
+   * The caller's own live receipts matching a date, total and (roughly) a
+   * vendor - proposal #8's near-duplicate warning. A query, never a gate:
+   * nothing on this client's side of the route ever refuses a save over
+   * what this returns, only offers it as something worth a look.
+   */
+  possibleDuplicates(
+    params: PossibleDuplicateParams,
+  ): Promise<{ receipts: Receipt[] }> {
+    const query = possibleDuplicatesQuery(params);
+    return this.request<{ receipts: Receipt[] }>(
+      "GET",
+      `/api/receipts/possible-duplicates${query === "" ? "" : `?${query}`}`,
     );
   }
 
@@ -277,6 +310,27 @@ export function listQuery(
  * alone, exported for its own unit test the same way `listQuery` is. */
 export function summaryQuery(filters: ListFilters): string {
   return filterQuery(filters).toString();
+}
+
+/**
+ * Query-string assembly for GET /api/receipts/possible-duplicates,
+ * exported for its own unit test - same reasoning as `listQuery`/
+ * `summaryQuery` above, sharper here because the server's schema is
+ * strict (`PossibleDuplicateParams`'s own comment): this has to send
+ * exactly `{purchasedAt, totalCents, vendor?, excludeId?}`, never an extra
+ * key, and never an empty string standing in for an absent optional one.
+ */
+export function possibleDuplicatesQuery(params: PossibleDuplicateParams): string {
+  const query = new URLSearchParams();
+  query.set("purchasedAt", params.purchasedAt);
+  query.set("totalCents", String(params.totalCents));
+  if (params.vendor !== undefined) {
+    query.set("vendor", params.vendor);
+  }
+  if (params.excludeId !== undefined) {
+    query.set("excludeId", params.excludeId);
+  }
+  return query.toString();
 }
 
 async function readJson<T>(response: Response): Promise<T> {

@@ -11,6 +11,7 @@ import {
   logFieldEditTelemetry,
   patchFromDraft,
   type ReceiptDraft,
+  type SuggestibleField,
 } from "./ReceiptForm.js";
 
 /**
@@ -26,10 +27,14 @@ import {
 export function ConfirmQueue({
   api,
   options,
+  onOpenReceipt,
   onDone,
 }: {
   api: KeptApi;
   options: ReceiptOptionsHandle;
+  /** Proposal #8: "open the matching receipt" leaves the queue for that
+   * receipt's own detail screen - App.tsx owns the view state this drives. */
+  onOpenReceipt: (id: string) => void;
   onDone: () => void;
 }) {
   const [current, setCurrent] = useState<ReceiptDetail | null>(null);
@@ -41,6 +46,11 @@ export function ConfirmQueue({
   // Same accumulator as ReceiptDetailView's, reset per receipt and read out
   // at Confirm - see ReceiptForm.tsx's `summarizeFieldEdits`.
   const editsRef = useRef<(keyof ReceiptDraft)[]>([]);
+  // Same accumulator as ReceiptDetailView's `clientAppliedRef` - which
+  // fields carried a derived-amount fill or vendor default this session,
+  // read out at Confirm alongside `editsRef` so those two sources are
+  // scored accepted/overridden the same save-time way (2026-08-28 ruling).
+  const clientAppliedRef = useRef<Set<SuggestibleField>>(new Set());
 
   const loadNext = useCallback(
     async (skip: string[]) => {
@@ -62,6 +72,7 @@ export function ConfirmQueue({
         setCurrent(detail);
         setDraft(draftFromPending(detail));
         editsRef.current = [];
+        clientAppliedRef.current = new Set();
         logEvent({ action: "confirm_opened", receiptId: detail.id });
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught));
@@ -96,7 +107,7 @@ export function ConfirmQueue({
       });
       options.noteSaved(confirmed);
       logEvent({ action: "confirm_saved", receiptId: current.id });
-      logFieldEditTelemetry(current, editsRef.current);
+      logFieldEditTelemetry(current, editsRef.current, clientAppliedRef.current);
       await loadNext(skippedIds);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -166,7 +177,10 @@ export function ConfirmQueue({
             draft={draft}
             setDraft={(update) => setDraft((d) => (d === null ? d : update(d)))}
             options={options.values}
+            api={api}
+            onOpenReceipt={onOpenReceipt}
             onFieldEdited={(field) => editsRef.current.push(field)}
+            onSuggestionApplied={(field) => clientAppliedRef.current.add(field)}
           />
           {error !== null && <p className="error">{error}</p>}
           <div className="detail-actions">

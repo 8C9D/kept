@@ -89,6 +89,11 @@ export function App() {
   }
 
   const changed = () => setDataVersion((version) => version + 1);
+  // Shared by the table's own row-open, the confirm queue's and the
+  // detail view's "open the matching receipt" (proposal #8) - all three
+  // want the identical view transition, so there is exactly one place
+  // that knows what "open a receipt" means.
+  const openReceipt = (id: string) => setView({ name: "detail", id });
 
   // Bound here, where the early return above has already established there
   // is one: narrowing on `api` does not follow into a closure.
@@ -169,7 +174,7 @@ export function App() {
             api={api}
             dataVersion={dataVersion}
             options={options}
-            onOpen={(id) => setView({ name: "detail", id })}
+            onOpen={openReceipt}
             onConfirmQueue={() => setView({ name: "confirm" })}
             onChanged={changed}
           />
@@ -181,12 +186,14 @@ export function App() {
             options={options}
             onBack={() => setView({ name: "table" })}
             onChanged={changed}
+            onOpenReceipt={openReceipt}
           />
         )}
         {view.name === "confirm" && (
           <ConfirmQueue
             api={api}
             options={options}
+            onOpenReceipt={openReceipt}
             onDone={() => {
               changed();
               setView({ name: "table" });
