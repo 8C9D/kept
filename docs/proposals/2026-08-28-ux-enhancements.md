@@ -1,7 +1,7 @@
-# UX enhancements — proposed 2026-08-28, six approved and built, four still open
+# UX enhancements — proposed 2026-08-28, all ten approved and built
 
-**Status, updated 2026-08-28 (same day, second pass):** The owner approved **#1 through #6**, and they are **built** — see each item below for where. **Nothing here is deployed**: it is uncommitted working-tree code, and migration `0008` (proposal #6) has been applied to the local database only. **#7 through #10 remain unbuilt and awaiting a decision** — nothing below has ruled on them either way.
-Written alongside the 2026-08-28 product-feedback build, which implemented what the owner asked for; this is the answer to the open question in that feedback ("propose other UX enhancements worth adding"). Record of what was decided and rejected in building #1-#6: `docs/DECISIONS.md` 2026-08-28 (filed as its own entry, above the product-feedback entry). Verification: `docs/gates/product-feedback-2026-08-28.md`.
+**Status, updated 2026-08-28 (same day, third pass):** The owner approved all ten. **#1 through #6** were approved and built first — see each item below for where. **#7 through #10** were approved in a separate, later pass the same day and are also **built** — see each item below. **Nothing here is deployed**: every line of it is uncommitted working-tree code, and migration `0008` (proposal #6) has been applied to the local database only.
+Written alongside the 2026-08-28 product-feedback build, which implemented what the owner asked for; this is the answer to the open question in that feedback ("propose other UX enhancements worth adding"). Record of what was decided and rejected in building #1-#6: `docs/DECISIONS.md` 2026-08-28 (filed as its own entry, above the product-feedback entry). Record for #7-#10, filed as its own entry above that one (a separate approval, not the same sitting): `docs/DECISIONS.md` 2026-08-28. Verification for all ten: `docs/gates/product-feedback-2026-08-28.md`.
 
 Each proposal states what it is, why it earns its place against the success test — *a receipt is captured in under a minute and never thought about again* — what it costs, and what it risks. Approved items become a `DECISIONS.md` entry and a spec amendment before any code is written, per the doc-ownership rule.
 
@@ -97,7 +97,7 @@ Ordered by my estimate of value per unit of work, highest first.
 
 ## 7 · HST rate plausibility hint
 
-**Status: unbuilt, awaiting a decision.** Not among the six the owner approved 2026-08-28; the narrow-scoping recommendation below stands unactioned.
+**Approved and built, 2026-08-28, third pass the same day — not deployed.** The narrow-scoping recommendation below is exactly what shipped: `checkHstRatePlausibility` (`server/src/domain/arithmetic.ts`) flags an effective rate within ±0.25 percentage points of 8% and nothing wider, mirrored live on both clients (`ios/Kept/Confirm/ReceiptArithmetic.swift`, `web/src/views/ReceiptForm.tsx`'s own copy). Spec: §7.2, §10A.1. Decisions and rejections: `docs/DECISIONS.md` 2026-08-28 (the third-pass entry, above the six-proposals entry).
 
 **What.** A second advisory note beside the arithmetic one: when `hst / subtotal` is not within rounding distance of a Canadian rate (13% ON, 5% GST-only, 15% Atlantic, 0% exempt), say so inline.
 
@@ -111,7 +111,7 @@ Ordered by my estimate of value per unit of work, highest first.
 
 ## 8 · Near-duplicate detection at confirm time
 
-**Status: unbuilt, awaiting a decision.** Not among the six the owner approved 2026-08-28.
+**Approved and built, 2026-08-28, third pass the same day — not deployed.** `GET /api/receipts/possible-duplicates` (`server/src/routes/receipts.ts`), closing the exact §11 v2 deferral named below; warns, never blocks, on both clients (`web/src/duplicates.ts` plus `ReceiptForm.tsx`'s `PossibleDuplicatesNote`, `ios/Kept/Confirm/ConfirmReceiptModel.swift`'s `checkForPossibleDuplicates`/`ConfirmReceiptView.swift`'s duplicate section). Vendor is matched case-and-whitespace-insensitively for the comparison only. Spec: §5, §6, §7.2, §7A, §11. Decisions and rejections: `docs/DECISIONS.md` 2026-08-28 (the third-pass entry, above the six-proposals entry).
 
 **What.** At confirm, if a live receipt already exists with the same vendor, same date and same total, say so and offer to open it.
 
@@ -125,7 +125,7 @@ Ordered by my estimate of value per unit of work, highest first.
 
 ## 9 · Swipe actions and month grouping on the iOS list
 
-**Status: unbuilt, awaiting a decision.** Not among the six the owner approved 2026-08-28.
+**Approved and built, 2026-08-28, third pass the same day — not deployed. iOS only, as proposed — no web equivalent.** Swipe-to-delete and swipe-to-confirm plus sticky month headers on Home (`ios/Kept/Screens/HomeView.swift`, `ReceiptListModel.swift`, the new `ReceiptMonthGrouping.swift`), and the undo this proposal's own risk paragraph named as needed: `POST /api/receipts/:id/restore` (`server/src/routes/receipts.ts`), not time-limited at the API (only the toast is, at six seconds), and able to fail with 409 `restore_conflict` when a post-delete re-capture collides with the restore. Spec: §5, §6, §7.1. Decisions and rejections: `docs/DECISIONS.md` 2026-08-28 (the third-pass entry, above the six-proposals entry).
 
 **What.** Swipe a row to delete or to confirm; sticky month headers down the list.
 
@@ -139,7 +139,7 @@ Ordered by my estimate of value per unit of work, highest first.
 
 ## 10 · Export period presets
 
-**Status: unbuilt, awaiting a decision.** Not among the six the owner approved 2026-08-28.
+**Approved and built, 2026-08-28, third pass the same day — not deployed.** "Last fiscal year," the four quarters, and "this fiscal year to date," on both clients (`web/src/fiscalPresets.ts`, `ios/Kept/Export/FiscalPresets.swift` — a deliberate line-for-line port between the two), resolved against each user's own fiscal year end rather than the calendar year. Client-only, exactly as proposed: no new API route. The risk paragraph below named the thing to test, and testing it found a real bug before a person did — a non-December year end's literal day-of-month number, naively carried across a quarter boundary, put a quarter ending in a longer month one day short; fixed by re-resolving "end of month" per quarter instead. Spec: §7.1, §7A, §12. Decisions and rejections: `docs/DECISIONS.md` 2026-08-28 (the third-pass entry, above the six-proposals entry).
 
 **What.** On the new iOS export screen and on the web one: "Last fiscal year", "This fiscal year to date", "Q1–Q4" alongside the explicit date range.
 

@@ -549,3 +549,221 @@ locally by direct database inspection. **Not shipped in any sense** — no
 deploy, no production migration, no App Store submission. No discrepancy
 found between the orchestrating brief and the repository on any fact
 checked in this pass (§8.2).
+
+---
+
+## 9 · Third pass, same day: four more approved UX proposals — not deployed
+
+Scope: `docs/proposals/2026-08-28-ux-enhancements.md`'s remaining four
+proposals. The owner approved **#7-#10** in a separate, later pass than the
+six covered in §8 above — not the same sitting, which is why this section
+and §8 stay apart rather than merge (`docs/DECISIONS.md` 2026-08-28, the
+third-pass entry, states the identical reasoning for the two DECISIONS
+entries). Built on top of §8's tree, in the same working directory — still
+uncommitted, still undeployed, with **no new migration this pass**: `0008`
+(§8.1) remains the newest file and is still local-only.
+
+### 9.1 What was built
+
+- **#7, HST rate-plausibility hint.** `checkHstRatePlausibility`
+  (`server/src/domain/arithmetic.ts`) flags an effective HST rate within
+  ±0.25 percentage points of 8% — the Ontario provincial half of a 13%
+  split standing alone — and nothing wider; mirrored live on both clients
+  (`ios/Kept/Confirm/ReceiptArithmetic.swift`,
+  `web/src/views/ReceiptForm.tsx`'s own `checkHstRatePlausibility`).
+  Confirmed by reading all three implementations side by side: identical
+  constants (`HALF_SPLIT_RATE_BPS = 800`, `HALF_SPLIT_TOLERANCE_BPS = 25`),
+  identical integer cross-multiplication, no floating-point division
+  anywhere in the comparison.
+- **#8, near-duplicate warning.** `GET /api/receipts/possible-duplicates`
+  (`server/src/routes/receipts.ts`), registered above `/:id` alongside
+  `/options` and `/summary`. Matches the caller's own **live** receipts on
+  `purchased_at`, `total_cents`, and vendor compared
+  case-and-whitespace-insensitively for the comparison only — confirmed by
+  reading the route's SQL predicate
+  (`lower(trim(receipts.vendor)) = lower(trim(${query.vendor}))`) and the
+  response mapper (`receiptResponse`, which reads the row's stored vendor
+  unchanged). Both clients debounce the lookup and render an amber,
+  never-blocking note with a way to open each match
+  (`web/src/duplicates.ts` + `ReceiptForm.tsx`'s `PossibleDuplicatesNote`;
+  `ConfirmReceiptModel.swift`'s `checkForPossibleDuplicates` +
+  `ConfirmReceiptView.swift`'s duplicate section, which opens the match in
+  a real `ReceiptDetailView`, not a second summary).
+- **#9, swipe actions, month headers, undo — iOS only.** Trailing
+  swipe-to-delete and leading swipe-to-confirm on Home
+  (`HomeView.swift`'s `receiptRow`), gated on `Receipt.canQuickConfirm`
+  reading the **raw** `totalCents`, never the served `displayTotalCents`
+  (confirmed by reading the extension's own doc comment, which states the
+  merge-vs-raw distinction and why gating on the merge would offer a swipe
+  that fails after the tap). Sticky per-month sections
+  (`ReceiptMonthGrouping.swift`) chunk consecutive same-month rows without
+  re-sorting — confirmed by reading `sections(of:)`, which only ever
+  appends to the last section or starts a new one, never reorders.
+  `POST /api/receipts/:id/restore` (`server/src/routes/receipts.ts`)
+  un-tombstones the receipt and, in the same transaction, only the image
+  rows sharing its exact `deleted_at` timestamp — confirmed by reading the
+  transaction body and the two new integration tests that pin the
+  page-replace-vs-delete distinction and the 409 collision case (below).
+  The undo toast is a `HomeView` overlay with a six-second `.task(id:)`
+  timeout keyed to `model.pendingUndo`'s identity.
+- **#10, export period presets.** `web/src/fiscalPresets.ts` and
+  `ios/Kept/Export/FiscalPresets.swift` — read side by side, function
+  names, constants, and doc comments match line for line, confirmed rather
+  than assumed from the iOS file's own "deliberate line-for-line port"
+  claim. "Last fiscal year" sends `{fiscalYearEndingIn}`; the other three
+  presets send an explicit `{periodStart, periodEnd}` computed client-side,
+  since the API has no quarter concept (§12). Wired into both export
+  screens (`web/src/views/ExportView.tsx`'s `resolvedPreset`,
+  `ios/Kept/Export/ExportView.swift`), reading the user's own fiscal year
+  end from `GET /api/me` (a pre-existing route; no server change).
+
+### 9.2 Prediction versus reality
+
+Written from the brief, before opening the files it described, per the
+project's verify-artifacts-not-reports rule.
+
+- **Predicted:** the rate-hint threshold would be an effective HST rate
+  within ±0.25 percentage points of 8%, computed in integer arithmetic
+  against `subtotalCents`/`hstCents`. **Reality: exact match** — read from
+  `checkHstRatePlausibility` in all three implementations.
+- **Predicted:** the new server route surface would be
+  `GET /api/receipts/possible-duplicates`, `POST /api/receipts/:id/restore`,
+  and a third route this summary's own wording ("§6, three new routes")
+  did not let me derive in advance. **Reality: two new routes, not
+  three.** Reading the whole diff of `server/src/routes/` (only
+  `receipts.ts` changed, +242/-0 lines) and grepping every file under
+  `server/src/routes/` for a new `router.get/post/patch/put/delete` call
+  turns up exactly these two and nothing else; `GET /api/me`, which iOS's
+  export screen reads for the fiscal year end (proposal #10), is a
+  **pre-existing** route (`server/src/routes/me.ts`, unchanged — `git diff
+  --stat -- server/src/routes/` shows only `receipts.ts`). **This is a
+  genuine discrepancy between the orchestrating brief and the repository**,
+  not a documentation choice — §6 of the spec now lists two new routes,
+  matching the code, not three.
+- **No other discrepancy found** between the brief and the repository on
+  any route path, threshold, constant, or rejection named in the brief and
+  checked in this pass — the CORS/telemetry-asymmetry finding below was
+  not predicted by the brief at all, and is recorded as a finding rather
+  than a prediction miss.
+
+### 9.3 Verification actually performed, and by whom
+
+- **Server: 620 tests / 51 files, green** (`npm test`, run in this pass).
+  The pre-this-pass count was 578/49 (§8.3); the difference is two new
+  integration files, `possibleDuplicates.test.ts` and
+  `restoreReceipt.test.ts`, plus additions inside `arithmetic.test.ts`
+  (the rate-hint boundary cases, including the exact 7.75%/8.25% edges and
+  a same-boundary-at-a-different-scale case).
+- **Web: 199 tests / 13 files, green** (`npm test`, run in this pass).
+  Pre-this-pass count was 136/11; two new files, `duplicates.test.ts` and
+  `fiscalPresets.test.ts` (the latter includes
+  `"does not carry the year end's literal day number across a longer
+  month"`, the regression test for the quarter-boundary bug named in
+  §9.1), plus additions inside `receiptForm.test.ts`.
+- **iOS: 440 unit tests, 0 failures** (`xcodebuild test -project
+  Kept.xcodeproj -scheme Kept -destination 'platform=iOS Simulator,name=iPhone
+  17 Pro' -only-testing:KeptTests`, run in this pass, `** TEST SUCCEEDED **`).
+  Pre-this-pass count was 365 (§8.3); three new files,
+  `FiscalPresetsTests.swift`, `ReceiptMonthGroupingTests.swift`, and
+  `ExportPresetResolutionTests.swift`, plus additions inside
+  `ReceiptArithmeticTests.swift`, `ConfirmReceiptModelTests.swift`,
+  `ReceiptListModelTests.swift`, `APIClientTests.swift`, and
+  `ExportViewModelTests.swift`. **`KeptUITests` was not run in this pass**
+  — see §9.4.
+- **No new migration exists to confirm applied.** `ls server/drizzle/*.sql`
+  shows `0008_receipt-images-page-partial.sql` as the newest file, unchanged
+  from §8.3's own reading — #7-#10 needed no schema change, confirmed by
+  the absence of any new file under `server/drizzle/` and by reading every
+  route this pass touches, none of which references a column or table not
+  already in §5.
+- **The restore route's isolation and collision behaviour is
+  integration-tested, not merely unit-tested**: `restoreReceipt.test.ts`
+  covers restoring a deleted receipt's image alongside it, leaving an
+  earlier page-replace's tombstoned image untouched, the 409 collision
+  case, all three 404-alike cases (nonexistent / another user's / not
+  currently deleted), and that another live receipt's images are never
+  touched.
+
+### 9.4 What I could not verify, and what it would take
+
+- **The iOS document scanner still cannot run in the Simulator**, and
+  nothing in this batch touches the scanner path directly, but the swipe
+  actions and undo toast built here live on the same `HomeView` screen
+  the scanner's captures land on — none of that screen's real-device
+  behaviour (the swipe gesture itself, the toast's timing and layout
+  against the keyboard/safe area, VoiceOver over the new
+  `accessibilityIdentifier`s) was exercised on Simulator or device.
+- **No end-to-end Simulator UI run (`KeptUITests`) was performed** for the
+  swipe gestures, the undo toast, the duplicate-match sheet, or the export
+  preset picker on either client. `xcodebuild test -only-testing:KeptTests`
+  was run; the UI target was not.
+- **Nothing in this batch has run against production, in any form.** No
+  `fly deploy` happened. No iOS build carrying any of #7-#10 was archived
+  or uploaded — whatever build is on the phones predates this batch and
+  the two rounds it sits on top of.
+- **The visual rendering of the rate hint and the duplicate-match note**
+  (amber, inside-the-field for the former, a standalone section for the
+  latter) was read from the diff and the unit/integration tests that pin
+  the underlying booleans and query results, not confirmed by eye on
+  either client.
+- **The undo toast's real timing** — whether six seconds reads as
+  "generous" or "too short" on an actual swipe, and whether the toast
+  visually clears the keyboard and the tab/home-indicator safe areas — was
+  not driven on Simulator or device; only `.task(id:)`'s cancellation logic
+  is covered, by unit test, and the six-second constant is read from the
+  source rather than timed.
+- **The web export preset dropdown's actual browser behaviour** (the
+  `<select>` control, the shown-range text, hiding until the profile loads)
+  was read from `ExportView.tsx`'s JSX and `fiscalPresets.test.ts`'s pure
+  function tests, not driven in a real browser in this pass.
+
+### 9.5 What is owner-only
+
+- Deploying the server, once `0006`/`0007`/`0008` (§5, §8.1 above) have
+  also run against production — this pass adds no new migration to that
+  list, but does not shorten it either.
+- Everything already queued ahead of this in `CLAUDE.md`'s status section
+  and in §5/§8.5 above: the 1.0 (1) demo recording and resubmission, the
+  Sign in with Apple `.p8`, the R2 `kept-backups` token, and the App Store
+  Connect privacy label refiling. This batch adds nothing to that queue's
+  order — it sits behind all of it, not beside it.
+
+### 9.6 Anti-pattern self-review (framework §10.2)
+
+- **Duplication:** `checkHstRatePlausibility` and the fiscal-preset
+  arithmetic are each defined once server-side or once on web and mirrored
+  — not shared — on iOS, the same necessary duplication §8.6 already
+  accepted for `deriveMissingAmount`, for the identical reason (a network
+  round trip per keystroke, or per screen open, would defeat a live
+  affordance); both mirrors carry an explicit "kept in exact
+  correspondence" comment rather than leaving the duplication implicit.
+  `onOpenReceipt` (web) is one function, threaded from `App.tsx` into the
+  table, the confirm queue, and the detail form, rather than three
+  separate "open a receipt" implementations.
+- **Error-masking:** none found — `checkForPossibleDuplicates` (iOS) and
+  `lookupPossibleDuplicates` (web) both swallow a failed lookup into an
+  empty result **by explicit, documented contract** ("an assist over a
+  save that must keep working when the assist cannot"), not a silent catch
+  masking an unhandled case; the restore route's 409 is a named error with
+  the server's own remedy text, propagated verbatim on both clients rather
+  than reworded or swallowed.
+- **Speculative generality:** none found — `possibleDuplicatesQuerySchema`
+  reuses the existing `centsSchema`/`isoDateSchema`/`vendorText` building
+  blocks rather than a new validation shape, and `FiscalQuarters` (iOS) is
+  a named struct with four fields rather than a generic N-tuple, added
+  because `ExportView.swift` needs to address one quarter by name — a
+  concrete need, not abstraction ahead of one.
+
+### 9.7 State of this pass
+
+Built and locally verified: server 620/51, web 199/13, iOS 440 unit tests
+(all re-run in this pass; UI tests not run on either client), no new
+migration to verify. **Not shipped in any sense** — no deploy, no
+production migration, no App Store submission. **One discrepancy found
+between the orchestrating brief and the repository** (§9.2): the brief
+described three new server routes; the repository has two. The spec (§6)
+and this report describe the two that exist. **One finding outside the
+four proposals**, recorded in full in `docs/DECISIONS.md`'s third-pass
+entry: the web client's `suggestion_accepted` telemetry for
+proposal-#1/#2 fills fired at apply time rather than at save, an asymmetry
+with iOS's save-time scoring, fixed in the same tree as this pass.
