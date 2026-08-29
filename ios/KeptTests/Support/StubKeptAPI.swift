@@ -20,10 +20,16 @@ final class StubKeptAPI: KeptAPI {
     var replaceReceiptImageHandler: ((_ receiptId: UUID, _ page: Int, _ objectKey: String, _ sha256: String) async throws -> ReceiptImage)?
     var receiptOptionsHandler: (() async throws -> ReceiptOptions)?
     var receiptsSummaryHandler: ((_ query: ReceiptQuery) async throws -> ReceiptSummary)?
+    var possibleDuplicatesHandler: (
+        (_ purchasedAt: String, _ totalCents: Int, _ vendor: String?, _ excludeId: UUID?) async throws -> [Receipt]
+    )?
     var uploadTargetHandler: ((_ contentType: ImageUploadContentType) async throws -> UploadTarget)?
     var uploadImageHandler: ((_ target: UploadTarget, _ data: Data, _ contentType: ImageUploadContentType) async throws -> Void)?
     var createReceiptHandler: ((_ request: CreateReceiptRequest) async throws -> Receipt)?
     var confirmReceiptHandler: ((_ id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt)?
+    var quickConfirmReceiptHandler: ((_ id: UUID) async throws -> Receipt)?
+    var restoreReceiptHandler: ((_ id: UUID) async throws -> Receipt)?
+    var fetchProfileHandler: (() async throws -> Profile)?
     var deleteReceiptHandler: ((_ id: UUID) async throws -> Void)?
     var deleteAccountHandler: ((_ appleAuthorizationCode: String?) async throws -> Void)?
     var startExportHandler: ((_ request: ExportRequest) async throws -> ExportJob)?
@@ -45,10 +51,16 @@ final class StubKeptAPI: KeptAPI {
     private var recordedReplaceReceiptImageCalls: [(receiptId: UUID, page: Int, objectKey: String, sha256: String)] = []
     private var recordedCreateReceiptCalls: [CreateReceiptRequest] = []
     private var recordedConfirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] = []
+    private var recordedQuickConfirmReceiptCalls: [UUID] = []
+    private var recordedRestoreReceiptCalls: [UUID] = []
+    private var recordedFetchProfileCalls = 0
     private var recordedDeleteReceiptCalls: [UUID] = []
     private var recordedDeleteAccountCalls: [String?] = []
     private var recordedReceiptOptionsCalls = 0
     private var recordedReceiptsSummaryCalls: [ReceiptQuery] = []
+    private var recordedPossibleDuplicatesCalls: [
+        (purchasedAt: String, totalCents: Int, vendor: String?, excludeId: UUID?)
+    ] = []
     private var recordedStartExportCalls: [ExportRequest] = []
     private var recordedExportJobCalls: [UUID] = []
     private var recordedPostEventsCalls: [PostEventsRequest] = []
@@ -65,6 +77,10 @@ final class StubKeptAPI: KeptAPI {
         callLock.withLock { recordedReceiptsSummaryCalls }
     }
 
+    var possibleDuplicatesCalls: [(purchasedAt: String, totalCents: Int, vendor: String?, excludeId: UUID?)] {
+        callLock.withLock { recordedPossibleDuplicatesCalls }
+    }
+
     var addReceiptImageCalls: [(receiptId: UUID, objectKey: String, sha256: String)] {
         callLock.withLock { recordedAddReceiptImageCalls }
     }
@@ -79,6 +95,18 @@ final class StubKeptAPI: KeptAPI {
 
     var confirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] {
         callLock.withLock { recordedConfirmReceiptCalls }
+    }
+
+    var quickConfirmReceiptCalls: [UUID] {
+        callLock.withLock { recordedQuickConfirmReceiptCalls }
+    }
+
+    var restoreReceiptCalls: [UUID] {
+        callLock.withLock { recordedRestoreReceiptCalls }
+    }
+
+    var fetchProfileCalls: Int {
+        callLock.withLock { recordedFetchProfileCalls }
     }
 
     /// One entry per deleteAccount call, holding the authorization code the
@@ -146,6 +174,21 @@ final class StubKeptAPI: KeptAPI {
         return try await receiptsSummaryHandler(query)
     }
 
+    func possibleDuplicates(
+        purchasedAt: String,
+        totalCents: Int,
+        vendor: String?,
+        excludeId: UUID?
+    ) async throws -> [Receipt] {
+        callLock.withLock {
+            recordedPossibleDuplicatesCalls.append(
+                (purchasedAt, totalCents, vendor, excludeId)
+            )
+        }
+        guard let possibleDuplicatesHandler else { throw UnstubbedCall(endpoint: "possibleDuplicates") }
+        return try await possibleDuplicatesHandler(purchasedAt, totalCents, vendor, excludeId)
+    }
+
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget {
         guard let uploadTargetHandler else { throw UnstubbedCall(endpoint: "uploadTarget") }
         return try await uploadTargetHandler(contentType)
@@ -166,6 +209,24 @@ final class StubKeptAPI: KeptAPI {
         callLock.withLock { recordedConfirmReceiptCalls.append((id, request)) }
         guard let confirmReceiptHandler else { throw UnstubbedCall(endpoint: "confirmReceipt") }
         return try await confirmReceiptHandler(id, request)
+    }
+
+    func quickConfirmReceipt(id: UUID) async throws -> Receipt {
+        callLock.withLock { recordedQuickConfirmReceiptCalls.append(id) }
+        guard let quickConfirmReceiptHandler else { throw UnstubbedCall(endpoint: "quickConfirmReceipt") }
+        return try await quickConfirmReceiptHandler(id)
+    }
+
+    func restoreReceipt(id: UUID) async throws -> Receipt {
+        callLock.withLock { recordedRestoreReceiptCalls.append(id) }
+        guard let restoreReceiptHandler else { throw UnstubbedCall(endpoint: "restoreReceipt") }
+        return try await restoreReceiptHandler(id)
+    }
+
+    func fetchProfile() async throws -> Profile {
+        callLock.withLock { recordedFetchProfileCalls += 1 }
+        guard let fetchProfileHandler else { throw UnstubbedCall(endpoint: "fetchProfile") }
+        return try await fetchProfileHandler()
     }
 
     func deleteReceipt(id: UUID) async throws {

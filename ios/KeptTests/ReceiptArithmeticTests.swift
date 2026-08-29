@@ -160,4 +160,131 @@ final class ReceiptArithmeticTests: XCTestCase {
         )
         XCTAssertEqual(difference, -500)
     }
+
+    // MARK: - HST rate plausibility (proposal #7, 2026-08-28)
+    //
+    // Mirrors server/tests/unit/arithmetic.test.ts's `checkHstRatePlausibility`
+    // suite case for case - the same reasoning as this file's own header
+    // comment: a future edit to one side that forgets the other should show
+    // up as a failing assertion here.
+
+    func testRateHintNotApplicableWithoutASubtotal() {
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: nil, hstCents: 800),
+            .notApplicable
+        )
+    }
+
+    func testRateHintNotApplicableWithoutAnHstAmount() {
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 10000, hstCents: nil),
+            .notApplicable
+        )
+    }
+
+    func testRateHintNotApplicableWithAZeroSubtotal() {
+        // No rate to anchor on - zero subtotal, zero HST included.
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 0, hstCents: 0),
+            .notApplicable
+        )
+    }
+
+    func testRateHintNotApplicableWithANegativeSubtotal() {
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: -10000, hstCents: -800),
+            .notApplicable
+        )
+    }
+
+    /// A lone GST row is a real, legitimate tax - flagging near-5% would
+    /// fire on every GST-only-province receipt, and this system does not
+    /// know the province.
+    func testRateHintDoesNotFlagALegitimate5PercentGstOnlyReceipt() {
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 10000, hstCents: 500),
+            .plausible
+        )
+    }
+
+    func testRateHintDoesNotFlagALegitimate13PercentOntarioReceipt() {
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 10000, hstCents: 1300),
+            .plausible
+        )
+    }
+
+    func testRateHintDoesNotFlagALegitimate15PercentAtlanticReceipt() {
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 10000, hstCents: 1500),
+            .plausible
+        )
+    }
+
+    func testRateHintDoesNotFlagAGenuinelyExempt0PercentReceipt() {
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 10000, hstCents: 0),
+            .plausible
+        )
+    }
+
+    func testRateHintFlagsAn8PercentReceiptAsLookingLikeHalfASplit() {
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 10000, hstCents: 800),
+            .looksLikeHalfSplit
+        )
+    }
+
+    func testRateHintFlagsTheExactLowerBoundaryOfTheTolerance() {
+        // 7.75%
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 10000, hstCents: 775),
+            .looksLikeHalfSplit
+        )
+    }
+
+    func testRateHintDoesNotFlagJustBelowTheLowerBoundary() {
+        // 7.74%
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 10000, hstCents: 774),
+            .plausible
+        )
+    }
+
+    func testRateHintFlagsTheExactUpperBoundaryOfTheTolerance() {
+        // 8.25%
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 10000, hstCents: 825),
+            .looksLikeHalfSplit
+        )
+    }
+
+    func testRateHintDoesNotFlagJustAboveTheUpperBoundary() {
+        // 8.26%
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 10000, hstCents: 826),
+            .plausible
+        )
+    }
+
+    /// The boundary is a RATE, not a fixed cents offset - and the integer
+    /// cross-multiplication this mirrors verbatim (`scaledHst`/`lowerBound`/
+    /// `upperBound`) is exactly what keeps that boundary exact at a scale
+    /// where `Double(hstCents) / Double(subtotalCents)` compared against
+    /// the literal `0.0775` would risk a wrong answer: 0.0775 (775/10000 =
+    /// 31/400) has no exact binary floating-point representation, so both
+    /// the literal and the computed ratio carry their own rounding error,
+    /// and nothing guarantees those two errors land on the same side of
+    /// the boundary. The integer form has no such risk - `scaledHst` and
+    /// the two bounds are exact integers at any scale.
+    func testRateHintHoldsTheSameBoundaryAtADifferentSubtotalScale() {
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 100000, hstCents: 7750),
+            .looksLikeHalfSplit
+        )
+        XCTAssertEqual(
+            ReceiptArithmetic.checkHstRatePlausibility(subtotalCents: 100000, hstCents: 7749),
+            .plausible
+        )
+    }
 }

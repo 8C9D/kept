@@ -1087,6 +1087,191 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertFalse(saved)
         XCTAssertEqual(model.saveError, "server said no")
     }
+
+    // MARK: - HST rate plausibility hint (proposal #7, 2026-08-28)
+
+    /// 8% of the subtotal - looks like half of a 13% split
+    /// (ReceiptArithmeticTests.swift owns the boundary math itself; this
+    /// pins the model's amber/touched wiring around it).
+    private func halfSplitSuggestions() -> MergedSuggestions {
+        Fixtures.merged(
+            vendor: "Maple Foods",
+            purchasedAt: "2026-03-20",
+            totalCents: 10800,
+            hstCents: 800,
+            subtotalCents: 10000
+        )
+    }
+
+    func testHstRateHintShowsAndClearsWithTheTint() {
+        let model = model(receipt: scannedReceipt(
+            hstCents: 800, subtotalCents: 10000, suggestions: halfSplitSuggestions()
+        ))
+        XCTAssertTrue(model.showsHstRateHint)
+        XCTAssertTrue(model.isUnreviewed(.hst))
+
+        // Touching another field is not looking at HST.
+        model.markTouched(.vendor)
+        XCTAssertTrue(model.showsHstRateHint)
+
+        // Touching HST clears the amber and the hint together - the same
+        // rule showsHstDisagreementNote already follows.
+        model.markTouched(.hst)
+        XCTAssertFalse(model.showsHstRateHint)
+        XCTAssertFalse(model.isUnreviewed(.hst))
+    }
+
+    /// The default fixture is a legitimate 13% receipt (1300/10000) -
+    /// deliberately not flagged, the narrow-scoping rule stated in full on
+    /// ReceiptArithmetic.swift and its own doc comment.
+    func testHstRateHintDoesNotFireOnALegitimate13PercentReceipt() {
+        let model = model(receipt: scannedReceipt(suggestions: matchingSuggestions()))
+        XCTAssertFalse(model.showsHstRateHint)
+    }
+
+    /// Suppressed the same way `showsArithmeticWarning` already suppresses
+    /// itself over garbage text - evaluating a ratio against unparseable
+    /// input would just be noise.
+    func testHstRateHintSuppressedOverInvalidSubtotalText() {
+        let model = model(receipt: scannedReceipt(
+            hstCents: 800, subtotalCents: 10000, suggestions: halfSplitSuggestions()
+        ))
+        model.subtotalText = "not a number"
+        XCTAssertFalse(model.showsHstRateHint)
+    }
+
+    /// Two independent signals - a parser disagreement and one value's own
+    /// ratio looking like a split - can both be true of the same receipt,
+    /// and ConfirmFieldRows.swift's separate `rateHintNote`/
+    /// `disagreementNote` slots exist so neither has to win over the
+    /// other.
+    func testHstRateHintAndDisagreementNoteCanBothShow() {
+        let model = model(receipt: scannedReceipt(
+            hstCents: 800,
+            subtotalCents: 10000,
+            suggestions: Fixtures.merged(
+                vendor: "Maple Foods",
+                purchasedAt: "2026-03-20",
+                totalCents: 10800,
+                hstCents: 800,
+                hstDisagreement: true,
+                subtotalCents: 10000
+            )
+        ))
+        XCTAssertTrue(model.showsHstRateHint)
+        XCTAssertTrue(model.showsHstDisagreementNote)
+    }
+
+    // MARK: - Possible duplicates (proposal #8, 2026-08-28)
+
+    func testPossibleDuplicateWarnsWhenTheLookupReturnsAMatch() async {
+        let receipt = scannedReceipt(suggestions: matchingSuggestions())
+        let match = Fixtures.receipt(purchasedAt: "2026-03-20", vendor: "Maple Foods", totalCents: 11300)
+        api.possibleDuplicatesHandler = { _, _, _, _ in [match] }
+        let model = model(receipt: receipt)
+        XCTAssertTrue(model.possibleDuplicates.isEmpty) // nothing until a lookup completes
+
+        model.checkForPossibleDuplicates()
+        try? await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(model.possibleDuplicates.map(\.id), [match.id])
+    }
+
+    /// The obvious bug the proposal calls out by name: without `excludeId`
+    /// a receipt being confirmed would match itself. This pins the CLIENT
+    /// half - that this receipt's own id is what gets sent - the server
+    /// half (that passing it actually excludes the row) is
+    /// server/tests/integration/possibleDuplicates.test.ts's job.
+    func testPossibleDuplicateLookupExcludesItsOwnReceiptId() async {
+        let receipt = scannedReceipt(suggestions: matchingSuggestions())
+        api.possibleDuplicatesHandler = { _, _, _, _ in [] }
+        let model = model(receipt: receipt)
+
+        model.checkForPossibleDuplicates()
+        try? await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(api.possibleDuplicatesCalls.last?.excludeId, receipt.id)
+        XCTAssertEqual(api.possibleDuplicatesCalls.last?.purchasedAt, "2026-03-20")
+        XCTAssertEqual(api.possibleDuplicatesCalls.last?.totalCents, 11300)
+        XCTAssertEqual(api.possibleDuplicatesCalls.last?.vendor, "Maple Foods")
+    }
+
+    /// A failed lookup reads exactly like "nothing matched" - never
+    /// surfaced, never retried from here - and leaves saving untouched.
+    func testFailedPossibleDuplicatesLookupIsSilentAndDoesNotBlockSaving() async {
+        struct Offline: Error {}
+        let receipt = scannedReceipt(suggestions: matchingSuggestions())
+        api.possibleDuplicatesHandler = { _, _, _, _ in throw Offline() }
+        api.confirmReceiptHandler = { _, _ in Fixtures.receipt(status: .confirmed) }
+        let model = model(receipt: receipt)
+
+        model.checkForPossibleDuplicates()
+        try? await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertTrue(model.possibleDuplicates.isEmpty)
+        XCTAssertNil(model.saveBlocker)
+        let saved = await model.save()
+        XCTAssertTrue(saved)
+    }
+
+    /// The proposal's central rule, stated as a test: finding a match
+    /// changes nothing about whether Save is enabled or what it does.
+    func testPossibleDuplicateWarningNeverGatesSave() async {
+        let receipt = scannedReceipt(suggestions: matchingSuggestions())
+        let match = Fixtures.receipt(purchasedAt: "2026-03-20", vendor: "Maple Foods", totalCents: 11300)
+        api.possibleDuplicatesHandler = { _, _, _, _ in [match] }
+        api.confirmReceiptHandler = { _, _ in Fixtures.receipt(status: .confirmed) }
+        let model = model(receipt: receipt)
+
+        model.checkForPossibleDuplicates()
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(model.possibleDuplicates.isEmpty)
+
+        XCTAssertTrue(model.canSave)
+        XCTAssertNil(model.saveBlocker)
+        let saved = await model.save()
+        XCTAssertTrue(saved)
+    }
+
+    /// A total that stops parsing has nothing left to compare against -
+    /// and a match found a moment ago, against a now-abandoned total, must
+    /// not linger as if it still applied.
+    func testPossibleDuplicatesClearWhenTheTotalBecomesInvalid() async {
+        let receipt = scannedReceipt(suggestions: matchingSuggestions())
+        let match = Fixtures.receipt(purchasedAt: "2026-03-20", vendor: "Maple Foods", totalCents: 11300)
+        api.possibleDuplicatesHandler = { _, _, _, _ in [match] }
+        let model = model(receipt: receipt)
+
+        model.checkForPossibleDuplicates()
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(model.possibleDuplicates.isEmpty)
+
+        model.totalText = "not a number"
+        model.checkForPossibleDuplicates()
+        XCTAssertTrue(model.possibleDuplicates.isEmpty) // cleared synchronously - no network round trip needed to know this
+    }
+
+    /// A capture-time confirm has no server row to compare against yet
+    /// (no `api:` was ever injected) - calling this must be a harmless
+    /// no-op, not a crash or an unstubbed-call failure.
+    func testCaptureTimeConfirmHasNoDuplicateCheck() async {
+        var suggestions = ReceiptSuggestions()
+        suggestions.totalCents = 4520
+        suggestions.purchasedAt = "2026-03-20"
+        let draft = CapturedReceiptDraft(
+            imageData: Data("scan".utf8),
+            suggestions: suggestions,
+            ocrRawText: nil,
+            capturedAt: Date(timeIntervalSince1970: 1_774_000_000),
+            ocrFailureNote: nil
+        )
+        let model = ConfirmReceiptModel(draft: draft) { _ in }
+
+        model.checkForPossibleDuplicates()
+        try? await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertTrue(model.possibleDuplicates.isEmpty)
+    }
 }
 
 final class MoneyInputTests: XCTestCase {

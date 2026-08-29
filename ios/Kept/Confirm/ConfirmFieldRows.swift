@@ -44,6 +44,14 @@ struct SuggestedFieldRow: View {
     /// passes this today; every other SuggestedFieldRow caller leaves it
     /// nil and gets no note, same as before this field existed.
     var disagreementNote: String?
+    /// The HST rate-plausibility hint's text (proposal #7, 2026-08-28), or
+    /// nil to show none. A separate slot from `disagreementNote` rather
+    /// than folded into it: the two signals are independent (two parsers
+    /// disagreeing vs. one value's own ratio looking like a split) and can
+    /// both be true of the same receipt at once, so both must be able to
+    /// render together rather than one silently winning. Only HST passes
+    /// this; every other caller leaves it nil.
+    var rateHintNote: String?
 
     var body: some View {
         LabeledContent(label) {
@@ -62,6 +70,9 @@ struct SuggestedFieldRow: View {
                 }
                 if let disagreementNote {
                     DisagreementNote(message: disagreementNote)
+                }
+                if let rateHintNote {
+                    DisagreementNote(message: rateHintNote)
                 }
             }
         }

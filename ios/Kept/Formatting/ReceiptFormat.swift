@@ -66,6 +66,24 @@ enum ReceiptFormat {
         date.formatted(.iso8601)
     }
 
+    /// "2026-08-14" → "August 2026" - the sticky month header's label
+    /// (ReceiptMonthGrouping.swift, proposal #9, 2026-08-28). Pinned
+    /// UTC/POSIX like `purchaseDate` above, for the identical reason: this
+    /// is a zoneless calendar date, and letting the device's zone in could
+    /// put a day right at the start or end of a month under the wrong
+    /// month's header. Falls back to the raw string on a parse failure,
+    /// the same honesty `purchaseDate` chooses over hiding a broken value.
+    static func monthHeading(_ isoDate: String, locale: Locale = .autoupdatingCurrent) -> String {
+        guard let date = isoDateParser.date(from: isoDate) else {
+            return isoDate
+        }
+        return date.formatted(
+            Date.FormatStyle(date: .omitted, time: .omitted, locale: locale, timeZone: utc)
+                .year()
+                .month(.wide)
+        )
+    }
+
     /// "Aug 6, 2026 at 3:04 PM" - when a queued receipt was captured, for
     /// the Home outbox rows. The device's own zone on purpose: a capture
     /// is a local moment, unlike `purchasedAt`, which is a zoneless

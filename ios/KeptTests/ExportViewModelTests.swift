@@ -14,6 +14,31 @@ final class ExportViewModelTests: XCTestCase {
         api = StubKeptAPI()
     }
 
+    // MARK: - Profile (proposal #10, 2026-08-28 - drives the export presets)
+
+    func testLoadProfileExposesTheFetchedFiscalYearEnd() async {
+        let profile = Fixtures.profile(fiscalYearEndMonth: 6, fiscalYearEndDay: 30)
+        api.fetchProfileHandler = { profile }
+        let model = ExportViewModel(api: api, eventLogger: EventLogger(api: api), pollInterval: .seconds(999))
+
+        await model.loadProfile()
+
+        XCTAssertEqual(model.profile, profile)
+    }
+
+    /// The proposal's own risk, restated for this fetch: a failure here
+    /// must never fabricate a year end (a guessed Dec 31 would be
+    /// silently wrong for someone who set a different one) - `nil` is the
+    /// only honest outcome, exactly like an unfetched profile.
+    func testLoadProfileFailureLeavesProfileNilRatherThanGuessing() async {
+        api.fetchProfileHandler = { throw APIError.network(URLError(.notConnectedToInternet)) }
+        let model = ExportViewModel(api: api, eventLogger: EventLogger(api: api), pollInterval: .seconds(999))
+
+        await model.loadProfile()
+
+        XCTAssertNil(model.profile)
+    }
+
     // MARK: - Starting
 
     func testStartSuccessBeginsTrackingTheReturnedJob() async {

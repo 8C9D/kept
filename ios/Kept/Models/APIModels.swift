@@ -294,3 +294,20 @@ struct SignInResponse: Decodable, Equatable {
     let token: String
     let user: SessionUser
 }
+
+/// GET /api/me (server/src/routes/me.ts's `profileOf`) - this user's own
+/// profile. Read here only for `fiscalYearEndMonth`/`fiscalYearEndDay`
+/// (proposal #10, 2026-08-28, Export/ExportView.swift's period presets) -
+/// spec §5.1 calls the pair "config, not an assumption": it defaults to 31
+/// December, but a preset that assumed that default rather than reading it
+/// would be silently wrong the moment someone sets a different one, and
+/// wrong in a way that produces a plausible-looking export. This client
+/// never writes these fields - PATCH /api/me exists server-side, but
+/// nothing here calls it.
+struct Profile: Decodable, Equatable {
+    let id: UUID
+    let displayName: String?
+    let email: String?
+    let fiscalYearEndMonth: Int
+    let fiscalYearEndDay: Int
+}

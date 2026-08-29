@@ -32,6 +32,27 @@ protocol KeptAPI: Sendable {
     /// is currently showing. No cursor, no limit: an aggregate has no
     /// pages to turn.
     func receiptsSummary(query: ReceiptQuery) async throws -> ReceiptSummary
+    /// GET /api/me (proposal #10, 2026-08-28) - read-only here. This client
+    /// never edits fiscal year settings; ExportView.swift reads the two
+    /// fields to drive the export period presets against the person's
+    /// actual configured year end rather than an assumed calendar year.
+    func fetchProfile() async throws -> Profile
+    /// GET /api/receipts/possible-duplicates (proposal #8, 2026-08-28) - a
+    /// QUERY, never a blocker (the server route's own comment,
+    /// receipts.ts, states this in full): the confirm screen calls this
+    /// once it has a date and a total and WARNS if something comes back;
+    /// nothing here ever refuses a save. `vendor` is sent exactly as
+    /// typed - the server compares it case-and-whitespace-insensitively on
+    /// its own side, so normalizing it here would just be duplicating work
+    /// the query string already asks the server to do. `excludeId` is the
+    /// receipt already open, when there is one, so it does not match
+    /// itself - the obvious bug the proposal calls out by name.
+    func possibleDuplicates(
+        purchasedAt: String,
+        totalCents: Int,
+        vendor: String?,
+        excludeId: UUID?
+    ) async throws -> [Receipt]
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget
     func uploadImage(to target: UploadTarget, data: Data, contentType: ImageUploadContentType) async throws
     func createReceipt(_ request: CreateReceiptRequest) async throws -> Receipt
@@ -40,6 +61,31 @@ protocol KeptAPI: Sendable {
     /// from every list, count and export from that moment on, bytes kept
     /// for CRA's six-year retention. Not the account-deletion hard delete.
     func deleteReceipt(id: UUID) async throws
+    /// PATCH /api/receipts/:id {status: "confirmed"} ALONE - proposal #9's
+    /// swipe-to-confirm on the Home list (2026-08-28): accepts whatever the
+    /// row already has stored as final, with no field review, mirroring the
+    /// web client's bulk-confirm exactly (`confirmPatch`, web/src/
+    /// bulkEdit.ts - "status alone. Never bundles a total or any other
+    /// field"; ratified in `docs/DECISIONS.md` 2026-08-28 for proposal #5).
+    /// This is why it is its own method and not a call to `confirmReceipt`
+    /// with a synthesized `ConfirmReceiptRequest`: that request type always
+    /// encodes every field EXPLICITLY, nulls included, on purpose (its own
+    /// doc comment - the confirm FORM always sends the whole reviewed
+    /// form), so reusing it here would silently clear any field the row's
+    /// own row does not carry a value for. Legitimately refused with 400
+    /// when the receipt has no total (the CHECK constraint the server
+    /// enforces) - callers gate the affordance on `Receipt.totalCents`
+    /// (the raw field), not `displayTotalCents`, so this is offered only
+    /// where it can succeed (HomeView's own comment on why the two differ).
+    func quickConfirmReceipt(id: UUID) async throws -> Receipt
+    /// POST /api/receipts/:id/restore (proposal #9, 2026-08-28) - undo a
+    /// soft delete. Can legitimately fail with 409 `restore_conflict` when
+    /// the freed image slot collided with a different receipt's live image
+    /// in the meantime (server/src/routes/receipts.ts's own doc comment
+    /// carries the full trap); callers surface `error.localizedDescription`
+    /// verbatim - `APIError.requestFailed` already carries the server's
+    /// message unchanged, so there is nothing to reword here.
+    func restoreReceipt(id: UUID) async throws -> Receipt
     func deleteAccount(appleAuthorizationCode: String?) async throws
     func startExport(_ request: ExportRequest) async throws -> ExportJob
     func exportJobs() async throws -> [ExportJob]
@@ -130,6 +176,39 @@ extension APIClient: KeptAPI {
         try await get("/api/receipts/summary", query: query.filterQueryItems)
     }
 
+    func fetchProfile() async throws -> Profile {
+        try await get("/api/me")
+    }
+
+    /// The route is a literal path registered above `/:id` (same shadowing
+    /// reason as `/options` and `/summary`, both above), so it is never
+    /// mistaken for a receipt id either. `totalCents` is sent as a plain
+    /// decimal string - the server's schema parses it back with a regex
+    /// before piping it through the same cents validation every money
+    /// field gets (`possibleDuplicatesQuerySchema`, http/schemas.ts).
+    func possibleDuplicates(
+        purchasedAt: String,
+        totalCents: Int,
+        vendor: String?,
+        excludeId: UUID?
+    ) async throws -> [Receipt] {
+        struct Response: Decodable {
+            let receipts: [Receipt]
+        }
+        var items = [
+            URLQueryItem(name: "purchasedAt", value: purchasedAt),
+            URLQueryItem(name: "totalCents", value: String(totalCents)),
+        ]
+        if let vendor {
+            items.append(URLQueryItem(name: "vendor", value: vendor))
+        }
+        if let excludeId {
+            items.append(URLQueryItem(name: "excludeId", value: excludeId.uuidString.lowercased()))
+        }
+        let response: Response = try await get("/api/receipts/possible-duplicates", query: items)
+        return response.receipts
+    }
+
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget {
         struct Body: Encodable {
             let contentType: ImageUploadContentType
@@ -147,6 +226,24 @@ extension APIClient: KeptAPI {
 
     func confirmReceipt(id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt {
         try await patch("/api/receipts/\(id.uuidString.lowercased())", body: request)
+    }
+
+    /// The one-key body proposal #9's swipe-to-confirm sends - `status`
+    /// alone, never the vendor/total/etc. keys `ConfirmReceiptRequest`
+    /// always carries explicitly (see this method's own protocol doc
+    /// comment for why the two must not be conflated).
+    private struct QuickConfirmBody: Encodable {
+        let status = "confirmed"
+    }
+
+    func quickConfirmReceipt(id: UUID) async throws -> Receipt {
+        try await patch("/api/receipts/\(id.uuidString.lowercased())", body: QuickConfirmBody())
+    }
+
+    /// POST /api/receipts/:id/restore - no body; the server has everything
+    /// it needs from the id and the session (routes/receipts.ts).
+    func restoreReceipt(id: UUID) async throws -> Receipt {
+        try await post("/api/receipts/\(id.uuidString.lowercased())/restore")
     }
 
     /// ⚠ Ordering trap this call site inherits (spec §5, Runbook §6): the

@@ -29,6 +29,17 @@ struct ExportView: View {
     @State private var fiscalYear = Calendar.current.component(.year, from: Date())
     @State private var rangeStart: Date?
     @State private var rangeEnd: Date?
+    /// Proposal #10's preset picker (2026-08-28): which of the six presets
+    /// is currently selected - a plain view-owned value, the same shape
+    /// `fiscalYear`/`rangeStart`/`rangeEnd` above already are, since this
+    /// is UI input state, not something the model fetches or derives.
+    @State private var preset: PeriodPreset = .lastFiscalYear
+    /// Computed once, at this view's init, never re-read - the identical
+    /// choice `web/src/views/ExportView.tsx`'s own `useMemo` makes, for
+    /// the identical reason (its own comment): a stable "today" costs
+    /// nothing and keeps the preset picker from silently reflowing under
+    /// someone mid-choice on a session that spans a midnight rollover.
+    @State private var today = FiscalPresets.todayCalendarDate(now: Date())
 
     init(api: APIClient, eventLogger: EventLogger) {
         _model = StateObject(wrappedValue: ExportViewModel(api: api, eventLogger: eventLogger))
@@ -47,6 +58,9 @@ struct ExportView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await model.loadHistory()
+        }
+        .task {
+            await model.loadProfile()
         }
         .alert(
             "The export could not be started",
@@ -128,7 +142,52 @@ struct ExportView: View {
                 .disabled(isStarting || rangeStart == nil || rangeEnd == nil)
             }
             .padding(.vertical, 4)
+
+            presetStarter
         }
+    }
+
+    /// Proposal #10's third starter, over the two above: a picker among
+    /// the six presets, the RESOLVED range shown before generating
+    /// anything (the proposal's own requirement - an export names its own
+    /// period in its filename, §8), and one button. Hidden entirely until
+    /// `model.profile` loads rather than rendered against a guessed year
+    /// end - `resolvedPreset`'s own doc comment states why. Mirrors
+    /// `web/src/views/ExportView.tsx`'s identical starter (read-only
+    /// reference), including the ordering: after the two pre-existing
+    /// starters, never before them.
+    @ViewBuilder
+    private var presetStarter: some View {
+        if let resolvedPreset {
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Period", selection: $preset) {
+                    ForEach(PeriodPreset.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                Text("\(ReceiptFormat.purchaseDate(resolvedPreset.range.start)) – \(ReceiptFormat.purchaseDate(resolvedPreset.range.end))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("Export period") {
+                    Task { await model.start(resolvedPreset.request) }
+                }
+                .disabled(isStarting)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    /// The currently-selected preset, resolved against THIS user's own
+    /// fiscal year end - nil exactly when `model.profile` has not loaded
+    /// (yet, or ever), which is what keeps `presetStarter` above hidden
+    /// rather than wrong.
+    private var resolvedPreset: ResolvedPreset? {
+        guard let profile = model.profile else { return nil }
+        return resolvePreset(
+            preset,
+            today: today,
+            fiscalYearEnd: FiscalYearEnd(month: profile.fiscalYearEndMonth, day: profile.fiscalYearEndDay)
+        )
     }
 
     private var isStarting: Bool {
@@ -295,6 +354,72 @@ struct ExportView: View {
                 }
             }
         }
+    }
+}
+
+/// Proposal #10 (approved, docs/proposals/2026-08-28-ux-enhancements.md
+/// #10): the six presets over the two pre-existing starters (fiscal year
+/// number, explicit range). Mirrors `web/src/views/ExportView.tsx`'s
+/// identical `PeriodPreset` one for one, including the label text, so the
+/// two clients cannot drift on what "Q1" or "this fiscal year to date"
+/// means.
+enum PeriodPreset: String, CaseIterable, Identifiable, Hashable {
+    case lastFiscalYear, yearToDate, q1, q2, q3, q4
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .lastFiscalYear: return "Last fiscal year"
+        case .yearToDate: return "This fiscal year to date"
+        case .q1: return "Q1"
+        case .q2: return "Q2"
+        case .q3: return "Q3"
+        case .q4: return "Q4"
+        }
+    }
+}
+
+/// A preset resolved against one user's fiscal year end: what to show
+/// (`range`) and exactly what starting it sends (`request`).
+struct ResolvedPreset: Equatable {
+    let range: DateRange
+    let request: ExportRequest
+}
+
+/// Mirrors `web/src/views/ExportView.tsx`'s identical `resolvePreset`
+/// (read-only reference) line for line. "Last fiscal year" prefers
+/// `{fiscalYearEndingIn}` and lets the SERVER derive the actual dates
+/// (§4.1a, §5.1) - `range` here is a preview only, computed the same way
+/// purely so it can be shown before generating anything (proposal #10's
+/// own requirement); it is not what gets sent. The other three presets
+/// have no `{fiscalYearEndingIn}` equivalent (the API only derives a whole
+/// fiscal year that way, never a quarter or a to-date slice), so `range`
+/// IS the request for those - computed once, sent unchanged.
+func resolvePreset(
+    _ preset: PeriodPreset,
+    today: CalendarDate,
+    fiscalYearEnd fye: FiscalYearEnd
+) -> ResolvedPreset {
+    switch preset {
+    case .lastFiscalYear:
+        let result = FiscalPresets.lastFiscalYear(today: today, fiscalYearEnd: fye)
+        return ResolvedPreset(range: result.range, request: .fiscalYear(endingIn: result.endYear))
+    case .yearToDate:
+        let range = FiscalPresets.fiscalYearToDate(today: today, fiscalYearEnd: fye)
+        return ResolvedPreset(range: range, request: .range(periodStart: range.start, periodEnd: range.end))
+    case .q1:
+        let range = FiscalPresets.fiscalQuarters(today: today, fiscalYearEnd: fye).q1
+        return ResolvedPreset(range: range, request: .range(periodStart: range.start, periodEnd: range.end))
+    case .q2:
+        let range = FiscalPresets.fiscalQuarters(today: today, fiscalYearEnd: fye).q2
+        return ResolvedPreset(range: range, request: .range(periodStart: range.start, periodEnd: range.end))
+    case .q3:
+        let range = FiscalPresets.fiscalQuarters(today: today, fiscalYearEnd: fye).q3
+        return ResolvedPreset(range: range, request: .range(periodStart: range.start, periodEnd: range.end))
+    case .q4:
+        let range = FiscalPresets.fiscalQuarters(today: today, fiscalYearEnd: fye).q4
+        return ResolvedPreset(range: range, request: .range(periodStart: range.start, periodEnd: range.end))
     }
 }
 

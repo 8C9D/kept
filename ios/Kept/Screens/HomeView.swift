@@ -66,11 +66,38 @@ struct HomeView: View {
                 summarySection
 
                 Section {
-                    listContent
+                    nonLoadedContent
                 } header: {
                     listHeader
                 }
+
+                // Proposal #9 (2026-08-28): sticky month section headers -
+                // one Section per contiguous run of receipts sharing a
+                // purchase month (ReceiptMonthGrouping.swift), a rendering
+                // pass over what the server already ordered and paged,
+                // never a re-sort. `.listStyle(.plain)` below is what
+                // makes these headers STICK while scrolling, rather than
+                // scrolling away with the rows underneath them.
+                if case .loaded = model.phase {
+                    ForEach(ReceiptMonthGrouping.sections(of: model.receipts)) { section in
+                        Section {
+                            ForEach(section.receipts) { receipt in
+                                receiptRow(receipt)
+                            }
+                        } header: {
+                            Text(section.heading)
+                        }
+                    }
+                    nextPageFooter
+                }
             }
+            // `.plain` (UITableView.Style.plain under the hood) is what
+            // gives SwiftUI section headers their sticky/pinned behaviour
+            // while scrolling; `.insetGrouped`/`.grouped` sections scroll
+            // away with their rows instead. Proposal #9 explicitly asks
+            // for sticky month headers, so this is set deliberately rather
+            // than left to whatever the ambient default resolves to.
+            .listStyle(.plain)
             .navigationTitle("Kept")
             .searchable(
                 text: $model.searchText,
@@ -271,6 +298,62 @@ struct HomeView: View {
                             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                     }
                 }
+            }
+            // Proposal #9's undo toast (2026-08-28): pinned to the bottom
+            // of the screen via `.overlay`, deliberately NOT a row inside
+            // the scrolling List - the brief's own wording is "a delete
+            // that scrolls away should not be unrecoverable," and an
+            // overlay is what keeps this visible and tappable through a
+            // scroll of the list underneath it, where a row would scroll
+            // away with everything else.
+            .overlay(alignment: .bottom) {
+                if let pending = model.pendingUndo {
+                    UndoToast(label: pending.label) {
+                        Task { await model.undoDelete() }
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.default, value: model.pendingUndo)
+            // The toast's timeout: generous enough to be genuinely usable
+            // (six seconds - a person swiping a phone one-handed needs
+            // longer than a glance), tied to THIS pending undo's identity
+            // via `.task(id:)` - a new delete, or a tap on Undo itself
+            // (which clears `pendingUndo` before this task next runs),
+            // cancels the sleep rather than dismissing a DIFFERENT undo's
+            // toast early. This is the one timeout on the one toast this
+            // proposal builds - see HomeView's own delete/undo design note
+            // in the task report for why a second, independent recovery
+            // path (a "recently deleted" screen) is out of this
+            // proposal's stated scope.
+            .task(id: model.pendingUndo) {
+                guard model.pendingUndo != nil else { return }
+                do {
+                    try await Task.sleep(for: .seconds(6))
+                } catch {
+                    return
+                }
+                model.dismissUndo()
+            }
+            .alert(
+                "Something went wrong",
+                isPresented: Binding(
+                    get: { model.actionError != nil },
+                    set: { if !$0 { model.clearActionError() } }
+                )
+            ) {
+                Button("OK", role: .cancel) {
+                    model.clearActionError()
+                }
+            } message: {
+                // The server's own words when there are any - most
+                // pointedly 409 `restore_conflict`'s explanation of what
+                // collided and what to do about it (spec: surface it
+                // verbatim, never invent wording) - a transport failure's
+                // otherwise.
+                Text(model.actionError ?? "")
             }
         }
     }
@@ -550,8 +633,11 @@ struct HomeView: View {
         }
     }
 
+    /// The header Section's content: the loading/empty/failed states, or
+    /// nothing at all once loaded - the loaded rows live in their own
+    /// per-month Sections now (proposal #9, `body` above), not here.
     @ViewBuilder
-    private var listContent: some View {
+    private var nonLoadedContent: some View {
         switch model.phase {
         case .loading:
             CenteredProgressRow(label: "Loading receipts")
@@ -582,15 +668,53 @@ struct HomeView: View {
             }
 
         case .loaded:
-            ForEach(model.receipts) { receipt in
-                NavigationLink(value: receipt) {
-                    ReceiptRow(receipt: receipt)
-                }
-                .onAppear {
-                    Task { await model.loadMoreIfNeeded(after: receipt) }
-                }
+            EmptyView()
+        }
+    }
+
+    /// One row, wherever its month section places it: the tap target
+    /// (unchanged), the paging trigger (unchanged), and proposal #9's two
+    /// swipe actions.
+    ///
+    /// **Swipe to delete** (trailing): no confirmation dialog - the swipe
+    /// itself plus the tap on the revealed button is the deliberate act,
+    /// matching ordinary iOS list conventions (Mail, Reminders) and the
+    /// proposal's own framing: the undo toast this triggers (HomeView's
+    /// overlay, below) is what makes the gesture SAFE, not a second "are
+    /// you sure" step in front of it.
+    ///
+    /// **Swipe to confirm** (leading): offered ONLY when
+    /// `receipt.canQuickConfirm` - see that extension's own comment for
+    /// why it reads the raw `totalCents`, not `displayTotalCents`. Not
+    /// gated behind a dialog either, on the identical reasoning: the row
+    /// already shows the vendor, date and total the person is confirming,
+    /// the same amount of "looking" the web client's bulk-confirm button
+    /// asks for before its own un-dialogued Confirm (web/src/views/
+    /// ReceiptsTable.tsx).
+    @ViewBuilder
+    private func receiptRow(_ receipt: Receipt) -> some View {
+        NavigationLink(value: receipt) {
+            ReceiptRow(receipt: receipt)
+        }
+        .onAppear {
+            Task { await model.loadMoreIfNeeded(after: receipt) }
+        }
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                Task { await model.deleteReceipt(receipt) }
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
-            nextPageFooter
+        }
+        .swipeActions(edge: .leading) {
+            if receipt.canQuickConfirm {
+                Button {
+                    Task { await model.quickConfirmReceipt(receipt) }
+                } label: {
+                    Label("Confirm", systemImage: "checkmark")
+                }
+                .tint(.green)
+            }
         }
     }
 
@@ -610,6 +734,29 @@ struct HomeView: View {
 }
 
 // MARK: - Rows
+
+/// Proposal #9's swipe-to-confirm gate: whether `receipt` can be
+/// quick-confirmed without failing.
+///
+/// ⚠ Deliberately reads `totalCents` (the RAW stored field), never
+/// `displayTotalCents`. The server's `PATCH {status: "confirmed"}` check
+/// (routes/receipts.ts) reads `existing.totalCents` - the row's own
+/// stored value, written once at capture time by the on-device parse
+/// (`POST /api/receipts`'s create handler) - and NEVER the served §7.3
+/// merge. `displayTotalCents` can show a total the merge found even when
+/// the raw column is still nil: the merge's amount comes from the
+/// SERVER's own heuristic re-parse of the stored OCR text
+/// (`heuristicOnly(ocr?.totalCents ...)`, server/src/domain/
+/// mergedSuggestions.ts), a computation independent of the on-device parse
+/// that wrote the raw column, and the two can disagree. Gating on
+/// `displayTotalCents` would offer a swipe action that looks available on
+/// a row showing a total, then fails after the tap - exactly what the
+/// brief says not to do ("do not offer it where it cannot succeed").
+private extension Receipt {
+    var canQuickConfirm: Bool {
+        status == .pending && totalCents != nil
+    }
+}
 
 /// One receipt in the list: vendor and date on the left, amount on the
 /// right, an amber badge when no human has confirmed the numbers yet.
@@ -781,5 +928,43 @@ struct PendingBadge: View {
             .padding(.vertical, 2)
             .background(.orange.opacity(0.18), in: Capsule())
             .foregroundStyle(.orange)
+    }
+}
+
+/// The undo affordance for swipe-to-delete (proposal #9, 2026-08-28): a
+/// toast pinned to the bottom of the screen via HomeView's `.overlay`,
+/// which is what keeps it visible and tappable through a scroll of the
+/// list underneath - "a delete that scrolls away should not be
+/// unrecoverable" is the brief's own wording, and an overlay, unlike a row
+/// inserted into the scrolling list content, never scrolls with it.
+///
+/// Wording matches the existing delete-confirmation dialog's honesty
+/// (ReceiptDetailView: "the record and its image stay stored for tax
+/// retention - they aren't erased") in miniature, shortened for a toast's
+/// width rather than softened - the delete this undoes is soft
+/// server-side (§10B) either way; the only difference the toast marks is
+/// that THIS delete's undo is one tap away for a few seconds through
+/// `POST /api/receipts/:id/restore` (server/src/routes/receipts.ts).
+struct UndoToast: View {
+    let label: String
+    let onUndo: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(label) deleted")
+                    .font(.subheadline.weight(.medium))
+                Text("Kept for tax retention, not erased")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Undo", action: onUndo)
+                .font(.subheadline.weight(.semibold))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .shadow(radius: 4)
     }
 }

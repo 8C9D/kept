@@ -10,7 +10,14 @@ struct ReceiptDetailView: View {
     @StateObject private var model: ReceiptDetailModel
     @ObservedObject private var options: ReceiptOptionsStore
     private let receipt: Receipt
-    private let api: APIClient
+    /// `any KeptAPI` rather than the concrete `APIClient` - both
+    /// `ReceiptDetailModel` and `ReceiptImageUploadView` this screen
+    /// already builds accept the protocol; widening this property to match
+    /// (2026-08-28) costs nothing at either of this view's two call sites,
+    /// which both hand in a real `APIClient` regardless, and is what lets
+    /// this screen be handed straight to `ConfirmReceiptView` below for
+    /// proposal #8's "open the matching receipt" affordance.
+    private let api: any KeptAPI
     private let eventLogger: EventLogger
     /// Runs after a successful delete, before this screen dismisses -
     /// HomeView wires this to a full list reload, the same pattern every
@@ -51,7 +58,7 @@ struct ReceiptDetailView: View {
     }
 
     init(
-        api: APIClient,
+        api: any KeptAPI,
         options: ReceiptOptionsStore,
         eventLogger: EventLogger,
         receipt: Receipt,
@@ -102,6 +109,7 @@ struct ReceiptDetailView: View {
                     model: presented,
                     options: options,
                     eventLogger: eventLogger,
+                    api: api,
                     onSaved: {
                         confirmModel = nil
                         // The row just changed; re-read it so the screen

@@ -63,6 +63,14 @@ final class APIClient: Sendable {
         return try await perform(method: "POST", path: path, query: [], body: bodyData, requiresSession: requiresSession)
     }
 
+    /// POST with no body at all - `/api/receipts/:id/restore` (proposal
+    /// #9, 2026-08-28) reads nothing beyond the id in the path and the
+    /// session; the same reasoning as `delete(_ path:)`'s bodyless overload
+    /// below.
+    func post<Response: Decodable>(_ path: String) async throws -> Response {
+        try await perform(method: "POST", path: path, query: [], body: nil, requiresSession: true)
+    }
+
     func patch<Body: Encodable, Response: Decodable>(
         _ path: String,
         body: Body

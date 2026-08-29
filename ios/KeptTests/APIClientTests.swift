@@ -532,6 +532,162 @@ final class APIClientTests: XCTestCase {
         XCTAssertTrue(options.isEmpty)
     }
 
+    // MARK: - Possible duplicates (proposal #8, 2026-08-28)
+
+    func testPossibleDuplicatesQueryItemsIncludeVendorAndExcludeIdWhenGiven() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: #"{"receipts": []}"#)
+
+        _ = try await client.possibleDuplicates(
+            purchasedAt: "2026-04-01",
+            totalCents: 550,
+            vendor: "Tim Hortons",
+            excludeId: try XCTUnwrap(UUID(uuidString: "0A1B2C3D-0000-4000-8000-000000000001"))
+        )
+
+        let url = try XCTUnwrap(transport.requests.first?.url)
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.path, "/api/receipts/possible-duplicates")
+        let items = try XCTUnwrap(components.queryItems)
+        XCTAssertEqual(items.first { $0.name == "purchasedAt" }?.value, "2026-04-01")
+        XCTAssertEqual(items.first { $0.name == "totalCents" }?.value, "550")
+        XCTAssertEqual(items.first { $0.name == "vendor" }?.value, "Tim Hortons")
+        // Lowercased to match the server's canonical uuid form, the same
+        // rule receiptDetail(id:) already follows.
+        XCTAssertEqual(
+            items.first { $0.name == "excludeId" }?.value,
+            "0a1b2c3d-0000-4000-8000-000000000001"
+        )
+    }
+
+    /// `vendor` and `excludeId` are both optional server-side (the null-
+    /// vendor-matches-null-vendor rule, and a capture-time confirm with no
+    /// receipt to exclude) - sent only when present, never as an empty
+    /// string or a literal "null".
+    func testPossibleDuplicatesOmitsVendorAndExcludeIdWhenNil() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: #"{"receipts": []}"#)
+
+        _ = try await client.possibleDuplicates(
+            purchasedAt: "2026-04-01",
+            totalCents: 550,
+            vendor: nil,
+            excludeId: nil
+        )
+
+        let url = try XCTUnwrap(transport.requests.first?.url)
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let items = try XCTUnwrap(components.queryItems)
+        XCTAssertEqual(items.map(\.name).sorted(), ["purchasedAt", "totalCents"])
+    }
+
+    func testDecodesPossibleDuplicatesReceipts() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: possibleDuplicatesJSON)
+
+        let matches = try await client.possibleDuplicates(
+            purchasedAt: "2026-04-01",
+            totalCents: 550,
+            vendor: "Tim Hortons",
+            excludeId: nil
+        )
+
+        XCTAssertEqual(matches.count, 1)
+        // The same `receiptResponse` shape every other route serves - this
+        // is a plain decode test, not a duplicate-matching test (the
+        // server owns that logic; server/tests/integration/
+        // possibleDuplicates.test.ts covers it).
+        XCTAssertEqual(matches.first?.vendor, "Tim Hortons")
+        XCTAssertEqual(matches.first?.purchasedAt, "2026-04-01")
+        XCTAssertEqual(matches.first?.totalCents, 550)
+    }
+
+    // MARK: - Swipe actions (proposal #9, 2026-08-28)
+
+    /// The one thing that matters most about this request: the body is
+    /// EXACTLY `{"status":"confirmed"}` - never the vendor/total/etc. keys
+    /// `ConfirmReceiptRequest` always sends explicitly, which would
+    /// silently clear whatever the row does not carry a value for (see
+    /// `KeptAPI.quickConfirmReceipt`'s own doc comment).
+    func testQuickConfirmReceiptPatchesStatusConfirmedAloneNoOtherFields() async throws {
+        let client = try makeClient()
+        let id = try XCTUnwrap(UUID(uuidString: "0a1b2c3d-0000-4000-8000-000000000001"))
+        transport.enqueue(status: 200, jsonBody: singleReceiptJSON)
+
+        let receipt = try await client.quickConfirmReceipt(id: id)
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.httpMethod, "PATCH")
+        XCTAssertEqual(request.url?.path, "/api/receipts/\(id.uuidString.lowercased())")
+        let body = try XCTUnwrap(request.httpBody)
+        XCTAssertEqual(String(decoding: body, as: UTF8.self), #"{"status":"confirmed"}"#)
+        XCTAssertEqual(receipt.id, id)
+        XCTAssertEqual(receipt.status, .confirmed)
+    }
+
+    func testRestoreReceiptPostsWithNoBodyToTheRestoreRoute() async throws {
+        let client = try makeClient()
+        let id = try XCTUnwrap(UUID(uuidString: "0a1b2c3d-0000-4000-8000-000000000001"))
+        transport.enqueue(status: 200, jsonBody: singleReceiptJSON)
+
+        let receipt = try await client.restoreReceipt(id: id)
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/api/receipts/\(id.uuidString.lowercased())/restore")
+        XCTAssertNil(request.httpBody, "the restore route reads nothing beyond the id and the session")
+        XCTAssertEqual(receipt.id, id)
+    }
+
+    /// The server's own 409 `restore_conflict` wording (routes/receipts.ts
+    /// `restoreConflictError()`), surfaced through the identical error
+    /// mapping every other endpoint uses - never reworded by this client
+    /// (spec: surface it verbatim).
+    func testRestoreReceiptSurfacesTheRestoreConflict409Verbatim() async throws {
+        let client = try makeClient()
+        let message = "This receipt can't be restored: one of its images was re-captured " +
+            "onto a different receipt after this one was deleted, so restoring " +
+            "it would collide with that receipt's live image. Delete or replace " +
+            "the other receipt's image first, or leave this receipt deleted."
+        transport.enqueue(
+            status: 409,
+            jsonBody: #"{"error":{"code":"restore_conflict","message":"\#(message)"}}"#
+        )
+
+        do {
+            _ = try await client.restoreReceipt(id: UUID())
+            XCTFail("Expected the conflict to be thrown")
+        } catch APIError.requestFailed(let code, let receivedMessage, let status) {
+            XCTAssertEqual(code, "restore_conflict")
+            XCTAssertEqual(receivedMessage, message)
+            XCTAssertEqual(status, 409)
+        }
+    }
+
+    // MARK: - Profile (proposal #10, 2026-08-28)
+
+    func testFetchProfileDecodesTheFiscalYearEndFields() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: """
+        {
+          "id": "0a1b2c3d-0000-4000-8000-000000000009",
+          "displayName": "the second user",
+          "email": "second-user@example.com",
+          "fiscalYearEndMonth": 6,
+          "fiscalYearEndDay": 30
+        }
+        """)
+
+        let profile = try await client.fetchProfile()
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertEqual(request.url?.path, "/api/me")
+        XCTAssertEqual(profile.displayName, "the second user")
+        XCTAssertEqual(profile.fiscalYearEndMonth, 6)
+        XCTAssertEqual(profile.fiscalYearEndDay, 30)
+    }
+
     // MARK: - Account deletion
 
     func testDeleteAccountSendsTheCodeAndAcceptsAnEmpty204() async throws {
@@ -608,6 +764,31 @@ final class APIClientTests: XCTestCase {
 
     // MARK: - Server-shaped JSON
 
+    /// One bare `receiptResponse` - what `PATCH .../:id`,
+    /// `POST .../:id/restore` and the other single-receipt routes answer
+    /// with, outside a list envelope.
+    private let singleReceiptJSON = """
+    {
+      "id": "0a1b2c3d-0000-4000-8000-000000000001",
+      "purchasedAt": "2026-03-20",
+      "capturedAt": "2026-03-20T12:00:00.000Z",
+      "vendor": "Staples",
+      "subtotalCents": 2500,
+      "hstCents": 325,
+      "tipCents": null,
+      "otherFeesCents": null,
+      "totalCents": 2925,
+      "currency": "CAD",
+      "category": "office",
+      "paymentMethod": "Visa",
+      "notes": null,
+      "status": "confirmed",
+      "suggestions": null,
+      "createdAt": "2026-08-05T10:00:00.000Z",
+      "updatedAt": "2026-08-05T10:00:00.000Z"
+    }
+    """
+
     /// Mirrors server/src/routes/receipts.ts `receiptResponse` exactly,
     /// including JavaScript's toISOString timestamps and null for absent
     /// nullable fields.
@@ -658,6 +839,36 @@ final class APIClientTests: XCTestCase {
     """
 
     private let emptyPageJSON = #"{"receipts": [], "nextCursor": null, "pendingCount": 0}"#
+
+    /// GET /api/receipts/possible-duplicates's wire shape (proposal #8,
+    /// 2026-08-28) - the same `receiptResponse` projection every other
+    /// route serves, just under a bare `{receipts: [...]}` with no cursor
+    /// or pending count (an exact-match query has no pages to turn).
+    private let possibleDuplicatesJSON = """
+    {
+      "receipts": [
+        {
+          "id": "0a1b2c3d-0000-4000-8000-000000000001",
+          "purchasedAt": "2026-04-01",
+          "capturedAt": "2026-04-01T12:00:00.000Z",
+          "vendor": "Tim Hortons",
+          "subtotalCents": 500,
+          "hstCents": 50,
+          "tipCents": null,
+          "otherFeesCents": null,
+          "totalCents": 550,
+          "currency": "CAD",
+          "category": null,
+          "paymentMethod": null,
+          "notes": null,
+          "status": "pending",
+          "suggestions": null,
+          "createdAt": "2026-08-05T10:00:00.000Z",
+          "updatedAt": "2026-08-05T10:00:00.000Z"
+        }
+      ]
+    }
+    """
 
     /// The detail response as the server serves it after the 2026-08-26
     /// field reduction - including `suggestions.vendorTaxNumber`, which the

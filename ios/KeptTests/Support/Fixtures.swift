@@ -125,6 +125,25 @@ enum Fixtures {
         )
     }
 
+    /// GET /api/me's shape (proposal #10). Defaults to the server's own
+    /// default year end (§5.1: 31 December) so a test only overrides what
+    /// it is actually pinning a non-December year end to assert on.
+    static func profile(
+        id: UUID = UUID(),
+        displayName: String? = "Synthetic User A",
+        email: String? = nil,
+        fiscalYearEndMonth: Int = 12,
+        fiscalYearEndDay: Int = 31
+    ) -> Profile {
+        Profile(
+            id: id,
+            displayName: displayName,
+            email: email,
+            fiscalYearEndMonth: fiscalYearEndMonth,
+            fiscalYearEndDay: fiscalYearEndDay
+        )
+    }
+
     static func signInResponse(token: String = "session-jwt") -> SignInResponse {
         SignInResponse(
             token: token,

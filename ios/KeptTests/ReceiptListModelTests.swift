@@ -471,4 +471,194 @@ final class ReceiptListModelTests: XCTestCase {
         XCTAssertEqual(model.nextPage, .idle)
         XCTAssertEqual(model.receipts, [last, recovered])
     }
+
+    // MARK: - Swipe to delete, with undo (proposal #9, 2026-08-28)
+
+    func testDeleteReceiptCallsTheAPIReloadsTheListAndRecordsTheUndoOpportunity() async {
+        let receipt = Fixtures.receipt(vendor: "Staples")
+        stubPages(byCursor: [nil: Fixtures.page([receipt])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        api.deleteReceiptHandler = { id in XCTAssertEqual(id, receipt.id) }
+        // The reload after a successful delete - the same "never a local
+        // splice" rule every other list mutation in this app follows.
+        stubPages(byCursor: [nil: Fixtures.page([])])
+
+        await model.deleteReceipt(receipt)
+
+        XCTAssertEqual(api.deleteReceiptCalls, [receipt.id])
+        XCTAssertEqual(model.phase, .empty)
+        XCTAssertEqual(model.pendingUndo, ReceiptListModel.PendingUndo(receiptId: receipt.id, label: "Staples"))
+        XCTAssertNil(model.actionError)
+    }
+
+    /// A vendor-less receipt still names something in the toast, rather
+    /// than reading as a blank subject for "deleted".
+    func testDeleteReceiptWithoutAVendorLabelsTheUndoGenerically() async {
+        let receipt = Fixtures.receipt(vendor: nil)
+        stubPages(byCursor: [nil: Fixtures.page([receipt])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        api.deleteReceiptHandler = { _ in }
+        stubPages(byCursor: [nil: Fixtures.page([])])
+
+        await model.deleteReceipt(receipt)
+
+        XCTAssertEqual(model.pendingUndo?.label, "Receipt")
+    }
+
+    func testDeleteReceiptFailureSurfacesTheErrorAndRecordsNoUndo() async {
+        let receipt = Fixtures.receipt()
+        stubPages(byCursor: [nil: Fixtures.page([receipt])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        api.deleteReceiptHandler = { _ in
+            throw APIError.requestFailed(code: "not_found", message: "Receipt not found", status: 404)
+        }
+
+        await model.deleteReceipt(receipt)
+
+        XCTAssertEqual(model.actionError, "Receipt not found")
+        XCTAssertNil(model.pendingUndo)
+        // Nothing was reloaded - the row a failed delete left untouched is
+        // still exactly what was already on screen.
+        XCTAssertEqual(model.receipts, [receipt])
+    }
+
+    func testUndoDeleteRestoresReloadsAndClearsThePendingUndo() async {
+        let receipt = Fixtures.receipt()
+        stubPages(byCursor: [nil: Fixtures.page([receipt])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        api.deleteReceiptHandler = { _ in }
+        stubPages(byCursor: [nil: Fixtures.page([])])
+        await model.deleteReceipt(receipt)
+        XCTAssertNotNil(model.pendingUndo)
+
+        api.restoreReceiptHandler = { id in
+            XCTAssertEqual(id, receipt.id)
+            return receipt
+        }
+        // The restore's own reload brings the row back.
+        stubPages(byCursor: [nil: Fixtures.page([receipt])])
+
+        await model.undoDelete()
+
+        XCTAssertEqual(api.restoreReceiptCalls, [receipt.id])
+        XCTAssertNil(model.pendingUndo)
+        XCTAssertEqual(model.receipts, [receipt])
+        XCTAssertNil(model.actionError)
+    }
+
+    /// The trap the brief names by name: restoring can legitimately fail
+    /// with 409 `restore_conflict` because the freed image slot collided
+    /// with a different receipt's live image in the meantime - the
+    /// server's own explanation must reach the person UNCHANGED.
+    func testUndoDeleteSurfacesARestoreConflictVerbatim() async {
+        let receipt = Fixtures.receipt()
+        stubPages(byCursor: [nil: Fixtures.page([receipt])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        api.deleteReceiptHandler = { _ in }
+        stubPages(byCursor: [nil: Fixtures.page([])])
+        await model.deleteReceipt(receipt)
+
+        let serverMessage = "This receipt can't be restored: one of its images was re-captured " +
+            "onto a different receipt after this one was deleted, so restoring " +
+            "it would collide with that receipt's live image. Delete or replace " +
+            "the other receipt's image first, or leave this receipt deleted."
+        api.restoreReceiptHandler = { _ in
+            throw APIError.requestFailed(code: "restore_conflict", message: serverMessage, status: 409)
+        }
+
+        await model.undoDelete()
+
+        XCTAssertEqual(model.actionError, serverMessage)
+        // Cleared regardless of outcome - a failed restore is not silently
+        // retryable against stale state by tapping Undo again.
+        XCTAssertNil(model.pendingUndo)
+    }
+
+    func testUndoDeleteWithNoPendingUndoIsANoOp() async {
+        let model = makeModel()
+
+        await model.undoDelete()
+
+        XCTAssertTrue(api.restoreReceiptCalls.isEmpty)
+    }
+
+    func testDismissUndoClearsThePendingUndoWithoutCallingTheAPI() async {
+        let receipt = Fixtures.receipt()
+        stubPages(byCursor: [nil: Fixtures.page([receipt])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        api.deleteReceiptHandler = { _ in }
+        stubPages(byCursor: [nil: Fixtures.page([])])
+        await model.deleteReceipt(receipt)
+        XCTAssertNotNil(model.pendingUndo)
+
+        model.dismissUndo()
+
+        XCTAssertNil(model.pendingUndo)
+        XCTAssertTrue(api.restoreReceiptCalls.isEmpty)
+    }
+
+    func testClearActionErrorResetsTheFailureState() async {
+        let receipt = Fixtures.receipt()
+        stubPages(byCursor: [nil: Fixtures.page([receipt])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        api.deleteReceiptHandler = { _ in throw APIError.network(URLError(.notConnectedToInternet)) }
+        await model.deleteReceipt(receipt)
+        XCTAssertNotNil(model.actionError)
+
+        model.clearActionError()
+
+        XCTAssertNil(model.actionError)
+    }
+
+    // MARK: - Swipe to confirm: quick confirm (proposal #9, 2026-08-28)
+
+    func testQuickConfirmReceiptCallsTheAPIAndReloadsTheList() async {
+        let pending = Fixtures.receipt(totalCents: 1500, status: .pending)
+        stubPages(byCursor: [nil: Fixtures.page([pending])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        let confirmed = Fixtures.receipt(id: pending.id, totalCents: 1500, status: .confirmed)
+        api.quickConfirmReceiptHandler = { id in
+            XCTAssertEqual(id, pending.id)
+            return confirmed
+        }
+        stubPages(byCursor: [nil: Fixtures.page([confirmed])])
+
+        await model.quickConfirmReceipt(pending)
+
+        XCTAssertEqual(api.quickConfirmReceiptCalls, [pending.id])
+        XCTAssertEqual(model.receipts, [confirmed])
+        XCTAssertNil(model.actionError)
+    }
+
+    /// The server's own 400 when the row genuinely has no total (the CHECK
+    /// constraint) - reachable in principle even though HomeView is not
+    /// supposed to ever offer the swipe action in that state
+    /// (`Receipt.canQuickConfirm`), so the model's own failure path is
+    /// still exercised and still honest rather than assumed unreachable.
+    func testQuickConfirmReceiptFailureSurfacesTheError() async {
+        let pending = Fixtures.receipt(status: .pending)
+        stubPages(byCursor: [nil: Fixtures.page([pending])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        api.quickConfirmReceiptHandler = { _ in
+            throw APIError.requestFailed(
+                code: "invalid_request",
+                message: "a confirmed receipt requires a total",
+                status: 400
+            )
+        }
+
+        await model.quickConfirmReceipt(pending)
+
+        XCTAssertEqual(model.actionError, "a confirmed receipt requires a total")
+        XCTAssertEqual(model.receipts, [pending], "a failed quick-confirm leaves the row untouched")
+    }
 }

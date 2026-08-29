@@ -22,16 +22,27 @@ struct ConfirmReceiptView: View {
     /// (EventLogger's own doc comment), so every call site below is a
     /// plain, unawaited `log()`: nothing here may block or fail visibly.
     let eventLogger: EventLogger
+    /// Proposal #8 (2026-08-28)'s "open the matching receipt" affordance
+    /// only - nothing else in this view talks to the network directly.
+    /// `nil` for a capture-time confirm, which has no server row to
+    /// compare against yet (ConfirmReceiptModel's `duplicateCheckAction`
+    /// doc comment states why in full) - `model.possibleDuplicates` stays
+    /// permanently empty in that case, so `duplicateWarningSection` never
+    /// renders and this is never dereferenced.
+    var api: (any KeptAPI)? = nil
     let onSaved: () async -> Void
     let onSetAside: () async -> Void
 
     @FocusState private var focusedField: ConfirmReceiptModel.EditableField?
     @State private var showZoomedImage = false
+    /// Non-nil while a proposal #8 match is open for comparison.
+    @State private var openedDuplicateMatch: Receipt?
 
     var body: some View {
         Form {
             imageSection
             totalSection
+            duplicateWarningSection
             detailFieldsSection
             optionalFieldsSection
             saveSection
@@ -90,6 +101,25 @@ struct ConfirmReceiptView: View {
         .onChange(of: options.options) { _, _ in
             applyVendorDefaultsIfAvailable()
         }
+        // Proposal #8 (2026-08-28): re-checks for a possible duplicate
+        // whenever the date, vendor or total changes, debounced the same
+        // way HomeView's search box is - `.task(id:)` cancels and restarts
+        // on every keystroke, so only the last one outlives the sleep and
+        // typing a total costs one request, not one per digit. The run at
+        // appearance reaches checkForPossibleDuplicates() with whatever
+        // the form opened prefilled with, which is exactly when a
+        // re-scanned duplicate is worth catching.
+        // model.checkForPossibleDuplicates() is itself fire-and-forget and
+        // a no-op with no injected lookup (a capture-time confirm) - this
+        // task only owns debouncing, never the network call or its result.
+        .task(id: duplicateCheckTriggerKey) {
+            do {
+                try await Task.sleep(for: .milliseconds(400))
+            } catch {
+                return
+            }
+            model.checkForPossibleDuplicates()
+        }
         .onChange(of: focusedField) { oldFocus, newFocus in
             // Focusing a field is looking at it: the amber clears whether
             // or not the person then edits (spec §10A.1).
@@ -111,6 +141,76 @@ struct ConfirmReceiptView: View {
             if let imageSource = model.imageSource {
                 ZoomableImageSheet(source: imageSource) {
                     eventLogger.log(.imageZoomed, receiptId: model.receiptId)
+                }
+            }
+        }
+        // Proposal #8's "open the matching receipt" affordance: the exact
+        // Receipt the lookup returned, straight into the same detail
+        // screen every other row on the list opens - no second fetch, and
+        // a real image to compare against paper rather than a second copy
+        // of the three fields already shown inline below. `api` is nil
+        // only for a capture-time confirm, where `possibleDuplicates` is
+        // permanently empty and this sheet can never be asked to open
+        // (this view's own `api` doc comment).
+        .sheet(item: $openedDuplicateMatch) { match in
+            if let api {
+                NavigationStack {
+                    ReceiptDetailView(
+                        api: api,
+                        options: options,
+                        eventLogger: eventLogger,
+                        receipt: match,
+                        onDeleted: {}
+                    )
+                }
+            }
+        }
+    }
+
+    // MARK: - Possible duplicates (proposal #8, 2026-08-28)
+
+    /// What `.task(id:)` above keys the debounce on: any change to any of
+    /// the three fields the lookup compares is a reason to re-check.
+    /// A plain `String` rather than a tuple - `.task(id:)` needs
+    /// `Equatable`, which a tuple of `Equatable` elements does not
+    /// automatically get in Swift.
+    private var duplicateCheckTriggerKey: String {
+        "\(ReceiptFormat.isoDate(fromPicker: model.purchasedDate))|\(model.totalText)|\(model.vendorText)"
+    }
+
+    @ViewBuilder
+    private var duplicateWarningSection: some View {
+        if !model.possibleDuplicates.isEmpty {
+            Section {
+                // Amber, never red, and phrased as a prompt to look - the
+                // same family as the arithmetic warning (proposal #8's own
+                // words) - because a false positive here is normal and
+                // cheap to dismiss (two identical coffees on one Tuesday),
+                // and this must never block or refuse a save.
+                Label(
+                    model.possibleDuplicates.count == 1
+                        ? "A receipt with this date, vendor and total already exists."
+                        : "\(model.possibleDuplicates.count) receipts with this date, vendor and total already exist.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.footnote)
+                .foregroundStyle(.orange)
+                ForEach(model.possibleDuplicates) { match in
+                    Button {
+                        openedDuplicateMatch = match
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(match.vendor ?? "Not recorded")
+                                .foregroundStyle(.primary)
+                            Text(
+                                "\(ReceiptFormat.purchaseDate(match.purchasedAt))"
+                                    + (match.totalCents.map { " · " + ReceiptFormat.money(cents: $0, currency: match.currency) } ?? "")
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityIdentifier("possibleDuplicate.\(match.id.uuidString)")
                 }
             }
         }
@@ -352,6 +452,15 @@ struct ConfirmReceiptView: View {
                 // rather than duplicated (DisagreementNote above).
                 disagreementNote: model.showsHstDisagreementNote
                     ? "The HST was read two different ways from this receipt. Worth a look."
+                    : nil,
+                // Proposal #7 (2026-08-28): a prompt to look, not a
+                // verdict - worded so it can be dismissed by checking the
+                // paper, exactly like every other note this screen shows.
+                // Never widened past what ReceiptArithmetic.swift's own
+                // comment states this is narrowly about (half of a 13%
+                // split), so it never names 5%, 15% or "not 13%".
+                rateHintNote: model.showsHstRateHint
+                    ? "This HST looks like half of a 13% split. Worth a look."
                     : nil
             )
             SuggestedFieldRow(

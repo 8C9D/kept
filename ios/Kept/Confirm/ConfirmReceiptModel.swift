@@ -286,6 +286,29 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// the model; the form's rules above are identical either way.
     private let saveAction: (ConfirmedReceiptFields) async throws -> Void
 
+    // MARK: - Possible duplicates (proposal #8, 2026-08-28)
+
+    /// GET /api/receipts/possible-duplicates's matches for whatever the
+    /// form's date/vendor/total last held, from the most recent completed
+    /// lookup - never awaited by Save (`checkForPossibleDuplicates()`'s own
+    /// comment states the fire-and-forget contract in full).
+    @Published private(set) var possibleDuplicates: [Receipt] = []
+    /// The lookup itself, injected the same way `saveAction` is so this
+    /// model still holds no stored `KeptAPI` reference of its own - only a
+    /// server-backed form (the `api:` convenience init below) wires this;
+    /// a capture-time confirm has no server row to compare against yet and
+    /// leaves it nil, which makes `checkForPossibleDuplicates()` a no-op.
+    /// Swallows its own failure into an empty array (see that init) so
+    /// this model never has to distinguish "nothing matched" from "the
+    /// request failed" - both read the same way, silently, per the
+    /// proposal's own rule.
+    private let duplicateCheckAction: ((_ purchasedAt: String, _ totalCents: Int, _ vendor: String?) async -> [Receipt])?
+    /// Guards a slow response against landing after a newer one already
+    /// superseded it - GuardedReceiptLoader's generation-counter shape,
+    /// done inline here because this is the only network call this model
+    /// ever makes on its own.
+    private var duplicateCheckGeneration = 0
+
     // MARK: - Construction
 
     /// A server-side receipt: the confirm queue and the detail screen's
@@ -325,6 +348,20 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             ),
             saveAction: { fields in
                 _ = try await api.confirmReceipt(id: id, ConfirmReceiptRequest(fields))
+            },
+            // Proposal #8: `excludeId: id` is what keeps this receipt from
+            // matching itself - the obvious bug the proposal calls out by
+            // name. `try?` is the whole failure story: a thrown error
+            // becomes an empty result, exactly as silent as "nothing
+            // matched" (this model's own doc comment above states why that
+            // conflation is intentional, not a shortcut).
+            duplicateCheckAction: { purchasedAt, totalCents, vendor in
+                (try? await api.possibleDuplicates(
+                    purchasedAt: purchasedAt,
+                    totalCents: totalCents,
+                    vendor: vendor,
+                    excludeId: id
+                )) ?? []
             }
         )
     }
@@ -351,7 +388,16 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             existing: ExistingValues(
                 purchasedAt: ReceiptFormat.calendarDate(of: draft.capturedAt)
             ),
-            saveAction: saveAction
+            saveAction: saveAction,
+            // No server row exists yet to compare against (this receipt
+            // has not uploaded), and the single-capture flow is
+            // deliberately offline by design (CaptureFlowModel's own doc
+            // comment: "nothing here ever waits on the network") - the
+            // proposal's own "why" names the backlog pass, worked down
+            // through the confirm QUEUE, as where this actually bites, not
+            // the in-the-moment single scan. nil makes
+            // checkForPossibleDuplicates() a no-op.
+            duplicateCheckAction: nil
         )
     }
 
@@ -390,7 +436,8 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         ocrFailureNote: String?,
         suggestions: ConfirmSuggestionSet?,
         existing: ExistingValues,
-        saveAction: @escaping (ConfirmedReceiptFields) async throws -> Void
+        saveAction: @escaping (ConfirmedReceiptFields) async throws -> Void,
+        duplicateCheckAction: ((_ purchasedAt: String, _ totalCents: Int, _ vendor: String?) async -> [Receipt])?
     ) {
         self.receiptId = receiptId
         self.currency = currency
@@ -398,6 +445,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         self.imageSource = imageSource
         self.ocrFailureNote = ocrFailureNote
         self.saveAction = saveAction
+        self.duplicateCheckAction = duplicateCheckAction
 
         // Each "seed" is exactly what prefills the field (suggestion over
         // the row's own copy) - captured here, once, so it can also seed
@@ -524,6 +572,25 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// touched, no separate dismissal.
     var showsHstDisagreementNote: Bool {
         hstDisagreement && isUnreviewed(.hst)
+    }
+
+    /// The HST rate-plausibility hint (proposal #7, 2026-08-28) - the live
+    /// mirror of the server's `checkHstRatePlausibility`
+    /// (ReceiptArithmetic.swift carries the full reasoning for the ±0.25pp
+    /// band and why it must never widen). Tied to the SAME amber/touched
+    /// lifecycle `showsHstDisagreementNote` above already uses: shown
+    /// while HST is still unreviewed, gone the moment it is touched
+    /// (§10A.1's "cleared with the amber") - a person who has just looked
+    /// at the field has had their look. `centsOrNil` reads `.invalid` text
+    /// as absent, the same suppression `showsArithmeticWarning` already
+    /// applies to garbage input, so this never fires over unparseable
+    /// text.
+    var showsHstRateHint: Bool {
+        isUnreviewed(.hst)
+            && ReceiptArithmetic.checkHstRatePlausibility(
+                subtotalCents: centsOrNil(subtotalInput),
+                hstCents: centsOrNil(hstInput)
+            ) == .looksLikeHalfSplit
     }
 
     // MARK: - Suggestion outcomes (behavioural telemetry, 2026-08-28)
@@ -925,6 +992,46 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 
     private func isBlank(_ text: String) -> Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    // MARK: - Possible duplicates (proposal #8, 2026-08-28)
+
+    /// Fires the GET /api/receipts/possible-duplicates lookup for whatever
+    /// the date/vendor/total fields hold right now. Fire-and-forget by
+    /// contract - the same shape `EventLogger.log()` uses for its own
+    /// "never block, never surface a failure" rule (its own doc comment
+    /// states the reasoning this mirrors): this method is not `async` and
+    /// never throws, so nothing calling it can be made to wait on the
+    /// network or handle a failure that isn't already swallowed into an
+    /// empty result (`duplicateCheckAction`'s own doc comment). The view
+    /// debounces repeated calls (ConfirmReceiptView's `.task(id:)`
+    /// wiring); this method itself has no debounce of its own and is safe
+    /// to call as often as needed.
+    ///
+    /// A no-op when `duplicateCheckAction` is nil (no server row exists
+    /// yet to compare against) or when the total does not currently parse
+    /// - in the latter case any previously-found matches are cleared too,
+    /// so a match found against a since-edited-to-invalid total cannot
+    /// linger on screen.
+    func checkForPossibleDuplicates() {
+        guard let duplicateCheckAction else { return }
+        guard case .cents(let totalCents) = totalInput else {
+            possibleDuplicates = []
+            return
+        }
+        let purchasedAtIso = ReceiptFormat.isoDate(fromPicker: purchasedDate)
+        let vendor = normalized(vendorText)
+
+        duplicateCheckGeneration += 1
+        let generation = duplicateCheckGeneration
+        Task { [weak self] in
+            let matches = await duplicateCheckAction(purchasedAtIso, totalCents, vendor)
+            // A newer call already superseded this one, or the model (and
+            // so the screen it backed) is gone - either way this response
+            // must not write anywhere.
+            guard let self, self.duplicateCheckGeneration == generation else { return }
+            self.possibleDuplicates = matches
+        }
     }
 
     // MARK: - Saving

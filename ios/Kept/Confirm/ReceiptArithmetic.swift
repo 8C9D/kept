@@ -124,4 +124,73 @@ enum ReceiptArithmetic {
         let difference = totalCents - (subtotalCents + hstCents + tipCents + otherFeesCents)
         return difference == 0 ? nil : difference
     }
+
+    // MARK: - HST rate plausibility (proposal #7, 2026-08-28)
+
+    /// The provincial half of a 13%-split HST (8% + 5% federal = 13%), in
+    /// basis points - `HALF_SPLIT_RATE_BPS`, mirrored verbatim from the
+    /// server's arithmetic.ts.
+    private static let halfSplitRateBps = 800
+    /// ±0.25 percentage points - `HALF_SPLIT_TOLERANCE_BPS`, mirrored
+    /// verbatim. Tight deliberately: these two numbers come straight off
+    /// the receipt with no summation or rounding across line items the way
+    /// a multi-item subtotal would have, so there is no legitimate reason
+    /// for a genuine half-split reading to drift far from exactly 8%. A
+    /// looser tolerance would only buy more false positives on real 13%
+    /// and 5% receipts, never a real detection it would otherwise miss.
+    private static let halfSplitToleranceBps = 25
+
+    /// Faithful mirror of the server's `checkHstRatePlausibility`
+    /// (arithmetic.ts) - read that function's own extensive doc comment
+    /// before touching this one; only the checking logic is restated here,
+    /// not the reasoning behind it.
+    ///
+    /// ⚠ **This flags ONLY an effective rate within ±0.25 percentage points
+    /// of 8%** - the PROVINCIAL half of a 13% Ontario split standing alone,
+    /// which has no legitimate reading as a standalone Canadian tax figure
+    /// the way 5% does. It does NOT flag "isn't 13%": 5% is a real
+    /// standalone rate (GST-only provinces, and this system does not know
+    /// the province) and a basket mixing taxable and zero-rated items - a
+    /// grocery bill, which is most receipts - legitimately reconciles well
+    /// under 13%. Widening this past the narrow 8% band is exactly the
+    /// mistake the server's own comment warns against, and the residual
+    /// false positive it states honestly still applies here: a genuinely
+    /// correct 13% receipt whose basket is roughly 38% zero-rated also
+    /// lands near 8% and will be flagged. That is exactly why this is an
+    /// advisory amber prompt-to-look (§10A.1) - never a block, never an
+    /// auto-correction - the same treatment `showsHstDisagreementNote` and
+    /// `showsArithmeticWarning` already give their own signals.
+    ///
+    /// `nil` for either argument reads as "this field is blank", exactly
+    /// `deriveMissingAmount`'s contract above - ConfirmReceiptModel is
+    /// responsible for refusing to call this while either field holds
+    /// unparseable text (`showsHstRateHint` applies the identical
+    /// suppression `showsArithmeticWarning` already does).
+    static func checkHstRatePlausibility(subtotalCents: Int?, hstCents: Int?) -> HstRatePlausibility {
+        // No subtotal, no HST, or a subtotal that cannot anchor a rate
+        // (zero, or a refund's negative) - there is no ratio to evaluate.
+        // Mirrors the server's identical three-way guard verbatim.
+        guard let subtotalCents, let hstCents, subtotalCents > 0 else {
+            return .notApplicable
+        }
+
+        // Integer cross-multiplication rather than floating-point
+        // division, mirroring the server's own technique verbatim so the
+        // boundary is exact rather than subject to rounding error:
+        //   hst/subtotal within [target-tol, target+tol]/10000
+        //   <=> hst*10000 within [target-tol, target+tol] * subtotal
+        let scaledHst = hstCents * 10_000
+        let lowerBound = (halfSplitRateBps - halfSplitToleranceBps) * subtotalCents
+        let upperBound = (halfSplitRateBps + halfSplitToleranceBps) * subtotalCents
+
+        return scaledHst >= lowerBound && scaledHst <= upperBound
+            ? .looksLikeHalfSplit
+            : .plausible
+    }
+}
+
+/// Mirrors `HstRatePlausibility` (arithmetic.ts) one for one - see
+/// `ReceiptArithmetic.checkHstRatePlausibility` for the full reasoning.
+enum HstRatePlausibility: Equatable {
+    case notApplicable, plausible, looksLikeHalfSplit
 }

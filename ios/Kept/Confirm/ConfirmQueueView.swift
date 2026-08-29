@@ -8,6 +8,12 @@ struct ConfirmQueueView: View {
     @ObservedObject var queue: ConfirmQueueModel
     @ObservedObject var options: ReceiptOptionsStore
     let eventLogger: EventLogger
+    /// Handed straight to `ConfirmReceiptView` for proposal #8's "open the
+    /// matching receipt" affordance - not read by anything in this file,
+    /// which otherwise talks to the server only through `queue` (a
+    /// `ConfirmQueueModel`, whose own `any KeptAPI` is private and not
+    /// this type's business to reach into).
+    let api: any KeptAPI
     let onFinished: () -> Void
 
     var body: some View {
@@ -37,6 +43,7 @@ struct ConfirmQueueView: View {
                     model: model,
                     options: options,
                     eventLogger: eventLogger,
+                    api: api,
                     onSaved: { await queue.advanceAfterSave() },
                     onSetAside: { await queue.setAsideCurrent() }
                 )
@@ -87,6 +94,7 @@ struct ConfirmQueueView: View {
 struct ConfirmQueueCover: View {
     @StateObject private var queue: ConfirmQueueModel
     @ObservedObject private var options: ReceiptOptionsStore
+    private let api: APIClient
     private let eventLogger: EventLogger
     private let onFinished: () -> Void
 
@@ -98,13 +106,14 @@ struct ConfirmQueueCover: View {
     ) {
         _queue = StateObject(wrappedValue: ConfirmQueueModel(api: api))
         self.options = options
+        self.api = api
         self.eventLogger = eventLogger
         self.onFinished = onFinished
     }
 
     var body: some View {
         NavigationStack {
-            ConfirmQueueView(queue: queue, options: options, eventLogger: eventLogger, onFinished: onFinished)
+            ConfirmQueueView(queue: queue, options: options, eventLogger: eventLogger, api: api, onFinished: onFinished)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button("Close") { onFinished() }

@@ -64,6 +64,16 @@ final class ExportViewModel: ObservableObject {
     @Published private(set) var history: [ExportJob] = []
     @Published private(set) var historyError: String?
     @Published private(set) var download: DownloadState = .idle
+    /// GET /api/me (proposal #10, 2026-08-28): this user's own fiscal year
+    /// end, read only to drive the export period presets. `nil` for two
+    /// different reasons that render identically - nothing has loaded yet,
+    /// or the fetch failed - matching `web/src/views/ExportView.tsx`'s own
+    /// choice: the preset picker is hidden entirely until this loads
+    /// rather than shown against a guessed year end, since a wrong preset
+    /// here would look exactly as plausible as a right one. The two
+    /// pre-existing starters (fiscal year number, explicit range) need
+    /// nothing from this and are unaffected either way.
+    @Published private(set) var profile: Profile?
 
     private let api: any KeptAPI
     private let eventLogger: EventLogger
@@ -109,6 +119,15 @@ final class ExportViewModel: ObservableObject {
         } catch {
             historyError = error.localizedDescription
         }
+    }
+
+    /// Fire-once, silent-on-failure (proposal #10): a failed fetch leaves
+    /// `profile` nil, which is exactly what keeps the preset picker hidden
+    /// (its own doc comment above) - there is no retry affordance here on
+    /// the same reasoning `ReceiptOptionsStore`'s pure-enhancement fetches
+    /// already use elsewhere in this app.
+    func loadProfile() async {
+        profile = try? await api.fetchProfile()
     }
 
     // MARK: - Starting

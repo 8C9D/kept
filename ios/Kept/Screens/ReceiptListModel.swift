@@ -63,12 +63,54 @@ final class ReceiptListModel: ObservableObject {
     /// so a person typing "coffee" costs one request, not six.
     @Published var searchText: String = ""
 
+    /// One outstanding swipe-to-delete undo opportunity (proposal #9,
+    /// 2026-08-28) - what HomeView's toast renders and drives. The
+    /// proposal's own gate, stated in full: a delete is soft server-side
+    /// (§10B) and so recoverable in principle, but nothing exposed getting
+    /// it back before this - a mis-swipe against a tax record was a
+    /// one-gesture accident. `POST /api/receipts/:id/restore`
+    /// (server/src/routes/receipts.ts) is the undo path this drives.
+    struct PendingUndo: Equatable {
+        let receiptId: UUID
+        /// What the toast names - the vendor if there is one, "Receipt"
+        /// otherwise - so "Receipt deleted" reads as which one when more
+        /// than one delete happens in a session, the same identifying text
+        /// the row itself showed a moment ago.
+        let label: String
+    }
+
+    @Published private(set) var pendingUndo: PendingUndo?
+    /// The reason a swipe-triggered delete, undo, or quick-confirm did not
+    /// happen - the server's own words when there are any
+    /// (`APIError.requestFailed`'s `errorDescription` already carries the
+    /// message verbatim, spec: never invent wording, most pointedly for
+    /// 409 `restore_conflict`), a transport failure's otherwise. One
+    /// property for all three actions, the same shape
+    /// `ReceiptDetailModel.deleteError` already uses for its own single
+    /// mutation - HomeView shows it as one alert.
+    @Published private(set) var actionError: String?
+
     private var nextCursor: String?
     private let loader: GuardedReceiptLoader
     private let eventLogger: EventLogger
+    /// Held directly, alongside `loader`, ONLY for the three swipe actions
+    /// below (delete, undo, quick-confirm) - one-off, id-scoped mutations,
+    /// not list-page fetches. Deliberately NOT routed through
+    /// `GuardedReceiptLoader`: that type's generation guard exists to drop
+    /// a stale LIST response after a NEWER list load starts
+    /// (`beginNewList()`), and applying the identical guard to a mutation
+    /// would risk marking a delete or restore that genuinely reached the
+    /// server as `.superseded` merely because a pull-to-refresh happened
+    /// to land in the same async gap - silently skipping the undo toast
+    /// (or the reload) for a mutation that actually succeeded. The exact
+    /// same reasoning `ReceiptDetailModel` already applies to ITS own
+    /// delete: a straight `api` reference for a mutation, not the paging
+    /// loader's guard.
+    private let api: any KeptAPI
 
     init(api: any KeptAPI, eventLogger: EventLogger) {
         loader = GuardedReceiptLoader(api: api)
+        self.api = api
         self.eventLogger = eventLogger
     }
 
@@ -246,6 +288,84 @@ final class ReceiptListModel: ObservableObject {
             // Every page carries the badge's number; applying it keeps the
             // count fresh as the user scrolls.
             pendingCount = .exact(page.pendingCount)
+        }
+    }
+
+    // MARK: - Swipe actions: delete with undo, quick confirm (proposal #9, 2026-08-28)
+
+    /// Swipe-to-delete: soft-deletes the receipt (§10B - tombstoned, kept
+    /// for retention, never erased) and reloads the list the same way
+    /// every other mutation that can change it already does
+    /// (HomeView.onDeleted, the confirm queue's own completion) - never a
+    /// local splice, so a deleted row cannot linger as a stale one and the
+    /// keyset cursor never disagrees with what is on screen. Records the
+    /// undo opportunity only once the delete - and so the reload - has
+    /// actually happened; a failed delete leaves the row exactly where it
+    /// was, with nothing to undo.
+    func deleteReceipt(_ receipt: Receipt) async {
+        do {
+            try await api.deleteReceipt(id: receipt.id)
+            eventLogger.log(.receiptDeleted, receiptId: receipt.id)
+            pendingUndo = PendingUndo(receiptId: receipt.id, label: receipt.displayVendor ?? "Receipt")
+            await loadFirstPage()
+        } catch {
+            actionError = error.localizedDescription
+        }
+    }
+
+    /// The toast's Undo action. Clears the opportunity FIRST, unconditionally
+    /// - a failed restore is not silently retryable by tapping Undo again
+    /// against stale state, matching `ReceiptDetailModel.delete()`'s own
+    /// `guard !isDeleting` shape for "a mutation may only be attempted
+    /// once per opportunity." Can legitimately fail with 409
+    /// `restore_conflict` (KeptAPI.restoreReceipt's own doc comment
+    /// carries the trap in full); either way the message reaching
+    /// `actionError` is the server's own, never reworded.
+    func undoDelete() async {
+        guard let pending = pendingUndo else { return }
+        pendingUndo = nil
+        do {
+            _ = try await api.restoreReceipt(id: pending.receiptId)
+            await loadFirstPage()
+        } catch {
+            actionError = error.localizedDescription
+        }
+    }
+
+    /// The toast's timeout path (HomeView, `.task(id: model.pendingUndo)`)
+    /// - simply clears whatever `pendingUndo` currently holds. A NEWER
+    /// delete replacing `pendingUndo` while an older timer is still
+    /// running cancels that timer by construction (`.task(id:)` restarts
+    /// on every id change), so this can never clear an undo opportunity
+    /// other than the one its own timer was watching.
+    func dismissUndo() {
+        pendingUndo = nil
+    }
+
+    func clearActionError() {
+        actionError = nil
+    }
+
+    /// Swipe-to-confirm's "quick confirm": accepts the row's already-stored
+    /// values as final - see `KeptAPI.quickConfirmReceipt`'s doc comment
+    /// for why this is its own request shape, never a synthesized
+    /// `ConfirmReceiptRequest` - and reloads the list the same way every
+    /// mutation here does. Never offered by the view unless
+    /// `receipt.totalCents` (the RAW stored field) is already non-nil; see
+    /// HomeView's own `canQuickConfirm` for why that must be checked
+    /// instead of `displayTotalCents`. `confirm_saved` is the closest fit
+    /// in the server's fixed vocabulary (server/src/domain/userEvents.ts)
+    /// - a receipt was confirmed and saved, which is exactly what
+    /// happened, whichever screen it happened from; there is no separate
+    /// action name for "confirmed without opening the form" to invent one
+    /// for, per the brief's own rule.
+    func quickConfirmReceipt(_ receipt: Receipt) async {
+        do {
+            _ = try await api.quickConfirmReceipt(id: receipt.id)
+            eventLogger.log(.confirmSaved, receiptId: receipt.id)
+            await loadFirstPage()
+        } catch {
+            actionError = error.localizedDescription
         }
     }
 }
