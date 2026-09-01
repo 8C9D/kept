@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { KeptApi } from "../api.js";
 import { duplicateLookupParams, lookupPossibleDuplicates } from "../duplicates.js";
 import { logEvent } from "../events.js";
@@ -890,6 +890,21 @@ function componentSum(draft: ReceiptDraft): number | null {
 }
 
 /**
+ * What one component edit produces: the next draft, and the memory the
+ * NEXT edit must be handed back - `applyComponentEdit` below, whose ⚠
+ * paragraph is the whole reason this is a pair and not just a draft.
+ */
+export interface ComponentEditOutcome {
+  draft: ReceiptDraft;
+  /**
+   * The last sum the four component boxes actually produced. Unchanged
+   * from what was passed in whenever this edit left a box unparseable,
+   * which is exactly the suspension described below.
+   */
+  lastTrackedComponentSum: number | null;
+}
+
+/**
  * **Total tracks its components while consistent** (2026-09-01), the live
  * rule that turns four boxes into one running bill.
  *
@@ -901,7 +916,7 @@ function componentSum(draft: ReceiptDraft): number | null {
  * elsewhere may quietly overwrite it. Editing the total itself never
  * changes any other field, in either direction: the total is the anchor.
  *
- * The three flows this is built from, all of them from a real form:
+ * The four flows this is built from, all of them from a real form:
  *
  * - **A.** OCR found the total ($14.35) and nothing else. Typing a subtotal
  *   of $12.70 leaves the total alone - it came off the paper - and the HST
@@ -913,36 +928,76 @@ function componentSum(draft: ReceiptDraft): number | null {
  *   corrected to $1.60. The total follows to $14.30, because leaving
  *   $14.35 would create a mismatch the person did not ask for and would
  *   then have to fix by hand.
+ * - **D.** The total is typed as $20.00 directly. Nothing else moves, and
+ *   a later component edit does not overwrite it - $20.00 is not what the
+ *   components said, so the total is the person's.
  *
  * Returns the whole next draft rather than just a total, so the caller
- * cannot apply half of it.
+ * cannot apply half of it - and, since 2026-09-01, the memory the next
+ * edit needs beside it (`ComponentEditOutcome`), for the same reason:
+ * applying the draft without carrying the sum forward is applying half of
+ * this.
+ *
+ * ⚠ **Why the rule needs a memory at all** (2026-09-01, found by running
+ * the iOS form rather than by reading it - KeptUITests'
+ * `ConfirmAmountsUITests`; this client had the identical hole and is
+ * fixed here from that reference, `ios/Kept/Confirm/ConfirmReceiptModel.swift`'s
+ * `editComponentAmount` / `lastTrackedComponentSum`).
+ *
+ * Typing an amount passes through a state no money parser accepts:
+ * "12.70" is typed as `1`, `12`, `12.`, `12.7`, `12.70`, and "12." is not
+ * a number (`parseMoneyInput` rejects a trailing decimal point). On the
+ * keystroke after it, `componentSum` over the PRE-edit draft is null, and
+ * comparing the total against null said "these have diverged" - so the
+ * rule stood down for the rest of the amount and a blank form typed with
+ * subtotal 12.70 ended up with a total of $12.00, the sum as it stood two
+ * keystrokes earlier. Visibly wrong, on the commonest action this form
+ * has.
+ *
+ * So a box that is momentarily unparseable SUSPENDS the decision instead
+ * of cancelling it: `oldSum` falls back to the last sum the boxes really
+ * did make. That fallback is consulted in exactly one window - the
+ * pre-edit draft had an unreadable box and the post-edit draft does not -
+ * because every other path either returns early (`newSum` null) or has a
+ * real `oldSum` to use. A total the person typed still ends tracking: it
+ * differs from the remembered sum exactly as it differed from the live
+ * one (flow D above).
+ *
+ * Threaded through as an explicit input and output rather than kept in a
+ * module variable, so the rule stays a pure function testable one
+ * keystroke at a time - which is how the defect above is pinned.
  */
 export function applyComponentEdit(
   draft: ReceiptDraft,
   field: ComponentAmountField,
   value: string,
-): ReceiptDraft {
+  lastTrackedComponentSum: number | null,
+): ComponentEditOutcome {
   const edited = { ...draft, [field]: value };
   const newSum = componentSum(edited);
   if (newSum === null) {
-    // Nothing to track to - a blank subtotal or a box mid-keystroke.
-    return edited;
+    // Nothing to track to - a blank subtotal or a box mid-keystroke. The
+    // remembered sum is carried through untouched: this is the suspension.
+    return { draft: edited, lastTrackedComponentSum };
   }
   const total = tryParseMoney(draft.total);
-  const oldSum = componentSum(draft);
+  const oldSum = componentSum(draft) ?? lastTrackedComponentSum;
   const tracks =
     total === null ||
     (total !== INVALID_MONEY && oldSum !== null && total === oldSum);
   if (!tracks) {
-    return edited;
+    return { draft: edited, lastTrackedComponentSum: newSum };
   }
   if (finalizeDerivedAmount("total", newSum) === null) {
     // Outside the storable range - the same refusal every other suggestion
     // in this file makes, rather than writing a number the server would
     // 400 on.
-    return edited;
+    return { draft: edited, lastTrackedComponentSum: newSum };
   }
-  return { ...edited, total: formatCents(newSum) };
+  return {
+    draft: { ...edited, total: formatCents(newSum) },
+    lastTrackedComponentSum: newSum,
+  };
 }
 
 /**
@@ -1192,6 +1247,50 @@ function suggestedFields(receipt: Receipt): ReadonlySet<SuggestibleField> {
 }
 
 /**
+ * Whether `field` still holds exactly the value the form was PREFILLED
+ * with - "nobody has changed this", which since 2026-09-01 is what every
+ * inline note below reads instead of "nobody has focused this".
+ *
+ * ⚠ **Why the rule changed** (the owner's diagnosis, 2026-09-01; the iOS form
+ * changed the same day and for the same reason -
+ * `ios/Kept/Confirm/ConfirmReceiptModel.swift`'s `stillHoldsSuggestedValue`,
+ * the reference this mirrors). The notes cleared on `touched`, and
+ * `touched` is set by the change handler on the way IN to a field - so the
+ * HST rate hint disappeared the moment you clicked into HST to fix it,
+ * taking the number you were about to check against with it. A note that
+ * vanishes at the instant it becomes actionable is worse than no note.
+ * Focus is not a decision; changing the value is. `touched` keeps its own
+ * meaning untouched - the amber tint (§10A.1) and the reviewed set the
+ * save reports - the two rules were only ever conflated because one flag
+ * happened to serve both.
+ *
+ * Compares against `draftFromPending`, the one rule that decides what
+ * lands in each box, rather than reaching into `suggestions` for a second
+ * opinion about it: the note and the value it is about then cannot
+ * disagree, including for a withheld amount (blank) and a reviewed field
+ * (the row's value, which is a human's). Money compares as CENTS, not as
+ * text, so re-typing "$1.65" as "1.65" is not a change - the same
+ * comparison iOS's `matchesInitial` makes, and an unparseable box reads as
+ * changed there and here.
+ *
+ * Typing the prefilled value back brings the note back with it, which is
+ * the honest answer: the box holds the disputed number again, and the note
+ * is once more about something on screen.
+ */
+function stillHoldsSuggestedValue(
+  receipt: Receipt,
+  draft: ReceiptDraft,
+  field: "purchasedAt" | "hst",
+): boolean {
+  const prefilled = draftFromPending(receipt);
+  if (field === "purchasedAt") {
+    return draft.purchasedAt === prefilled.purchasedAt;
+  }
+  const current = tryParseMoney(draft.hst);
+  return current !== INVALID_MONEY && current === tryParseMoney(prefilled.hst);
+}
+
+/**
  * §10A.1's disagreement notes ("two independent parsers read this
  * differently - look at the paper"), one predicate per field so each is
  * independently testable without a DOM, matching `arithmeticMismatch`
@@ -1199,29 +1298,33 @@ function suggestedFields(receipt: Receipt): ReadonlySet<SuggestibleField> {
  * keeps "exactly the same treatment" true by construction rather than by
  * two call sites someone could let drift apart: pending only (a confirmed
  * receipt renders the row, not the merge - `draftFromReceipt`'s own
- * comment), the served flag itself, and untouched - "touching a field
- * clears the tint and the note together" (§10A.1), so a note that outlived
- * a touch would contradict the amber tint sitting right next to it.
+ * comment), the served flag itself, and - since 2026-09-01 - the field
+ * still holding the value it was prefilled with, so a note that outlived
+ * its own subject cannot sit next to a box that no longer says what it is
+ * about. See `stillHoldsSuggestedValue` above for why that replaced
+ * "untouched".
  */
 function suggestionDisagreement(
   receipt: Receipt,
-  touched: ReadonlySet<keyof ReceiptDraft>,
+  draft: ReceiptDraft,
   field: "purchasedAt" | "hst",
   disagreement: boolean | undefined,
 ): boolean {
   return (
-    receipt.status === "pending" && !touched.has(field) && disagreement === true
+    receipt.status === "pending" &&
+    stillHoldsSuggestedValue(receipt, draft, field) &&
+    disagreement === true
   );
 }
 
 /** The purchase-date note: both parsers read a date and it differs. */
 export function dateDisagreementNote(
   receipt: Receipt,
-  touched: ReadonlySet<keyof ReceiptDraft>,
+  draft: ReceiptDraft,
 ): boolean {
   return suggestionDisagreement(
     receipt,
-    touched,
+    draft,
     "purchasedAt",
     receipt.suggestions?.purchasedAt.disagreement,
   );
@@ -1239,11 +1342,11 @@ export function dateDisagreementNote(
  */
 export function hstDisagreementNote(
   receipt: Receipt,
-  touched: ReadonlySet<keyof ReceiptDraft>,
+  draft: ReceiptDraft,
 ): boolean {
   return suggestionDisagreement(
     receipt,
-    touched,
+    draft,
     "hst",
     receipt.suggestions?.hstCents.disagreement,
   );
@@ -1316,17 +1419,25 @@ export function checkHstRatePlausibility(input: {
 
 /**
  * The note's own gate: `suggestionDisagreement`'s exact rule - pending
- * only, untouched, §10A.1's "touching a field clears the tint and the note
- * together" - fed a live-computed plausibility flag instead of a
- * server-suggestion disagreement flag. This is the shared helper both
- * `dateDisagreementNote` and `hstDisagreementNote` above already use,
- * reused here rather than a third copy of the same gating logic. "hst" is
- * the field this note is about, the same choice `hstDisagreementNote`
- * makes for the same reason (HST is the input tax credit a half-split
- * corrupts) - and pending-only matches the proposal's own framing of this
- * as "free signal in the same family as the date-disagreement flag": a
- * sanity check on an unconfirmed OCR read, not a running critique of a
- * value a human has already confirmed.
+ * only, and the HST box still holding the amount a machine put there - fed
+ * a live-computed plausibility flag instead of a server-suggestion
+ * disagreement flag. This is the shared helper both `dateDisagreementNote`
+ * and `hstDisagreementNote` above already use, reused here rather than a
+ * third copy of the same gating logic. "hst" is the field this note is
+ * about, the same choice `hstDisagreementNote` makes for the same reason
+ * (HST is the input tax credit a half-split corrupts) - and pending-only
+ * matches the proposal's own framing of this as "free signal in the same
+ * family as the date-disagreement flag": a sanity check on an unconfirmed
+ * OCR read, not a running critique of a value a human has already
+ * confirmed.
+ *
+ * ⚠ This is the note the owner's 2026-09-01 diagnosis named
+ * (`stillHoldsSuggestedValue`, above): it is a hint about a number the
+ * form is asking you to check, and clearing it on touch deleted it at the
+ * exact moment you clicked in to act on it. It now survives until the HST
+ * value itself changes - and goes the moment it does, correction typed or
+ * not, because a hint about an amount nobody suggested is this form
+ * second-guessing a person instead of a parser.
  *
  * A mid-keystroke unparseable subtotal or HST box silences the check
  * rather than guessing, the same rule `arithmeticMismatch` follows above.
@@ -1334,7 +1445,6 @@ export function checkHstRatePlausibility(input: {
 export function hstRateHintNote(
   receipt: Receipt,
   draft: ReceiptDraft,
-  touched: ReadonlySet<keyof ReceiptDraft>,
 ): boolean {
   const subtotal = tryParseMoney(draft.subtotal);
   const hst = tryParseMoney(draft.hst);
@@ -1344,10 +1454,20 @@ export function hstRateHintNote(
       : checkHstRatePlausibility({ subtotalCents: subtotal, hstCents: hst });
   return suggestionDisagreement(
     receipt,
-    touched,
+    draft,
     "hst",
     plausibility === "looks-like-half-split",
   );
+}
+
+/**
+ * An amount box with nothing in it. Whitespace reads as nothing, the same
+ * answer `parseMoneyInput` gives it - it trims first, and calls an empty
+ * string the stated "not on this receipt" - so a stray space cannot make
+ * the note below think a person has entered an amount.
+ */
+function blankAmountBox(value: string): boolean {
+  return value.trim() === "";
 }
 
 /**
@@ -1372,11 +1492,21 @@ export function hstRateHintNote(
  * that is not there.
  *
  * Gated like the disagreement notes - pending only, and cleared per field
- * by touching it (§10A.1: "touching a field clears the tint and the note
- * together"). Once the total is typed from the paper, "the total was left
- * blank" is no longer true, and a note that outlived its own subject is
- * how a form teaches people to stop reading its notes. With both amounts
- * withheld and one of them typed, the sentence narrows to the other.
+ * by that field's box no longer being empty. Once the total is typed from
+ * the paper, "the total was left blank" is no longer true, and a note that
+ * outlived its own subject is how a form teaches people to stop reading
+ * its notes. With both amounts withheld and one of them typed, the
+ * sentence narrows to the other.
+ *
+ * ⚠ It read `touched` until 2026-09-01, and `touched` is set on the way
+ * IN to a box - so clicking or tabbing into the empty total deleted the
+ * one sentence explaining why that box was empty, while the box stayed
+ * empty. This note is about a value that is MISSING; only that value's
+ * arrival may end it. Moved with the disagreement notes the same day
+ * (`stillHoldsSuggestedValue` above), and it is iOS's rule for this note
+ * exactly - `ConfirmReceiptModel.swift`'s `withheldAmountNote` guards on
+ * `totalText.isEmpty` - applied per field, which is what this client's
+ * narrowing sentence needs.
  *
  * There is no `reviewedFields` check to match `suggestedFields`' one: a
  * reviewed field has its suggestion suppressed BEFORE the arithmetic rule
@@ -1386,14 +1516,15 @@ export function hstRateHintNote(
  */
 export function withheldAmountsNote(
   receipt: Receipt,
-  touched: ReadonlySet<keyof ReceiptDraft>,
+  draft: ReceiptDraft,
 ): string | null {
   const s = receipt.suggestions;
   if (receipt.status !== "pending" || s === null) {
     return null;
   }
-  const total = withheldAmount(s.totalCents) && !touched.has("total");
-  const subtotal = withheldAmount(s.subtotalCents) && !touched.has("subtotal");
+  const total = withheldAmount(s.totalCents) && blankAmountBox(draft.total);
+  const subtotal =
+    withheldAmount(s.subtotalCents) && blankAmountBox(draft.subtotal);
   if (!total && !subtotal) {
     return null;
   }
@@ -1597,10 +1728,19 @@ export function ReceiptFieldsForm({
   // stale match from the PREVIOUS receipt must not flash on screen while
   // the new receipt's own (debounced) lookup is still in flight.
   const [duplicates, setDuplicates] = useState<readonly Receipt[]>([]);
+  // The total-tracking rule's memory (2026-09-01, `applyComponentEdit`'s
+  // own comment carries the whole reasoning). A ref rather than state: no
+  // rendering reads it, so a keystroke that only advances the memory must
+  // not cost a second render. Reset alongside `touched` when a different
+  // receipt loads, for the same reason - a sum carried over from the
+  // PREVIOUS receipt's boxes would let this one's total resume tracking
+  // against a number nothing on screen ever said.
+  const lastTrackedComponentSum = useRef<number | null>(null);
   useEffect(() => {
     setTouched(new Set());
     setClientApplied(new Set());
     setDuplicates([]);
+    lastTrackedComponentSum.current = null;
   }, [receipt.id]);
 
   // Proposal #8 (2026-08-28, approved): warn when a live receipt already
@@ -1660,12 +1800,27 @@ export function ReceiptFieldsForm({
    * computed. Marked touched but NOT reported through `onFieldReviewed` -
    * nobody has looked at the total, it just followed - so it stays out of
    * the reviewed set the save sends.
+   *
+   * 2026-09-01: the rule is applied ONCE, to the draft this render holds,
+   * and both the new draft and the memory come out of that one call. It
+   * used to run twice - once to decide about `markTouched`, once inside
+   * the `setDraft` updater - which was harmless while the answer was a
+   * pure function of the draft alone, and is not now: two calls would
+   * advance the memory twice for one keystroke and could apply a draft the
+   * memory did not describe.
    */
   const editComponentAmount = (key: ComponentAmountField, value: string) => {
-    if (applyComponentEdit(draft, key, value).total !== draft.total) {
+    const outcome = applyComponentEdit(
+      draft,
+      key,
+      value,
+      lastTrackedComponentSum.current,
+    );
+    lastTrackedComponentSum.current = outcome.lastTrackedComponentSum;
+    if (outcome.draft.total !== draft.total) {
       markTouched("total");
     }
-    setDraft((d) => applyComponentEdit(d, key, value));
+    setDraft(() => outcome.draft);
   };
 
   const text =
@@ -1693,11 +1848,15 @@ export function ReceiptFieldsForm({
   // embed this form, so they get the arithmetic warning's exact treatment
   // ("inside the field") wherever a pending receipt's fields render -
   // confirm queue and a pending receipt opened straight from the table.
-  const dateDisagreement = dateDisagreementNote(receipt, touched);
-  const hstDisagreement = hstDisagreementNote(receipt, touched);
-  const hstRateHint = hstRateHintNote(receipt, draft, touched);
+  // 2026-09-01: these read the DRAFT, not `touched` - a note clears when
+  // its field's value changes, not when the person clicks into the box to
+  // change it (`stillHoldsSuggestedValue`). `touched` still drives the
+  // amber tint above and the reviewed set the save sends.
+  const dateDisagreement = dateDisagreementNote(receipt, draft);
+  const hstDisagreement = hstDisagreementNote(receipt, draft);
+  const hstRateHint = hstRateHintNote(receipt, draft);
   // The one note on this form that is not amber - see its own comment.
-  const withheldNote = withheldAmountsNote(receipt, touched);
+  const withheldNote = withheldAmountsNote(receipt, draft);
 
   // Proposal #1: at most one of these is ever non-null for a given draft -
   // `deriveMissingAmount` requires exactly one field blank,

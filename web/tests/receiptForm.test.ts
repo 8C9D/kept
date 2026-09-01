@@ -26,6 +26,8 @@ import {
   summarizeFieldEdits,
   vendorDefaultFill,
   withheldAmountsNote,
+  type ComponentAmountField,
+  type ComponentEditOutcome,
   type ReceiptDraft,
   type SuggestibleField,
 } from "../src/views/ReceiptForm.js";
@@ -657,8 +659,6 @@ describe("draftForDisplay - which prefill rule a screen gets", () => {
 });
 
 describe("hstDisagreementNote - the HST disagreement inline note (2026-08-28)", () => {
-  const NO_TOUCH = new Set<keyof ReceiptDraft>();
-
   function pendingWithHst(disagreement: boolean): Receipt {
     return receipt({
       status: "pending",
@@ -674,26 +674,52 @@ describe("hstDisagreementNote - the HST disagreement inline note (2026-08-28)", 
   }
 
   it("renders when the two parsers' HST reads disagree", () => {
-    expect(hstDisagreementNote(pendingWithHst(true), NO_TOUCH)).toBe(true);
+    const row = pendingWithHst(true);
+    expect(hstDisagreementNote(row, draftFromPending(row))).toBe(true);
   });
 
   it("does not render when the two parsers agree", () => {
-    expect(hstDisagreementNote(pendingWithHst(false), NO_TOUCH)).toBe(false);
+    const row = pendingWithHst(false);
+    expect(hstDisagreementNote(row, draftFromPending(row))).toBe(false);
   });
 
-  it("clears once the HST field is touched - same as the amber tint (§10A.1)", () => {
-    const touched = new Set<keyof ReceiptDraft>(["hst"]);
-    expect(hstDisagreementNote(pendingWithHst(true), touched)).toBe(false);
+  /**
+   * 2026-09-01: what clears this note is the VALUE, not the focus. The
+   * function no longer sees `touched` at all - the fix stated as a type,
+   * since a click into the HST box hands it the same draft it had before -
+   * so the four cases below are the whole rule: changed, changed to the
+   * same number, unreadable, changed elsewhere.
+   */
+  it("clears once the HST amount itself changes", () => {
+    const row = pendingWithHst(true);
+    const corrected = { ...draftFromPending(row), hst: "$5.42" };
+    expect(hstDisagreementNote(row, corrected)).toBe(false);
   });
 
-  it("touching a different field does not clear it", () => {
-    const touched = new Set<keyof ReceiptDraft>(["vendor"]);
-    expect(hstDisagreementNote(pendingWithHst(true), touched)).toBe(true);
+  it("compares cents, not text - retyping $5.24 as 5.24 is not a change", () => {
+    const row = pendingWithHst(true);
+    expect(draftFromPending(row).hst).toBe("$5.24");
+    expect(hstDisagreementNote(row, { ...draftFromPending(row), hst: "5.24" })).toBe(
+      true,
+    );
+  });
+
+  it("clears while the box is mid-keystroke unreadable", () => {
+    const row = pendingWithHst(true);
+    expect(hstDisagreementNote(row, { ...draftFromPending(row), hst: "5." })).toBe(
+      false,
+    );
+  });
+
+  it("changing a different field does not clear it", () => {
+    const row = pendingWithHst(true);
+    const elsewhere = { ...draftFromPending(row), vendor: "Loblaws" };
+    expect(hstDisagreementNote(row, elsewhere)).toBe(true);
   });
 
   it("never renders on a confirmed receipt, even if the stored flag is true", () => {
     const row = { ...pendingWithHst(true), status: "confirmed" as const };
-    expect(hstDisagreementNote(row, NO_TOUCH)).toBe(false);
+    expect(hstDisagreementNote(row, draftFromPending(row))).toBe(false);
   });
 });
 
@@ -821,58 +847,92 @@ describe("checkHstRatePlausibility - mirrored from the server function of the sa
 });
 
 describe("hstRateHintNote - proposal #7's live note, gated the same way as the disagreement notes", () => {
-  const NO_TOUCH = new Set<keyof ReceiptDraft>();
-
-  function pendingReceipt(): Receipt {
-    return receipt({ status: "pending" });
+  /**
+   * A pending receipt whose merge prefilled both amounts - which is what
+   * the hint is about since 2026-09-01: an amount a machine put in the box
+   * and is asking a person to check. Typing an 8%-looking HST into a form
+   * nothing suggested is the person's own number, and this form does not
+   * second-guess those.
+   */
+  function pendingWithAmounts(subtotalCents: number, hstCents: number): Receipt {
+    return receipt({
+      status: "pending",
+      suggestions: merged({
+        subtotalCents: { value: subtotalCents, source: "heuristic" },
+        hstCents: { value: hstCents, source: "heuristic", disagreement: false },
+      }),
+    });
   }
 
   it("renders when subtotal and HST land in the half-split band", () => {
-    const d = draft({ subtotal: "$100.00", hst: "$7.75" });
-    expect(hstRateHintNote(pendingReceipt(), d, NO_TOUCH)).toBe(true);
+    const row = pendingWithAmounts(10000, 775);
+    expect(hstRateHintNote(row, draftFromPending(row))).toBe(true);
   });
 
   it("does not render for a plausible 13% receipt", () => {
-    const d = draft({ subtotal: "$100.00", hst: "$13.00" });
-    expect(hstRateHintNote(pendingReceipt(), d, NO_TOUCH)).toBe(false);
+    const row = pendingWithAmounts(10000, 1300);
+    expect(hstRateHintNote(row, draftFromPending(row))).toBe(false);
   });
 
-  it("does not render with no subtotal or HST typed yet", () => {
-    expect(hstRateHintNote(pendingReceipt(), draft(), NO_TOUCH)).toBe(false);
+  it("does not render with no subtotal or HST suggested at all", () => {
+    const row = receipt({ status: "pending" });
+    expect(hstRateHintNote(row, draftFromPending(row))).toBe(false);
   });
 
   it("stays silent on a mid-keystroke unparseable box rather than guessing", () => {
-    const d = draft({ subtotal: "$100.00", hst: "7." });
-    expect(hstRateHintNote(pendingReceipt(), d, NO_TOUCH)).toBe(false);
+    // The subtotal, not the HST: the HST box still holds what the merge
+    // put there, so this pins the plausibility check's own silence rather
+    // than the value-changed gate above it.
+    const row = pendingWithAmounts(10000, 800);
+    const d = { ...draftFromPending(row), subtotal: "100." };
+    expect(hstRateHintNote(row, d)).toBe(false);
   });
 
-  it("clears once the HST field is touched, matching the disagreement notes", () => {
-    const d = draft({ subtotal: "$100.00", hst: "$8.00" });
-    const touched = new Set<keyof ReceiptDraft>(["hst"]);
-    expect(hstRateHintNote(pendingReceipt(), d, touched)).toBe(false);
+  /**
+   * ⚠ The defect this pass fixed (the owner, 2026-09-01), pinned. The hint
+   * used to clear on `touched`, which the form sets on the way IN to a
+   * field - so clicking into HST to act on the hint deleted the hint. It
+   * now goes when the amount goes, and not before.
+   */
+  it("survives a click into the HST box that leaves the amount alone", () => {
+    const row = pendingWithAmounts(10000, 800);
+    expect(hstRateHintNote(row, draftFromPending(row))).toBe(true);
   });
 
-  it("touching a different field does not clear it", () => {
-    const d = draft({ subtotal: "$100.00", hst: "$8.00" });
-    const touched = new Set<keyof ReceiptDraft>(["vendor"]);
-    expect(hstRateHintNote(pendingReceipt(), d, touched)).toBe(true);
+  it("clears once the HST amount itself changes", () => {
+    const row = pendingWithAmounts(10000, 800);
+    // The correction the hint was asking for: 8% read as the provincial
+    // half, retyped as the full 13%.
+    const corrected = { ...draftFromPending(row), hst: "$13.00" };
+    expect(hstRateHintNote(row, corrected)).toBe(false);
+  });
+
+  it("clears even when the new amount is still in the half-split band", () => {
+    // The gate is "did this value change", not "is it still suspicious" -
+    // a number the person typed is theirs, whatever it says.
+    const row = pendingWithAmounts(10000, 800);
+    const retyped = { ...draftFromPending(row), hst: "$8.10" };
+    expect(hstRateHintNote(row, retyped)).toBe(false);
+  });
+
+  it("changing a different field does not clear it", () => {
+    const row = pendingWithAmounts(10000, 800);
+    // $8.00 against $100.50 is 7.96% - still the band, and still the HST
+    // the merge suggested, so the hint has lost neither of its reasons.
+    const d = { ...draftFromPending(row), subtotal: "$100.50" };
+    expect(hstRateHintNote(row, d)).toBe(true);
   });
 
   it("never renders on a confirmed receipt", () => {
-    const d = draft({ subtotal: "$100.00", hst: "$8.00" });
-    const confirmed = { ...pendingReceipt(), status: "confirmed" as const };
-    expect(hstRateHintNote(confirmed, d, NO_TOUCH)).toBe(false);
+    const row = pendingWithAmounts(10000, 800);
+    const confirmed = { ...row, status: "confirmed" as const };
+    expect(hstRateHintNote(confirmed, draftFromPending(row))).toBe(false);
   });
 });
 
 describe("dateDisagreementNote - the field this note's treatment was ported from", () => {
-  it("clears once the date field is touched, matching the HST note above", () => {
-    // Predicted before writing (CLAUDE.md: predict before verifying): this
-    // is the bug this same pass fixed - `dateDisagreementNote` used to be
-    // computed with no touched check at all, so §10A.1's "touching a field
-    // clears the tint and the note together" held for the tint but not the
-    // note sitting right next to it.
-    const row = receipt({
+  function pendingWithDateDisagreement(): Receipt {
+    return receipt({
       status: "pending",
       suggestions: {
         vendor: { value: null, source: null },
@@ -883,8 +943,26 @@ describe("dateDisagreementNote - the field this note's treatment was ported from
         tipCents: { value: null, source: null },
       },
     });
-    expect(dateDisagreementNote(row, new Set())).toBe(true);
-    expect(dateDisagreementNote(row, new Set(["purchasedAt"]))).toBe(false);
+  }
+
+  it("clears once the date itself changes, matching the HST notes above", () => {
+    // Predicted before writing (CLAUDE.md: predict before verifying): the
+    // date picker is the one field where the old touch rule was least
+    // visible - a click opens the picker without changing anything - so
+    // the note used to vanish before the person had chosen a date at all.
+    const row = pendingWithDateDisagreement();
+    const prefilled = draftFromPending(row);
+    expect(prefilled.purchasedAt).toBe("2026-08-19");
+    expect(dateDisagreementNote(row, prefilled)).toBe(true);
+    expect(
+      dateDisagreementNote(row, { ...prefilled, purchasedAt: "2026-08-21" }),
+    ).toBe(false);
+  });
+
+  it("changing a different field does not clear it", () => {
+    const row = pendingWithDateDisagreement();
+    const elsewhere = { ...draftFromPending(row), vendor: "Loblaws" };
+    expect(dateDisagreementNote(row, elsewhere)).toBe(true);
   });
 });
 
@@ -1299,20 +1377,63 @@ describe("amountFloorNote - the floor check over the live draft", () => {
   });
 });
 
+/**
+ * A fresh form's memory for the tracking rule: nothing yet tracked
+ * (`ReceiptFieldsForm` resets its ref to exactly this whenever a receipt
+ * loads). Named so a call that starts from nothing reads differently from
+ * one deliberately handed a remembered sum.
+ */
+const NO_TRACKED_SUM = null;
+
+/**
+ * Types `keystrokes` into one box, one keystroke at a time, threading the
+ * memory forward exactly as the form's `editComponentAmount` does. This is
+ * what a person's fingers actually do, and the state no money parser
+ * accepts - "12." - only exists in the middle of a sequence like this,
+ * which is why the defect below could not be seen by any single-call test.
+ */
+function typeIntoComponent(
+  start: ReceiptDraft,
+  field: ComponentAmountField,
+  keystrokes: readonly string[],
+  lastTrackedComponentSum: number | null = NO_TRACKED_SUM,
+): ComponentEditOutcome {
+  let outcome: ComponentEditOutcome = { draft: start, lastTrackedComponentSum };
+  for (const keystroke of keystrokes) {
+    outcome = applyComponentEdit(
+      outcome.draft,
+      field,
+      keystroke,
+      outcome.lastTrackedComponentSum,
+    );
+  }
+  return outcome;
+}
+
 describe("applyComponentEdit - total tracks its components while consistent", () => {
   it("Flow A: leaves a total that came off the paper alone", () => {
     // OCR found the total and nothing else; typing a subtotal must not
     // overwrite the one figure the parsers get right most often.
-    const next = applyComponentEdit(draft({ total: "$14.35" }), "subtotal", "12.70");
+    const next = applyComponentEdit(
+      draft({ total: "$14.35" }),
+      "subtotal",
+      "12.70",
+      NO_TRACKED_SUM,
+    ).draft;
     expect(next.subtotal).toBe("12.70");
     expect(next.total).toBe("$14.35");
   });
 
   it("Flow B: fills a blank total from the components, then keeps it in step", () => {
-    const first = applyComponentEdit(draft(), "subtotal", "12.70");
-    expect(first.total).toBe("$12.70");
-    const second = applyComponentEdit(first, "hst", "1.65");
-    expect(second.total).toBe("$14.35");
+    const first = applyComponentEdit(draft(), "subtotal", "12.70", NO_TRACKED_SUM);
+    expect(first.draft.total).toBe("$12.70");
+    const second = applyComponentEdit(
+      first.draft,
+      "hst",
+      "1.65",
+      first.lastTrackedComponentSum,
+    );
+    expect(second.draft.total).toBe("$14.35");
   });
 
   it("Flow C: follows a corrected component while the total still agreed", () => {
@@ -1320,8 +1441,9 @@ describe("applyComponentEdit - total tracks its components while consistent", ()
       draft({ subtotal: "12.70", hst: "1.65", total: "14.35" }),
       "hst",
       "1.60",
+      NO_TRACKED_SUM,
     );
-    expect(next.total).toBe("$14.30");
+    expect(next.draft.total).toBe("$14.30");
   });
 
   it("stops tracking the moment the total says something the components do not", () => {
@@ -1331,25 +1453,33 @@ describe("applyComponentEdit - total tracks its components while consistent", ()
       draft({ subtotal: "12.70", hst: "1.65", total: "20.00" }),
       "hst",
       "1.60",
+      NO_TRACKED_SUM,
     );
-    expect(next.total).toBe("20.00");
+    expect(next.draft.total).toBe("20.00");
   });
 
   it("leaves the total alone while the subtotal is blank - nothing to sum", () => {
-    expect(applyComponentEdit(draft(), "hst", "1.65").total).toBe("");
+    expect(
+      applyComponentEdit(draft(), "hst", "1.65", NO_TRACKED_SUM).draft.total,
+    ).toBe("");
     expect(
       applyComponentEdit(
         draft({ subtotal: "12.70", hst: "1.65", total: "14.35" }),
         "subtotal",
         "",
-      ).total,
+        NO_TRACKED_SUM,
+      ).draft.total,
     ).toBe("14.35");
   });
 
   it("leaves the total alone while a box is mid-keystroke unparseable", () => {
     expect(
-      applyComponentEdit(draft({ subtotal: "12.70", total: "12.70" }), "hst", "1.")
-        .total,
+      applyComponentEdit(
+        draft({ subtotal: "12.70", total: "12.70" }),
+        "hst",
+        "1.",
+        NO_TRACKED_SUM,
+      ).draft.total,
     ).toBe("12.70");
   });
 
@@ -1358,9 +1488,17 @@ describe("applyComponentEdit - total tracks its components while consistent", ()
       draft({ subtotal: "100.00", hst: "13.00", total: "113.00" }),
       "tip",
       "20.00",
+      NO_TRACKED_SUM,
     );
-    expect(tipped.total).toBe("$133.00");
-    expect(applyComponentEdit(tipped, "otherFees", "5.00").total).toBe("$138.00");
+    expect(tipped.draft.total).toBe("$133.00");
+    expect(
+      applyComponentEdit(
+        tipped.draft,
+        "otherFees",
+        "5.00",
+        tipped.lastTrackedComponentSum,
+      ).draft.total,
+    ).toBe("$138.00");
   });
 
   it("never treats the total itself as a component", () => {
@@ -1369,6 +1507,82 @@ describe("applyComponentEdit - total tracks its components while consistent", ()
     expect(isComponentAmountField("total")).toBe(false);
     expect(isComponentAmountField("subtotal")).toBe(true);
     expect(isComponentAmountField("vendor")).toBe(false);
+  });
+});
+
+/**
+ * 2026-09-01: the same rule, driven one keystroke at a time - the way the
+ * iOS UI test found the hole this block pins
+ * (`ios/Kept/Confirm/ConfirmReceiptModel.swift`'s `lastTrackedComponentSum`
+ * carries the full account). "12.70" is typed as `1`, `12`, `12.`, `12.7`,
+ * `12.70`; "12." is not a number, and before the fix the rule read that
+ * null sum as "the total has diverged" and stood down for the rest of the
+ * amount. Predicted before running (CLAUDE.md: predict before verifying):
+ * without the memory these land on $12.00 and $13.70 - the sums as they
+ * stood two keystrokes earlier - not $12.70 and $14.35.
+ */
+describe("applyComponentEdit - a mid-keystroke box suspends the rule, never cancels it", () => {
+  it("types a subtotal of 12.70 into a blank form and lands on $12.70", () => {
+    const typed = typeIntoComponent(draft(), "subtotal", [
+      "1",
+      "12",
+      "12.",
+      "12.7",
+      "12.70",
+    ]);
+    expect(typed.draft.subtotal).toBe("12.70");
+    expect(typed.draft.total).toBe("$12.70");
+    expect(typed.lastTrackedComponentSum).toBe(1270);
+  });
+
+  it("goes on to type HST 1.65 the same way and lands on $14.35", () => {
+    const subtotal = typeIntoComponent(draft(), "subtotal", [
+      "1",
+      "12",
+      "12.",
+      "12.7",
+      "12.70",
+    ]);
+    const hst = typeIntoComponent(
+      subtotal.draft,
+      "hst",
+      ["1", "1.", "1.6", "1.65"],
+      subtotal.lastTrackedComponentSum,
+    );
+    expect(hst.draft.total).toBe("$14.35");
+    expect(hst.lastTrackedComponentSum).toBe(1435);
+  });
+
+  it("holds the total steady while the box is unreadable, rather than rewinding it", () => {
+    // The keystroke in the middle: "12." says nothing, so the total keeps
+    // what the last readable sum gave it and the memory is untouched.
+    const partial = typeIntoComponent(draft(), "subtotal", ["1", "12", "12."]);
+    expect(partial.draft.total).toBe("$12.00");
+    expect(partial.lastTrackedComponentSum).toBe(1200);
+  });
+
+  it("never overrides a total the person typed, across an unparseable keystroke", () => {
+    // Flow D: the total is $20.00 and the components say $12.70 - the
+    // remembered sum must not become a second way for tracking to resume.
+    const typed = typeIntoComponent(
+      draft({ subtotal: "12.70", total: "20.00" }),
+      "hst",
+      ["1", "1.", "1.6", "1.65"],
+      1270,
+    );
+    expect(typed.draft.hst).toBe("1.65");
+    expect(typed.draft.total).toBe("20.00");
+  });
+
+  it("does not resume tracking a total that diverged before the unreadable box", () => {
+    // Same shape, but starting from a form that never tracked at all: the
+    // memory is empty, so there is nothing for the fallback to find.
+    const typed = typeIntoComponent(
+      draft({ subtotal: "12.70", total: "20.00" }),
+      "hst",
+      ["1", "1.", "1.6", "1.65"],
+    );
+    expect(typed.draft.total).toBe("20.00");
   });
 });
 
@@ -1435,9 +1649,9 @@ describe("hstSuggestionChip - the offer for a blank HST box", () => {
     // draft means $12.70 becomes $12.70 + $1.65.
     const start = draft({ subtotal: "12.70" });
     const chip = hstSuggestionChip(start, "CAD");
-    const next = applyComponentEdit(start, "hst", "$1.65");
+    const next = applyComponentEdit(start, "hst", "$1.65", NO_TRACKED_SUM);
     expect(chip?.cents).toBe(165);
-    expect(next.total).toBe("$14.35");
+    expect(next.draft.total).toBe("$14.35");
   });
 });
 
@@ -1573,7 +1787,14 @@ describe("patchChangesNothing - the confirmed-receipt edit that sends no reviewe
 });
 
 describe("withheldAmountsNote - why an amount box is empty (2026-09-01)", () => {
-  const NO_TOUCH = new Set<keyof ReceiptDraft>();
+  /**
+   * A withheld amount lands the box BLANK (`draftFromPending`), so the
+   * empty draft below is the prefill for every case in this block - which
+   * is the whole reason this note can read the value rather than
+   * `touched`: "still blank" and "the server withheld it" are the two
+   * halves of one fact.
+   */
+  const BLANK = draft();
   const withheld = (): WithholdableAmountSuggestion => ({
     value: null,
     source: null,
@@ -1586,7 +1807,7 @@ describe("withheldAmountsNote - why an amount box is empty (2026-09-01)", () => 
 
   it("names the total when the total alone was withheld", () => {
     expect(
-      withheldAmountsNote(pending({ totalCents: withheld() }), NO_TOUCH),
+      withheldAmountsNote(pending({ totalCents: withheld() }), BLANK),
     ).toBe(
       "The amounts read from this receipt didn't add up, so the total was left blank - enter it from the paper.",
     );
@@ -1594,7 +1815,7 @@ describe("withheldAmountsNote - why an amount box is empty (2026-09-01)", () => 
 
   it("names the subtotal when the subtotal alone was withheld", () => {
     expect(
-      withheldAmountsNote(pending({ subtotalCents: withheld() }), NO_TOUCH),
+      withheldAmountsNote(pending({ subtotalCents: withheld() }), BLANK),
     ).toBe(
       "The amounts read from this receipt didn't add up, so the subtotal was left blank - enter it from the paper.",
     );
@@ -1604,7 +1825,7 @@ describe("withheldAmountsNote - why an amount box is empty (2026-09-01)", () => 
     expect(
       withheldAmountsNote(
         pending({ totalCents: withheld(), subtotalCents: withheld() }),
-        NO_TOUCH,
+        BLANK,
       ),
     ).toBe(
       "The amounts read from this receipt didn't add up, so the total and subtotal were left blank - enter them from the paper.",
@@ -1615,7 +1836,7 @@ describe("withheldAmountsNote - why an amount box is empty (2026-09-01)", () => 
     expect(
       withheldAmountsNote(
         pending({ totalCents: { value: 1435, source: "heuristic" } }),
-        NO_TOUCH,
+        BLANK,
       ),
     ).toBeNull();
   });
@@ -1634,11 +1855,11 @@ describe("withheldAmountsNote - why an amount box is empty (2026-09-01)", () => 
         tipCents: { value: null, source: null },
       },
     });
-    expect(withheldAmountsNote(older, NO_TOUCH)).toBeNull();
+    expect(withheldAmountsNote(older, BLANK)).toBeNull();
   });
 
   it("says nothing on a receipt with no suggestions at all", () => {
-    expect(withheldAmountsNote(receipt({ suggestions: null }), NO_TOUCH)).toBeNull();
+    expect(withheldAmountsNote(receipt({ suggestions: null }), BLANK)).toBeNull();
   });
 
   it("never renders on a confirmed receipt", () => {
@@ -1646,34 +1867,59 @@ describe("withheldAmountsNote - why an amount box is empty (2026-09-01)", () => 
       ...pending({ totalCents: withheld() }),
       status: "confirmed" as const,
     };
-    expect(withheldAmountsNote(confirmed, NO_TOUCH)).toBeNull();
+    expect(withheldAmountsNote(confirmed, BLANK)).toBeNull();
   });
 
-  it("clears once the total is typed - §10A.1's rule for every note here", () => {
+  /**
+   * ⚠ 2026-09-01, the divergence from iOS this pass closed. The note used
+   * to clear on `touched`, which the form sets on the way IN to a field -
+   * so clicking or tabbing into the empty total deleted the sentence
+   * explaining why it was empty, and left the box just as empty as it
+   * found it. iOS never had it: `withheldAmountNote` guards on
+   * `totalText.isEmpty`. Predicted before running: under the old rule the
+   * first case below returned null.
+   */
+  it("survives a click into the total box that types nothing", () => {
+    expect(
+      withheldAmountsNote(pending({ totalCents: withheld() }), draft({ total: "" })),
+    ).toBe(
+      "The amounts read from this receipt didn't add up, so the total was left blank - enter it from the paper.",
+    );
+  });
+
+  it("clears once a total is actually typed", () => {
     expect(
       withheldAmountsNote(
         pending({ totalCents: withheld() }),
-        new Set<keyof ReceiptDraft>(["total"]),
+        draft({ total: "14.35" }),
       ),
     ).toBeNull();
+  });
+
+  it("is not fooled by a box holding only whitespace", () => {
+    // Whitespace parses as "not on this receipt" everywhere else in this
+    // file, so it must not count as the person having entered an amount.
+    expect(
+      withheldAmountsNote(pending({ totalCents: withheld() }), draft({ total: "  " })),
+    ).not.toBeNull();
   });
 
   it("narrows to the field still blank when only one of the two was typed", () => {
     expect(
       withheldAmountsNote(
         pending({ totalCents: withheld(), subtotalCents: withheld() }),
-        new Set<keyof ReceiptDraft>(["total"]),
+        draft({ total: "14.35" }),
       ),
     ).toBe(
       "The amounts read from this receipt didn't add up, so the subtotal was left blank - enter it from the paper.",
     );
   });
 
-  it("touching an unrelated field does not clear it", () => {
+  it("typing in an unrelated field does not clear it", () => {
     expect(
       withheldAmountsNote(
         pending({ totalCents: withheld() }),
-        new Set<keyof ReceiptDraft>(["vendor"]),
+        draft({ vendor: "Costco" }),
       ),
     ).not.toBeNull();
   });
