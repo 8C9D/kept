@@ -66,10 +66,29 @@ export function checkReceiptArithmetic(input: {
  * "did the caller remember the order the five fields came in".
  *
  * Returns null - "nothing to derive" - in four cases: zero fields are
- * missing (nothing to fill in), two or more are missing (the equation has
- * more than one unknown and cannot be solved), the balancing value falls
- * outside the storable cents range (`money.ts`'s int4 bound), or the
- * balancing value is a negative tip or a negative other-fees amount.
+ * missing (nothing to fill in), more than one field is genuinely unknown
+ * (the equation cannot be solved), the balancing value falls outside the
+ * storable cents range (`money.ts`'s int4 bound), or the balancing value is
+ * a negative tip or a negative other-fees amount.
+ *
+ * **What counts as "genuinely unknown", widened 2026-09-01.** Until this
+ * date all five fields had to be filled but one, which made the feature
+ * almost unreachable: tip and other fees are blank on most receipts, so the
+ * commonest shape by far - a subtotal and a total, no tip, no fees, HST
+ * missing - had three nulls and derived nothing. It now solves for HST
+ * there, because a blank tip and a blank other-fees line are not unknowns:
+ * `checkReceiptArithmetic` has always read them as "no such line on this
+ * receipt", contributing zero, and this function reading them as anything
+ * else meant the two disagreed about the same equation.
+ *
+ * So when the missing field is `hstCents`, `subtotalCents` or `totalCents`,
+ * a null `tipCents` or `otherFeesCents` counts as 0. Solving FOR a tip or
+ * other-fees amount still requires the other four present, and that
+ * asymmetry is the point: "the tip line is blank, so there was no tip" is a
+ * reading of the paper anyone would make, while "the tip is whatever makes
+ * these four numbers balance" is inventing a gratuity out of a rounding
+ * difference. Same asymmetry, same reasoning as the negative-tip refusal
+ * below.
  *
  * **Why negative is refused for tip and otherFees but not for the other
  * three.** `money.ts` allows negative money generally, because a refund
@@ -113,6 +132,16 @@ const NEVER_NEGATIVE_FIELDS: ReadonlySet<DerivableMoneyField> = new Set([
   "otherFeesCents",
 ]);
 
+/**
+ * The three fields a blank tip or other-fees line does not block
+ * (2026-09-01): a receipt that prints neither is the ordinary case, not an
+ * under-determined equation.
+ */
+const OMISSION_IS_ZERO_FIELDS: ReadonlySet<DerivableMoneyField> = new Set([
+  "tipCents",
+  "otherFeesCents",
+]);
+
 export function deriveMissingAmount(input: {
   subtotalCents: Cents | null;
   hstCents: Cents | null;
@@ -121,19 +150,29 @@ export function deriveMissingAmount(input: {
   totalCents: Cents | null;
 }): DerivedAmount | null {
   const missing = DERIVABLE_FIELDS.filter((field) => input[field] === null);
-  if (missing.length !== 1) {
-    return null;
-  }
-  const field = missing[0];
+  // Split the blanks into the ones that are genuinely unknown and the ones
+  // that read as "no such line" (see the doc comment). Exactly one real
+  // unknown is solvable; anything else is not.
+  const unknown = missing.filter(
+    (field) => !OMISSION_IS_ZERO_FIELDS.has(field),
+  );
+  const field =
+    unknown.length === 1
+      ? unknown[0]
+      : // No hard unknown: the only solvable shape left is a single blank
+        // tip or other-fees line with all four of its neighbours filled in,
+        // which is the pre-2026-09-01 rule unchanged for those two fields.
+        unknown.length === 0 && missing.length === 1
+        ? missing[0]
+        : undefined;
   if (field === undefined) {
-    // Guaranteed by the length check above; narrows the type for TS.
     return null;
   }
 
-  // Every field but the missing one is non-null here (the length-1 check
-  // above), so summing with `?? 0` adds every KNOWN component and adds
-  // nothing for the one field this call is solving for - whichever of the
-  // five it turns out to be.
+  // Every field but the one being solved for either has a value or is a
+  // blank tip/other-fees line reading as zero, so summing with `?? 0` adds
+  // every KNOWN component and adds nothing for the field this call is
+  // solving for - whichever of the five it turns out to be.
   const knownComponentSum =
     (input.subtotalCents ?? 0) +
     (input.hstCents ?? 0) +
@@ -251,4 +290,112 @@ export function checkHstRatePlausibility(input: {
   return scaledHst >= lowerBound && scaledHst <= upperBound
     ? "looks-like-half-split"
     : "plausible";
+}
+
+/**
+ * The HST a 13% rate would produce on a given subtotal, and the total that
+ * follows from it (2026-09-01).
+ *
+ * ⚠ **A suggestion generator, exactly like everything else in this file.**
+ * Constraint 2 (spec §3) governs it: no route may call this to fill in a
+ * receipt. It exists so a confirm screen can offer a one-tap "13%" on a
+ * receipt whose tax line the parser could not read - landing amber and
+ * unconfirmed, for a person to check against the paper. A derived tax
+ * figure written without a human looking at it is a claim nobody made.
+ *
+ * 13% is Ontario's combined HST and this app's default (spec §7.3), but the
+ * rate is a parameter in basis points so a client can pass another - 5% for
+ * a GST-only province, say - without this function growing a table of
+ * provinces it has no way to choose between (nothing here knows where a
+ * receipt was bought).
+ *
+ * Integer arithmetic throughout, never a float: `subtotal * rate` is exact,
+ * and adding half the divisor before flooring is round-half-up on the
+ * positive values this function accepts. A rate that is not a non-negative
+ * integer number of basis points is a programming error rather than a
+ * receipt, so it throws rather than quietly computing something.
+ *
+ * Returns null when there is nothing honest to suggest: a subtotal of zero
+ * or less (a refund or an empty field anchors no rate - the same guard
+ * `checkHstRatePlausibility` uses), or a total that would fall outside the
+ * storable cents range.
+ */
+export interface DefaultRateHst {
+  hstCents: Cents;
+  totalCents: Cents;
+}
+
+/** Ontario's combined HST, in basis points. */
+export const DEFAULT_HST_RATE_BPS = 1300;
+
+export function suggestDefaultRateHst(
+  subtotalCents: Cents,
+  rateBasisPoints: number = DEFAULT_HST_RATE_BPS,
+): DefaultRateHst | null {
+  if (!Number.isSafeInteger(rateBasisPoints) || rateBasisPoints < 0) {
+    throw new RangeError(
+      `A tax rate must be a non-negative integer number of basis points, got: ${String(rateBasisPoints)}`,
+    );
+  }
+  if (subtotalCents <= 0) {
+    return null;
+  }
+
+  const hst = Math.floor((subtotalCents * rateBasisPoints + 5_000) / 10_000);
+  try {
+    return { hstCents: cents(hst), totalCents: cents(subtotalCents + hst) };
+  } catch (error) {
+    if (error instanceof InvalidMoneyError) {
+      // A subtotal near the int4 ceiling has a total that is not storable.
+      // No suggestion is the honest answer; the mismatch is not this
+      // function's to paper over.
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Does the total at least cover the parts (2026-09-01)? A third advisory
+ * note beside `checkReceiptArithmetic` and `checkHstRatePlausibility`, for
+ * the one direction of mismatch that is never a legitimate receipt.
+ *
+ * `checkReceiptArithmetic` reports "mismatch" whenever the five fields do
+ * not balance exactly, and plenty of real receipts do not: a rounding line,
+ * an unprinted discount, a deposit refunded at the till. But a total BELOW
+ * the sum of its own components is a different animal - it says the paper
+ * charges less than the lines it itself lists, which no receipt does. In
+ * practice it means a digit was dropped from the total or added to a
+ * component, and it is worth pointing at more specifically than a general
+ * "these don't add up".
+ *
+ * A missing HST, tip or other-fees line contributes zero, the same reading
+ * every other function here gives an absent line. `not-applicable` when
+ * either anchor is missing: with no subtotal there are no components to
+ * fall below, and with no total there is nothing to compare.
+ *
+ * ⚠ Like the rest of this file, no route calls this and none may: it
+ * generates a note for a confirm screen, never a refusal and never a write.
+ */
+export type AmountFloorCheck =
+  | "not-applicable"
+  | "ok"
+  | "total-below-components";
+
+export function checkAmountFloor(input: {
+  subtotalCents: Cents | null;
+  hstCents: Cents | null;
+  tipCents: Cents | null;
+  otherFeesCents: Cents | null;
+  totalCents: Cents | null;
+}): AmountFloorCheck {
+  if (input.subtotalCents === null || input.totalCents === null) {
+    return "not-applicable";
+  }
+  const components =
+    input.subtotalCents +
+    (input.hstCents ?? 0) +
+    (input.tipCents ?? 0) +
+    (input.otherFeesCents ?? 0);
+  return input.totalCents < components ? "total-below-components" : "ok";
 }

@@ -11,6 +11,11 @@ import {
   EVENT_FIELDS,
   isOccurredAtInBounds,
 } from "../domain/userEvents.js";
+import { OCR_SOURCES } from "../domain/ocrSuggestions.js";
+import {
+  MAX_REVIEWED_FIELDS,
+  REVIEWED_FIELDS,
+} from "../domain/reviewedFields.js";
 import { receiptStatus } from "../db/schema.js";
 
 /**
@@ -81,6 +86,34 @@ const category = z.string().min(1).max(200).nullable();
 const paymentMethod = z.string().min(1).max(100).nullable();
 const notes = z.string().max(5000).nullable();
 const ocrRawText = z.string().max(100_000).nullable();
+
+/**
+ * Which fields a human has entered or explicitly reviewed on a still-pending
+ * receipt (2026-09-01; domain/reviewedFields.ts carries the reasoning).
+ *
+ * A closed `z.enum`, never a free string, for exactly the reason
+ * `userEventSchema`'s `action`/`field` are: this is a list of FIELD NAMES,
+ * and a schema that accepted arbitrary text is a schema a receipt's contents
+ * can leak through. An unknown name is a 400, not something silently kept.
+ *
+ * Deduplicated here rather than left to the writer: a client that reports
+ * the same field twice means the same thing as one that reports it once, and
+ * a stored array with duplicates would make every later reader defensive.
+ * The `.max()` runs BEFORE the dedupe, on the array as sent - a client that
+ * sends fifty entries is malfunctioning, and quietly collapsing that to a
+ * legal set would hide it.
+ */
+const reviewedFields = z
+  .array(z.enum(REVIEWED_FIELDS))
+  .max(MAX_REVIEWED_FIELDS)
+  .transform((fields) => [...new Set(fields)]);
+
+/**
+ * Where `ocrRawText` came from - a photo's OCR or a PDF's text layer. The
+ * merge treats the two differently for money fields only
+ * (domain/mergedSuggestions.ts).
+ */
+const ocrSource = z.enum(OCR_SOURCES);
 
 /**
  * Still a stored field on `ocr_suggestions`, which is an immutable record of
@@ -158,9 +191,36 @@ export const ocrSuggestionsSchema = z.strictObject({
   subtotalCents: subtotalCents.optional(),
   // An amount like the other three, so it gets a suggestion field on the
   // same terms (2026-08-28: the on-device parser will start reporting one).
-  // `otherFeesCents` gets no suggestion field - see ocrSuggestions.ts.
   tipCents: centsSchema.nullable().optional(),
+  // Prompt v5's two new suggestion fields (2026-09-01). Optional like every
+  // key here, which is what keeps the shipped iOS build working unchanged:
+  // 1.0 (4) has no heuristic for either and sends neither, and a stored
+  // record that omits them says the same thing a null does - the parser of
+  // the day found nothing.
+  otherFeesCents: centsSchema.nullable().optional(),
+  paymentMethod: paymentMethod.optional(),
   vendorTaxNumber: vendorTaxNumber.optional(),
+});
+
+/**
+ * `POST /api/receipts/parse` (2026-09-01) - the capture-time parse the iOS
+ * confirm screen calls fire-and-forget while the person is still looking at
+ * the receipt.
+ *
+ * Only the two things the parse actually needs: the text, and the day it
+ * was captured (which is what bounds the purchase date - see
+ * `parse/claudeReceiptParser.ts`). Deliberately NOT a receipt id: this route
+ * writes nothing and reads no row, so there is no receipt for it to be
+ * about, and taking an id would invite exactly the second write path §7.3's
+ * immutability clause exists to prevent.
+ *
+ * `ocrRawText` is bounded by the same 100 000 characters the create route's
+ * column-bound field uses, and non-empty because parsing nothing is not a
+ * request anyone means to make.
+ */
+export const parseOcrTextSchema = z.strictObject({
+  ocrRawText: z.string().min(1).max(100_000),
+  capturedAt,
 });
 
 /**
@@ -188,7 +248,9 @@ export const createReceiptSchema = z
     notes: notes.optional(),
     status: receiptStatusSchema.optional(),
     ocrRawText: ocrRawText.optional(),
+    ocrSource: ocrSource.optional(),
     ocrSuggestions: ocrSuggestionsSchema.optional(),
+    reviewedFields: reviewedFields.optional(),
     ...retiredReceiptFields,
     // The image is uploaded to storage first (spec §6); creating the receipt
     // records where it landed and what it hashed to.
@@ -232,6 +294,11 @@ export const updateReceiptSchema = z
     notes: notes.optional(),
     status: receiptStatusSchema.optional(),
     ocrRawText: ocrRawText.optional(),
+    // Replaces the stored set outright rather than merging into it: the
+    // client sends the full set it knows about, and a server-side union
+    // would make un-reviewing a field (the person cleared it and wants the
+    // parser's guess offered again) impossible to express.
+    reviewedFields: reviewedFields.optional(),
     ...retiredReceiptFields,
   })
   .refine((fields) => Object.keys(fields).length > 0, {
@@ -389,6 +456,71 @@ export const possibleDuplicatesQuerySchema = z.strictObject({
     .pipe(centsSchema),
   vendor: vendorText.optional(),
   excludeId: z.uuid().optional(),
+});
+
+/**
+ * The three fields `GET /api/receipts/options` serves, spelled the way the
+ * wire spells everything else - camelCase - and the vocabulary the
+ * `:field` path parameter of the rename and delete routes is checked
+ * against. `domain/receiptFieldOptions.ts` holds the STORED spelling
+ * (`payment_method`); routes/receipts.ts owns the one-line translation
+ * between them.
+ */
+export const receiptOptionFieldSchema = z.enum([
+  "vendor",
+  "category",
+  "paymentMethod",
+]);
+
+export type ReceiptOptionApiField = z.infer<typeof receiptOptionFieldSchema>;
+
+/**
+ * `PATCH /api/receipts/options/:field` (2026-09-01) - rename one stored
+ * value everywhere it appears, both in the option list and on every receipt
+ * carrying it.
+ *
+ * One schema per field rather than one shared schema, because `to` becomes
+ * the value of a receipt column and must be held to that column's own limit:
+ * 200 characters for vendor and category, 100 for payment method, reusing
+ * the same definitions the create and update schemas above use. A boundary
+ * that stops short of what the layer behind it accepts is not a boundary -
+ * the reasoning `centsSchema` states for money, applied to text.
+ *
+ * ⚠ `from` is NOT trimmed and must not become so. It names a value that is
+ * already stored, verbatim, doubled spaces and all (the 2026-08-26 free-text
+ * ruling, and the second user's "  Office   Supplies  " is the actual row this protects):
+ * trimming it would make exactly the values most in need of a rename the ones
+ * that cannot be renamed.
+ *
+ * `to` IS trimmed, deliberately and asymmetrically. It is new text a person
+ * just typed into a rename box, where leading and trailing whitespace is an
+ * accident of the keyboard rather than a value anyone means - and unlike the
+ * options list, which must echo what is stored or its own exact-match filter
+ * stops finding it, this is an explicit edit whose result the person sees
+ * immediately. A whitespace-only rename target is refused rather than
+ * silently accepted as an empty label.
+ */
+function renameOptionSchema(maxLength: number) {
+  return z.strictObject({
+    from: z.string().min(1).max(maxLength),
+    to: z.string().trim().min(1).max(maxLength),
+  });
+}
+
+export const renameReceiptOptionSchemas = {
+  vendor: renameOptionSchema(200),
+  category: renameOptionSchema(200),
+  paymentMethod: renameOptionSchema(100),
+} as const satisfies Record<ReceiptOptionApiField, z.ZodType>;
+
+/**
+ * `DELETE /api/receipts/options/:field?value=<string>` (2026-09-01) - forget
+ * one offered value. The value arrives as a query parameter because a DELETE
+ * carries no body in this API; it is the stored string verbatim, so it is
+ * bounded but never trimmed, exactly like `from` above.
+ */
+export const deleteReceiptOptionQuerySchema = z.strictObject({
+  value: z.string().min(1).max(200),
 });
 
 /**

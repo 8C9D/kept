@@ -156,7 +156,7 @@ describe("the LLM parse sweep's failure log", () => {
    * clean would pass with `llmParseSweep.ts` completely untouched.
    */
   async function runSweep(
-    parse: (text: string) => Promise<OcrFieldSuggestions>,
+    parse: (text: string, capturedAt: Date) => Promise<OcrFieldSuggestions>,
   ): Promise<string> {
     captureConsole();
     const sweep = createLlmParseSweep({
@@ -192,6 +192,8 @@ describe("the LLM parse sweep's failure log", () => {
       hstCents: 1300,
       subtotalCents: 10000,
       tipCents: null,
+      otherFeesCents: null,
+      paymentMethod: null,
       // The receipt row carries no tax number since 2026-08-26, but the
       // immutable suggestion record still can - and this is the jsonb the
       // failing UPDATE binds, so TAX_NUMBER really is in the statement
@@ -253,8 +255,8 @@ describe("the LLM parse sweep's failure log", () => {
     expect(v8Message).toContain(VENDOR_HEAD);
 
     const receiptId = await createSensitiveReceipt();
-    const logs = await runSweep((text) =>
-      parseReceiptText(modelReplying(reply), text),
+    const logs = await runSweep((text, capturedAt) =>
+      parseReceiptText(modelReplying(reply), text, capturedAt),
     );
 
     expect(logs).toContain(receiptId);
@@ -281,8 +283,8 @@ describe("the LLM parse sweep's failure log", () => {
     expect(position).toBeDefined();
 
     await createSensitiveReceipt();
-    const logs = await runSweep((text) =>
-      parseReceiptText(modelReplying(reply), text),
+    const logs = await runSweep((text, capturedAt) =>
+      parseReceiptText(modelReplying(reply), text, capturedAt),
     );
 
     expect(logs).toContain(`at position ${position}`);
@@ -317,8 +319,8 @@ describe("the LLM parse sweep's failure log", () => {
     }
 
     const receiptId = await createSensitiveReceipt();
-    const logs = await runSweep((text) =>
-      parseReceiptText(modelReplying(reply), text),
+    const logs = await runSweep((text, capturedAt) =>
+      parseReceiptText(modelReplying(reply), text, capturedAt),
     );
 
     expect(logs).toContain(receiptId);
@@ -350,7 +352,8 @@ describe("the LLM parse sweep's failure log", () => {
     const result = await runLlmParseSweep({
       db: harness.db,
       model: RECEIPT_PARSE_MODEL,
-      parse: (text) => parseReceiptText(modelReplying(reply), text),
+      parse: (text, capturedAt) =>
+        parseReceiptText(modelReplying(reply), text, capturedAt),
       failureCounts: new Map([[receiptId, MAX_PARSE_ATTEMPTS - 1]]),
     });
     expect(result.failed).toEqual([

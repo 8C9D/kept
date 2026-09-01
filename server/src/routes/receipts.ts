@@ -7,6 +7,7 @@ import {
   eq,
   gte,
   ilike,
+  inArray,
   isNotNull,
   isNull,
   lte,
@@ -20,22 +21,28 @@ import type { SessionTokens } from "../auth/session.js";
 import type { Db } from "../db/client.js";
 import { isUniqueViolation } from "../db/errors.js";
 import { visibleTo } from "../db/receiptQueries.js";
-import { receiptImages, receipts } from "../db/schema.js";
+import { receiptFieldOptions, receiptImages, receipts } from "../db/schema.js";
 import { ApiError, notFoundError } from "../http/errors.js";
 import type { z } from "zod";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
+import type { ReceiptOptionField } from "../domain/receiptFieldOptions.js";
 import {
   createReceiptSchema,
+  deleteReceiptOptionQuerySchema,
   listCursorSchema,
   listOrderSchema,
   listReceiptsQuerySchema,
   listSortSchema,
   ocrSuggestionsSchema,
+  parseOcrTextSchema,
   possibleDuplicatesQuerySchema,
   receiptFilterQuerySchema,
   receiptImageSchema,
+  receiptOptionFieldSchema,
+  renameReceiptOptionSchemas,
   updateReceiptSchema,
   uploadUrlSchema,
+  type ReceiptOptionApiField,
 } from "../http/schemas.js";
 import {
   parseOrThrow,
@@ -48,12 +55,33 @@ import {
   type MergedSuggestions,
 } from "../domain/mergedSuggestions.js";
 import type { LlmParseSweepHandle } from "../parse/llmParseSweep.js";
+import { LlmParseError } from "../parse/claudeReceiptParser.js";
+import { RECEIPT_PARSE_PROMPT_VERSION } from "../domain/llmSuggestions.js";
 import {
   assertIssuedObjectKey,
   isIssuedObjectKey,
   receiptImageObjectKey,
 } from "../storage/objectKeys.js";
 import type { ObjectStorage } from "../storage/objectStorage.js";
+
+/**
+ * The bound LLM parse, as `POST /api/receipts/parse` calls it: text in,
+ * suggestions out, nothing written anywhere (2026-09-01). The entrypoint
+ * binds the same function into the sweep, so both paths always run the same
+ * model over the same prompt.
+ *
+ * The model id travels WITH the binding rather than beside it, for the
+ * reason `LlmParseSweepDependencies.model` spells out: the route answers
+ * with the id that produced the suggestions, and two separately injected
+ * values are two values that can disagree - a response naming a model that
+ * did not do the work is exactly the corruption that stamp exists to
+ * prevent.
+ */
+export interface ParseOcrText {
+  /** Exact model id `parse` calls; echoed in the response. */
+  model: string;
+  parse(ocrRawText: string, capturedAt: Date): Promise<OcrFieldSuggestions>;
+}
 
 interface ReceiptRouteDependencies {
   db: Db;
@@ -66,6 +94,8 @@ interface ReceiptRouteDependencies {
    * always present there.
    */
   llmParseSweep?: LlmParseSweepHandle;
+  /** Absent on exactly the sweep's terms; the route then answers 503. */
+  parseOcrText?: ParseOcrText;
 }
 
 export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
@@ -149,7 +179,18 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
             paymentMethod: body.paymentMethod ?? null,
             notes: body.notes ?? null,
             ocrRawText: body.ocrRawText ?? null,
+            // Where that text came from (2026-09-01). Omitted by every
+            // client that predates the field, which is what null means:
+            // vision-era, the only capture path there was.
+            ocrSource: body.ocrSource ?? null,
             ocrSuggestions: normalizeOcrSuggestions(body.ocrSuggestions),
+            // Left to the column default when the client says nothing:
+            // "this client does not report reviews" and "nothing has been
+            // reviewed yet" suppress the same set of suggestions, which is
+            // none (domain/reviewedFields.ts).
+            ...(body.reviewedFields !== undefined && {
+              reviewedFields: body.reviewedFields,
+            }),
           })
           .returning();
         if (receipt === undefined) {
@@ -164,6 +205,7 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
           objectKey: body.image.objectKey,
           sha256: body.image.sha256,
         });
+        await rememberFieldOptions(tx, userId, receipt);
         return receipt;
       });
     } catch (error) {
@@ -280,22 +322,77 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
    * payment method to prefill for a vendor the person has bought from
    * before - see `vendorDefaultCandidates` below for the query and the
    * confirmed-only decision. Existing clients ignore this key too.
+   *
+   * **Reads `receipt_field_options` rather than re-deriving from `receipts`
+   * (2026-09-01).** The response shape is unchanged - this is a change of
+   * source, not of contract - but three things follow from it:
+   *
+   * - A value survives the deletion of the last receipt carrying it. That
+   *   is the point: an option is now a thing a person keeps, and
+   *   `DELETE /api/receipts/options/:field` is how it goes away, rather
+   *   than deleting a retained tax record to get rid of a typo.
+   * - `last_used_at` is maintained by the writes (see `rememberFieldOptions`)
+   *   instead of being recomputed as `max(created_at)` on every read.
+   * - **The 100-value cap is gone.** It existed because the retired query
+   *   scanned every receipt a person had, and it silently truncated the
+   *   list the exact-match filter is supposed to be able to reach - a
+   *   category on receipt 101 could not be offered back. Reading a table
+   *   indexed on `(user_id, field, last_used_at desc)` makes the whole
+   *   vocabulary cheap to serve, and a person's own vocabulary is bounded
+   *   by how many distinct things they have ever typed, not by their
+   *   receipt count.
    */
   router.get("/options", async (c) => {
     const userId = c.get("userId");
-    const [categories, paymentMethods, vendors, vendorDefaultRows] =
-      await Promise.all([
-        recentDistinctValues(deps.db, userId, receipts.category),
-        recentDistinctValues(deps.db, userId, receipts.paymentMethod),
-        recentDistinctValues(deps.db, userId, receipts.vendor),
-        vendorDefaultCandidates(deps.db, userId),
-      ]);
+    const [optionRows, vendorDefaultRows] = await Promise.all([
+      // One query for all three fields: they share a table, an ordering and
+      // a user scope, and three round-trips would only be three chances to
+      // scope one of them differently.
+      deps.db
+        .select({
+          field: receiptFieldOptions.field,
+          value: receiptFieldOptions.value,
+        })
+        .from(receiptFieldOptions)
+        .where(eq(receiptFieldOptions.userId, userId))
+        .orderBy(
+          desc(receiptFieldOptions.lastUsedAt),
+          // A deterministic tiebreak, so a backfilled batch that shares one
+          // timestamp - and the two values saved in the same millisecond -
+          // do not shuffle between requests. Alphabetical is arbitrary but
+          // stable, which is the whole requirement.
+          asc(receiptFieldOptions.value),
+        ),
+      vendorDefaultCandidates(deps.db, userId),
+    ]);
+
+    const categories: string[] = [];
+    const paymentMethods: string[] = [];
+    const vendors: string[] = [];
+    for (const row of optionRows) {
+      switch (row.field) {
+        case "category":
+          categories.push(row.value);
+          break;
+        case "payment_method":
+          paymentMethods.push(row.value);
+          break;
+        case "vendor":
+          vendors.push(row.value);
+          break;
+        default:
+          // The database's check constraint allows exactly these three, so
+          // a fourth means the constraint and this switch have drifted -
+          // which is worth failing on rather than dropping the row.
+          throw new Error(
+            `receipt_field_options holds an unknown field: ${String(row.field)}`,
+          );
+      }
+    }
 
     // Scoped to the vendors this response already serves: a default for a
     // vendor string the client cannot also see in `vendors` is a default it
-    // has nothing to match against, and this is also what caps the result
-    // at MAX_REUSABLE_OPTIONS the same way the three lists above do, rather
-    // than the confirmed-only query growing unbounded on its own.
+    // has nothing to match against.
     const knownVendors = new Set(vendors);
     const vendorDefaults: Record<
       string,
@@ -318,6 +415,167 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     }
 
     return c.json({ categories, paymentMethods, vendors, vendorDefaults });
+  });
+
+  /**
+   * PATCH /api/receipts/options/:field - rename one remembered value
+   * everywhere it appears (2026-09-01).
+   *
+   * The problem: a vendor transcribed as "Loblwas" on eleven receipts was,
+   * until now, eleven separate edits - and the misspelling stayed in the
+   * pick-list offering itself back the whole time. One request rewrites the
+   * receipts and the option together, in one transaction, so the two can
+   * never end up disagreeing about what the value is.
+   *
+   * **Every one of the caller's receipts carrying that exact value is
+   * rewritten - pending, confirmed AND soft-deleted.** The soft-deleted ones
+   * are the deliberate part: a deleted receipt is a retained record that can
+   * come back through POST /:id/restore, and one restored a month after a
+   * rename must not reintroduce the misspelling the person removed - which
+   * is exactly what scoping this to `visibleTo` would do. That is why the
+   * UPDATE below scopes on `user_id` alone rather than reusing `visibleTo`.
+   *
+   * Exact match, never normalized, for the same reason /options serves its
+   * values verbatim: `from` names a stored string, and a rename that tidied
+   * it first would rewrite rows nobody asked it to touch (or none at all).
+   *
+   * A no-op rename (`from === to`) answers 200 with 0 without looking
+   * anything up. Renaming a value to itself asks for no change, and whether
+   * the option exists is not a question a request for no change needs
+   * answered.
+   *
+   * ⚠ **Known and accepted: this takes its two locks in the opposite order
+   * from an ordinary save.** PATCH /:id locks the receipt row and then
+   * upserts the option; this locks the option row and then updates the
+   * receipts. Two of those running at the same moment, on the same user's
+   * same receipt and same value, can deadlock - which Postgres DETECTS and
+   * aborts one side of, so the failure is a 500 on one request rather than
+   * a hang. Left unhandled deliberately at this scale: a rename is a
+   * deliberate, occasional act by one of two people, the window is a few
+   * milliseconds wide, and a retry loop or a lock-ordering convention
+   * spanning two routes is more machinery than the risk earns. If a third
+   * writer ever appears, or renames become routine, that judgement changes.
+   *
+   * Registered ABOVE /:id like every other literal path in this file.
+   */
+  router.patch("/options/:field", async (c) => {
+    const field = optionFieldParamOrBadRequest(c.req.param("field"));
+    const spec = RECEIPT_OPTION_FIELDS[field];
+    const body = parseOrThrow(
+      renameReceiptOptionSchemas[field],
+      await readJsonBody(c),
+    );
+    const userId = c.get("userId");
+
+    if (body.from === body.to) {
+      return c.json({ receiptsUpdated: 0 });
+    }
+
+    const receiptsUpdated = await deps.db.transaction(async (tx) => {
+      // Both the row being renamed and the row it might merge into, locked
+      // in ONE statement. Two sequential `FOR UPDATE` selects would take the
+      // same two locks in an order that depends on which rename ran, which
+      // is the shape a deadlock takes; one statement lets Postgres pick a
+      // consistent order for every session.
+      const locked = await tx
+        .select()
+        .from(receiptFieldOptions)
+        .where(
+          and(
+            eq(receiptFieldOptions.userId, userId),
+            eq(receiptFieldOptions.field, spec.stored),
+            inArray(receiptFieldOptions.value, [body.from, body.to]),
+          ),
+        )
+        .for("update");
+      const source = locked.find((row) => row.value === body.from);
+      if (source === undefined) {
+        // Not this user's option, or no such option at all - one answer for
+        // both, the same isolation rule every :id route follows (spec §3
+        // constraint 4).
+        throw notFoundError();
+      }
+      const target = locked.find((row) => row.value === body.to);
+
+      const rewritten = await tx
+        .update(receipts)
+        .set(spec.set(body.to))
+        // ⚠ NOT `visibleTo`: soft-deleted receipts are rewritten too, so a
+        // later restore brings back the renamed value. See the doc comment.
+        .where(and(eq(receipts.userId, userId), eq(spec.column, body.from)))
+        .returning({ id: receipts.id });
+
+      if (target === undefined) {
+        await tx
+          .update(receiptFieldOptions)
+          .set({ value: body.to })
+          // `last_used_at` deliberately untouched: renaming a value is
+          // housekeeping, not a use of it, and bumping it would push a
+          // corrected typo to the top of a list it may not belong at.
+          .where(eq(receiptFieldOptions.id, source.id));
+      } else {
+        // The destination already exists - "Loblwas" renamed onto the
+        // "Loblaws" the person had been using all along. Two rows cannot
+        // both survive (the unique constraint says so), so they merge: the
+        // destination keeps its place in the list, taking the LATER of the
+        // two recencies, because the merged value has genuinely been used
+        // as recently as the more recent of its two spellings.
+        if (source.lastUsedAt > target.lastUsedAt) {
+          await tx
+            .update(receiptFieldOptions)
+            .set({ lastUsedAt: source.lastUsedAt })
+            .where(eq(receiptFieldOptions.id, target.id));
+        }
+        await tx
+          .delete(receiptFieldOptions)
+          .where(eq(receiptFieldOptions.id, source.id));
+      }
+
+      return rewritten.length;
+    });
+
+    return c.json({ receiptsUpdated });
+  });
+
+  /**
+   * DELETE /api/receipts/options/:field?value=... - stop offering one
+   * remembered value (2026-09-01).
+   *
+   * **Deletes the option row and nothing else.** Every receipt carrying the
+   * text keeps it: these are tax records under a six-year retention rule
+   * (spec §10B), and "stop suggesting this" is a statement about a
+   * pick-list, not about history. That separation is the whole reason the
+   * values live in their own table - before it, the only way to drop an
+   * option was to delete the last receipt that carried it.
+   *
+   * It is therefore not permanent, and that is correct: saving a receipt
+   * with the same value again re-adds it (`rememberFieldOptions`). A person
+   * who deletes "grocries" and then types it again has typed it again.
+   *
+   * The value arrives as a query parameter because a DELETE in this API
+   * carries no body; it is matched verbatim, unnormalized, exactly like the
+   * rename's `from`.
+   */
+  router.delete("/options/:field", async (c) => {
+    const field = optionFieldParamOrBadRequest(c.req.param("field"));
+    const spec = RECEIPT_OPTION_FIELDS[field];
+    const query = parseOrThrow(deleteReceiptOptionQuerySchema, c.req.query());
+    const userId = c.get("userId");
+
+    const deleted = await deps.db
+      .delete(receiptFieldOptions)
+      .where(
+        and(
+          eq(receiptFieldOptions.userId, userId),
+          eq(receiptFieldOptions.field, spec.stored),
+          eq(receiptFieldOptions.value, query.value),
+        ),
+      )
+      .returning({ id: receiptFieldOptions.id });
+    if (deleted.length === 0) {
+      throw notFoundError();
+    }
+    return c.body(null, 204);
   });
 
   /**
@@ -463,11 +721,82 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
       .orderBy(desc(receipts.createdAt))
       // A defensive cap, not a real pagination need: three exact-matched
       // fields (date, total, and vendor unless omitted) make a large result
-      // pathological rather than expected - the same reasoning
-      // MAX_REUSABLE_OPTIONS states below for a different query.
+      // pathological rather than expected. (/options carried a comparable
+      // cap until 2026-09-01; that one was removed with the query that
+      // needed it - see that route. This one guards a genuinely unbounded
+      // match, not a list of a person's own vocabulary.)
       .limit(MAX_POSSIBLE_DUPLICATES);
 
     return c.json({ receipts: rows.map(receiptResponse) });
+  });
+
+  /**
+   * POST /api/receipts/parse - the capture-time LLM parse (2026-09-01).
+   *
+   * ⚠ Registered above `/:id` like every other literal path in this router:
+   * Hono matches in registration order, so a `/parse` declared after `/:id`
+   * would be shadowed by it and answered as a receipt lookup for the id
+   * "parse" - a 404 that looks like a missing route rather than a mis-order.
+   *
+   * **Why a synchronous endpoint beside the asynchronous sweep.** The sweep
+   * exists so a parse survives restarts and fills `llm_suggestions` for the
+   * §7.3 accuracy set; it is deliberately not on the capture path. But the
+   * diagnosis over 136 production receipts found that 51 of 54 confirmations
+   * happened AT CAPTURE TIME - the person is standing there with the paper
+   * in hand - and that over the same receipts the model got the vendor right
+   * 63% of the time against the on-device heuristic's 39%. A suggestion that
+   * arrives after the receipt is confirmed helps nobody; the confirm screen
+   * calls this fire-and-forget and fills in what comes back.
+   *
+   * **It writes nothing.** No row is read, created or updated: the request
+   * carries its own text, the answer goes straight back, and the immutable
+   * `llm_suggestions` record still belongs to the sweep alone. That is what
+   * keeps §7.3's "written once, never updated" clause true while a second
+   * caller exists - and it is pinned by a test that re-reads the receipts
+   * table afterwards.
+   *
+   * Session-scoped like every route here. Not because it touches a person's
+   * data - it does not - but because it spends money per call, and an
+   * endpoint that spends money without a session is an open bill.
+   */
+  router.post("/parse", async (c) => {
+    const body = parseOrThrow(parseOcrTextSchema, await readJsonBody(c));
+    const parser = deps.parseOcrText;
+    if (parser === undefined) {
+      // Local development without an ANTHROPIC_API_KEY. Stated rather than
+      // faked: a 200 carrying all-null suggestions would be indistinguishable
+      // from a receipt the model could not read, and the client would render
+      // "nothing found" for a parse that never ran.
+      throw new ApiError(
+        503,
+        "parse_unavailable",
+        "Receipt parsing is not configured on this server",
+      );
+    }
+
+    try {
+      const suggestions = await parser.parse(
+        body.ocrRawText,
+        new Date(body.capturedAt),
+      );
+      return c.json({
+        suggestions,
+        // What produced this answer, in the same two stamps every stored
+        // llm_suggestions record carries, so a suggestion a person saw at
+        // capture time stays attributable to a prompt generation.
+        model: parser.model,
+        promptVersion: RECEIPT_PARSE_PROMPT_VERSION,
+      });
+    } catch (error) {
+      if (error instanceof LlmParseError) {
+        // LlmParseError messages are written by this codebase and carry no
+        // model output and no receipt text - the parser sanitizes its own
+        // causes for exactly that reason (claudeReceiptParser.ts). The
+        // `cause` chain is NOT rendered here regardless: only the message.
+        throw new ApiError(502, "parse_failed", error.message);
+      }
+      throw error;
+    }
   });
 
   /** GET /api/receipts/:id - one receipt plus presigned image downloads. */
@@ -900,6 +1229,13 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     if (body.notes !== undefined) changes.notes = body.notes;
     if (body.status !== undefined) changes.status = body.status;
     if (body.ocrRawText !== undefined) changes.ocrRawText = body.ocrRawText;
+    // Replaces the stored set outright - the client sends the full set it
+    // knows (schemas.ts). A patch that confirms the receipt keeps whatever
+    // was sent or already stored: the record stops mattering once the row
+    // is confirmed, and clearing it would be a write whose only purpose is
+    // tidiness, thrown away exactly when an unconfirm would want it back.
+    if (body.reviewedFields !== undefined)
+      changes.reviewedFields = body.reviewedFields;
 
     // Read-check-write in one transaction: whether this edit leaves the
     // receipt complete depends on the row's current values, not just the
@@ -933,22 +1269,32 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
       // change to any column. The shipped client's patch is answered with
       // the row as it stands rather than with an empty UPDATE (which the
       // driver refuses) or a 400 (which would break that client's save).
-      if (Object.keys(changes).length === 0) {
-        return existing;
-      }
+      const resultingRow = await (async () => {
+        if (Object.keys(changes).length === 0) {
+          return existing;
+        }
+        const updated = await tx
+          .update(receipts)
+          .set(changes)
+          .where(and(eq(receipts.id, id), visibleTo(userId)))
+          .returning();
+        const row = updated[0];
+        if (row === undefined) {
+          // The row was selected FOR UPDATE moments ago in this
+          // transaction; its absence means something is genuinely broken.
+          throw new Error("Receipt update returned no row");
+        }
+        return row;
+      })();
 
-      const updated = await tx
-        .update(receipts)
-        .set(changes)
-        .where(and(eq(receipts.id, id), visibleTo(userId)))
-        .returning();
-      const row = updated[0];
-      if (row === undefined) {
-        // The row was selected FOR UPDATE moments ago in this transaction;
-        // its absence means something is genuinely broken.
-        throw new Error("Receipt update returned no row");
-      }
-      return row;
+      // Every save touches the vocabulary, including the no-change one
+      // above: "used" means "saved on a receipt", not "edited in this
+      // request", so a save that leaves the vendor alone still says this
+      // person is still using that vendor. The alternative - bumping
+      // recency only when a field CHANGED - would push the vendor someone
+      // shops at weekly steadily down their own list.
+      await rememberFieldOptions(tx, userId, resultingRow);
+      return resultingRow;
     });
 
     // A patch can supply OCR text a create omitted; same fire-and-forget
@@ -1067,6 +1413,16 @@ function receiptResponse(row: typeof receipts.$inferSelect) {
   const suggestions = mergeSuggestions(
     row.ocrSuggestions,
     row.llmSuggestions?.suggestions ?? null,
+    // The row's own state decides what is served, not just what the two
+    // parsers said (2026-09-01): a reviewed field on a pending receipt has
+    // its suggestion withheld, and a PDF's extracted text layer merges money
+    // differently from a photograph's OCR. Both rules live in the domain
+    // layer; this passes it what it needs to apply them.
+    {
+      status: row.status,
+      reviewedFields: row.reviewedFields,
+      ocrSource: row.ocrSource,
+    },
   );
   return {
     id: row.id,
@@ -1083,6 +1439,12 @@ function receiptResponse(row: typeof receipts.$inferSelect) {
     paymentMethod: row.paymentMethod,
     notes: row.notes,
     status: row.status,
+    // Which fields a human has already entered or accepted on this draft,
+    // and where its OCR text came from (2026-09-01). Served on every
+    // receipt so a client resuming a pending capture on another device
+    // knows what it may prefill from a suggestion and what it may not.
+    reviewedFields: row.reviewedFields,
+    ocrSource: row.ocrSource,
     // The two parse paths merged under §7.3's field-level rule, with
     // per-field provenance and the date-disagreement flag. Computed by the
     // domain layer on every read path: both clients render it, neither
@@ -1203,12 +1565,19 @@ type ListOrder = z.infer<typeof listOrderSchema>;
 type ListCursor = z.infer<typeof listCursorSchema>;
 
 /**
- * What one sortable column needs: the column itself, how a row's value is
- * written into a cursor, and how that string is cast back to the column's
- * own type for comparison.
+ * What one sortable column needs: the column itself (for the null rank and
+ * for whether it can be null at all), the EXPRESSION rows are ordered and
+ * compared by, how a row's value is written into a cursor, and how that
+ * string is turned back into something comparable with the expression.
+ *
+ * `sortKey` is separate from `column` only because of vendor - see that
+ * entry. For the other three it is the bare column, so the SQL those sorts
+ * emit, and the index it uses, are byte-for-byte what they were before the
+ * expression existed.
  */
 interface ListSortSpec {
   column: PgColumn;
+  sortKey: SQL;
   encodeKey(row: typeof receipts.$inferSelect): string | null;
   bindKey(value: string): SQL;
 }
@@ -1216,24 +1585,60 @@ interface ListSortSpec {
 const LIST_SORTS = {
   purchasedAt: {
     column: receipts.purchasedAt,
+    sortKey: sql`${receipts.purchasedAt}`,
     encodeKey: (row) => row.purchasedAt,
     bindKey: (value) => sql`${value}::date`,
   },
   capturedAt: {
     column: receipts.capturedAt,
+    sortKey: sql`${receipts.capturedAt}`,
     encodeKey: (row) => row.capturedAt.toISOString(),
     bindKey: (value) => sql`${value}::timestamptz`,
   },
   total: {
     column: receipts.totalCents,
+    sortKey: sql`${receipts.totalCents}`,
     encodeKey: (row) =>
       row.totalCents === null ? null : String(row.totalCents),
     bindKey: (value) => sql`${value}::integer`,
   },
+  /**
+   * Case-insensitive (2026-09-01), stated in the query rather than
+   * inherited from the database.
+   *
+   * ⚠ The reason this is worth writing down: sorted by the RAW column, what
+   * a person sees depends on the collation the database happens to have
+   * been created with. Under `C` (or `POSIX`) it is byte order, and every
+   * capitalised vendor lands ahead of every lowercase one - "Apple",
+   * "Dell", "amazon", "costco" - which reads as a broken alphabet, and
+   * hand-typed vendors are exactly the ones whose capitalisation is
+   * inconsistent. Under `en_US.utf8` the same query already folds case.
+   * Both are ordinary Postgres setups; the local docker-compose database
+   * and production need not agree, and neither is a thing this list should
+   * silently depend on. `lower()` makes the answer the same everywhere.
+   *
+   * It also makes "Apple" and "apple" genuinely EQUAL rather than merely
+   * adjacent, so two spellings of one vendor are separated by the
+   * (created_at, id) tiebreak like any other tie, instead of by a
+   * collation's tertiary rule.
+   *
+   * Ordering and the keyset comparison BOTH move to `lower(vendor)`, which
+   * is the part that has to be got right: a page boundary compares the same
+   * expression the ORDER BY sorted on, or rows either repeat or vanish
+   * across it.
+   *
+   * The cursor still encodes the row's vendor as stored, and `bindKey`
+   * lowers it on the way back in. Encoding the lowered key instead would
+   * have worked equally well for paging and thrown away the one thing a
+   * cursor is otherwise good for - saying which row it stood on. Lowering
+   * on bind also keeps every cursor already in flight valid, since a raw
+   * vendor and its lowered form are the same string to `lower()`.
+   */
   vendor: {
     column: receipts.vendor,
+    sortKey: sql`lower(${receipts.vendor})`,
     encodeKey: (row) => row.vendor,
-    bindKey: (value) => sql`${value}::text`,
+    bindKey: (value) => sql`lower(${value}::text)`,
   },
 } as const satisfies Record<ListSort, ListSortSpec>;
 
@@ -1262,7 +1667,7 @@ function sortKeyCanBeNull(spec: ListSortSpec): boolean {
  * it was before sorting became a parameter.
  */
 function listOrderBy(spec: ListSortSpec, order: ListOrder): SQL[] {
-  const byKey = order === "asc" ? asc(spec.column) : desc(spec.column);
+  const byKey = order === "asc" ? asc(spec.sortKey) : desc(spec.sortKey);
   const tiebreak = [desc(receipts.createdAt), desc(receipts.id)];
   return sortKeyCanBeNull(spec)
     ? [sql`(${spec.column} IS NULL) ASC`, byKey, ...tiebreak]
@@ -1285,17 +1690,28 @@ function afterCursorInSort(
     // The cursor row had no key, so it is already in the trailing null
     // group: every keyed row is behind us, and the remaining null-keyed
     // rows are separated by the tiebreak alone.
+    //
+    // Asked of the COLUMN rather than the sort expression, here and in
+    // `listOrderBy`'s null rank: `lower(NULL)` is null too, so the two agree
+    // either way, and the bare column is the form an index can answer.
     return sql`(${spec.column} IS NULL AND ${afterTiebreak})`;
   }
   const key = spec.bindKey(cursor.sortKey);
+  // Compared as the sort expression, never as the raw column: under
+  // `sort=vendor` this is `lower(vendor)` against a lowered cursor key, or
+  // the boundary between "amazon" and "Apple" would fall in a different
+  // place than the ORDER BY put it - which is how a keyset silently skips
+  // or repeats rows.
   const afterKey =
-    order === "asc" ? sql`${spec.column} > ${key}` : sql`${spec.column} < ${key}`;
+    order === "asc"
+      ? sql`${spec.sortKey} > ${key}`
+      : sql`${spec.sortKey} < ${key}`;
   // A null-keyed row sorts last in both directions, so it is after every
   // cursor row that had a key.
   const nullRowsFollow = sortKeyCanBeNull(spec)
     ? sql`${spec.column} IS NULL OR `
     : sql``;
-  return sql`(${nullRowsFollow}${afterKey} OR (${spec.column} = ${key} AND ${afterTiebreak}))`;
+  return sql`(${nullRowsFollow}${afterKey} OR (${spec.sortKey} = ${key} AND ${afterTiebreak}))`;
 }
 
 function encodeListCursor(
@@ -1330,38 +1746,115 @@ function decodeListCursor(encoded: string): ListCursor {
   return result.data;
 }
 
-/** How many past values /options offers per field. */
-const MAX_REUSABLE_OPTIONS = 100;
+/** The transaction handle drizzle hands a `db.transaction` callback. */
+type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 /**
- * One field's distinct non-null values for one user, most recently used
- * first. Recency is `max(created_at)` over the receipts carrying the value:
- * what someone used yesterday is what they are most likely to use again,
- * and alphabetical order would bury it under a year of one-offs.
+ * The three remembered fields, in one table: how the API spells each one
+ * (`vendor | category | paymentMethod`, the `:field` path parameter), how
+ * the database spells it (`receipt_field_options.field`, snake_case like the
+ * receipt column it mirrors), which receipt column a rename rewrites, and
+ * how to write that column.
  *
- * Pending receipts count - a value typed at capture is still a value the
- * person chose - and soft-deleted ones do not, via `visibleTo`.
+ * `set` is a function rather than a column name because drizzle's `.set()`
+ * needs a statically-known key: a computed one off a union would widen to
+ * `Record<string, string>` and typecheck against nothing. Spelling the three
+ * out is what keeps the compiler checking that a rename writes the column
+ * the same entry says it reads.
  */
-async function recentDistinctValues(
-  db: Db,
+const RECEIPT_OPTION_FIELDS = {
+  vendor: {
+    stored: "vendor",
+    column: receipts.vendor,
+    set: (value: string) => ({ vendor: value }),
+  },
+  category: {
+    stored: "category",
+    column: receipts.category,
+    set: (value: string) => ({ category: value }),
+  },
+  paymentMethod: {
+    stored: "payment_method",
+    column: receipts.paymentMethod,
+    set: (value: string) => ({ paymentMethod: value }),
+  },
+} as const satisfies Record<
+  ReceiptOptionApiField,
+  {
+    stored: ReceiptOptionField;
+    column: PgColumn;
+    set: (value: string) => Partial<typeof receipts.$inferInsert>;
+  }
+>;
+
+/**
+ * The `:field` path parameter of the rename and delete routes. A plain 400
+ * rather than a 404, on the same reasoning `pageParamOrBadRequest` states:
+ * unlike a receipt id, there is no isolation question here - the set of
+ * fields is public API, so a field that is not one of the three is
+ * malformed input, not a thing that might or might not belong to someone.
+ */
+function optionFieldParamOrBadRequest(param: string): ReceiptOptionApiField {
+  const parsed = receiptOptionFieldSchema.safeParse(param);
+  if (!parsed.success) {
+    throw new ApiError(
+      400,
+      "invalid_request",
+      `field must be one of ${receiptOptionFieldSchema.options.join(", ")}`,
+    );
+  }
+  return parsed.data;
+}
+
+/**
+ * Records every non-null vendor, category and payment method of a receipt
+ * that was just written, so `GET /api/receipts/options` can offer them back
+ * (2026-09-01).
+ *
+ * Called from INSIDE the create and PATCH transactions, deliberately: a
+ * receipt that saved and a vocabulary that did not is a state where the
+ * person's own list disagrees with their own receipts, and doing it after
+ * the commit is precisely how that state gets reached. It reads the
+ * RESULTING row, never the request body, so a PATCH that changed only the
+ * total still records the vendor the row actually carries.
+ *
+ * Upsert, so a value used again moves back to the top of the list rather
+ * than colliding: `last_used_at` is the whole ordering, and "used" means
+ * "saved on a receipt". Soft-delete and restore call nothing here - see the
+ * table's comment in db/schema.ts for why deleting a receipt is not a
+ * statement about the vocabulary.
+ */
+async function rememberFieldOptions(
+  tx: DbTransaction,
   userId: string,
-  column: PgColumn,
-): Promise<string[]> {
-  const rows = await db
-    .select({ value: column })
-    .from(receipts)
-    .where(and(visibleTo(userId), isNotNull(column)))
-    .groupBy(column)
-    .orderBy(desc(sql`max(${receipts.createdAt})`))
-    .limit(MAX_REUSABLE_OPTIONS);
-  return rows.map((row) => {
-    if (typeof row.value !== "string") {
-      // Filtered to non-null above, and every column this runs over is
-      // text; anything else means the query broke.
-      throw new Error("Reusable-options query returned a non-string value");
-    }
-    return row.value;
-  });
+  row: typeof receipts.$inferSelect,
+): Promise<void> {
+  const lastUsedAt = new Date();
+  const values = (
+    [
+      ["vendor", row.vendor],
+      ["category", row.category],
+      ["payment_method", row.paymentMethod],
+    ] as const satisfies readonly (readonly [ReceiptOptionField, string | null])[]
+  ).flatMap(([field, value]) =>
+    // A null field is not a value the person chose, it is a line the
+    // receipt did not have. Nothing to remember.
+    value === null ? [] : [{ userId, field, value, lastUsedAt }],
+  );
+  if (values.length === 0) {
+    return;
+  }
+  await tx
+    .insert(receiptFieldOptions)
+    .values(values)
+    .onConflictDoUpdate({
+      target: [
+        receiptFieldOptions.userId,
+        receiptFieldOptions.field,
+        receiptFieldOptions.value,
+      ],
+      set: { lastUsedAt },
+    });
 }
 
 interface VendorDefaultCandidate {
@@ -1454,6 +1947,12 @@ function normalizeOcrSuggestions(
     hstCents: suggestions.hstCents ?? null,
     subtotalCents: suggestions.subtotalCents ?? null,
     tipCents: suggestions.tipCents ?? null,
+    // Prompt v5's two fields (2026-09-01). No shipped client reports either
+    // - the on-device heuristic has no rule for a fee line or a payment
+    // brand - so null here is the literal truth about what the heuristic
+    // found, not a default standing in for an answer.
+    otherFeesCents: suggestions.otherFeesCents ?? null,
+    paymentMethod: suggestions.paymentMethod ?? null,
     vendorTaxNumber: suggestions.vendorTaxNumber ?? null,
   };
 }

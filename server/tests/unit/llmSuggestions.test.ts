@@ -21,6 +21,9 @@ const validResponse = {
   // Prompt v4 (2026-08-28): the model is now asked for a tip like every
   // other amount, so a fully populated response includes one.
   tipCents: 300,
+  // Prompt v5 (2026-09-01).
+  otherFeesCents: 150,
+  paymentMethod: "MASTERCARD",
 };
 
 /**
@@ -48,6 +51,8 @@ describe("validateLlmParseResponse", () => {
       hstCents: null,
       subtotalCents: null,
       tipCents: null,
+      otherFeesCents: null,
+      paymentMethod: null,
     };
     expect(validateLlmParseResponse(allNull)).toEqual({
       ...allNull,
@@ -123,6 +128,42 @@ describe("validateLlmParseResponse", () => {
       validateLlmParseResponse({ ...validResponse, vendor: "" }),
     ).toThrow();
   });
+
+  it("requires v5's two new fields like every other one", () => {
+    for (const key of ["otherFeesCents", "paymentMethod"] as const) {
+      const { [key]: _dropped, ...missing } = validResponse;
+      expect(() => validateLlmParseResponse(missing)).toThrow();
+    }
+  });
+
+  it("returns the model's own payment method, trimmed", () => {
+    expect(
+      validateLlmParseResponse({ ...validResponse, paymentMethod: " VISA " })
+        .paymentMethod,
+    ).toBe("VISA");
+  });
+
+  it("reads a whitespace-only payment method as the absence it is", () => {
+    // The model answering "   " is the model saying nothing. Storing that
+    // would make an empty string and a stated absence two different facts
+    // on the confirm screen when they are one.
+    expect(
+      validateLlmParseResponse({ ...validResponse, paymentMethod: "   " })
+        .paymentMethod,
+    ).toBeNull();
+  });
+
+  it("rejects an empty payment method: null is how the model says nothing", () => {
+    expect(() =>
+      validateLlmParseResponse({ ...validResponse, paymentMethod: "" }),
+    ).toThrow();
+  });
+
+  it("rejects a payment method long enough to carry receipt contents", () => {
+    expect(() =>
+      validateLlmParseResponse({ ...validResponse, paymentMethod: "x".repeat(51) }),
+    ).toThrow();
+  });
 });
 
 describe("RECEIPT_PARSE_JSON_SCHEMA", () => {
@@ -145,10 +186,50 @@ describe("RECEIPT_PARSE_JSON_SCHEMA", () => {
 
 describe("buildParseRequest", () => {
   const rawText = "food\nBasics\nTOTAL 45.54";
-  const request = buildParseRequest(rawText);
+  const capturedAt = new Date("2026-08-30T02:51:00Z");
+  const request = buildParseRequest(rawText, capturedAt);
 
-  it("sends exactly the OCR text as the only user content - never user-entered fields (ruling, Aug 7 2026)", () => {
-    expect(request.messages).toEqual([{ role: "user", content: rawText }]);
+  /**
+   * The Aug 7 ruling - the model sees what the paper says, never a field a
+   * person typed - with the one thing added on 2026-09-01 that is not the
+   * paper: the capture date. It is a machine timestamp the client stamps at
+   * the shutter, not a field any confirm screen edits, so the ruling's
+   * intent holds; and it is what bounds the purchase date, which nothing in
+   * the request could do before (MUJI's DD/MM/YYYY slip came back dated
+   * after the day the photo was taken).
+   *
+   * Asserted as the exact string rather than by `toContain`, because "the
+   * user content is these two things and nothing else" is the property, and
+   * a substring check would pass on a request that had quietly grown a
+   * third.
+   */
+  it("sends the capture date and the OCR text, and nothing else (ruling, Aug 7 2026)", () => {
+    expect(request.messages).toEqual([
+      { role: "user", content: `Captured on: 2026-08-30\n\n${rawText}` },
+    ]);
+  });
+
+  it("states the capture date in UTC, the direction that cannot exclude a real purchase", () => {
+    // A local-midnight-crossing capture. UTC can only push the stated day
+    // LATER than the person's own, and the prompt's rule is "on or before
+    // the capture date" - so a day of slack never rules out a legitimate
+    // same-day purchase.
+    const request = buildParseRequest(rawText, new Date("2026-08-29T23:30:00-04:00"));
+    expect(request.messages[0]?.content).toContain("Captured on: 2026-08-30");
+  });
+
+  /**
+   * ⚠ The regression this pins is the 2026-09-01 production failure, not a
+   * style preference. Sonnet 5 runs adaptive thinking when `thinking` is
+   * omitted and thinking tokens count against max_tokens: the live request
+   * on a 398-character receipt returned stop_reason "max_tokens", 1024
+   * output tokens all of them thinking, and no text block - three attempts
+   * in a row, which is how receipt 415701a3 earned a failure record. With
+   * thinking disabled the same request answered end_turn in 67 tokens.
+   */
+  it("disables thinking, which is what makes the 1024-token ceiling ample", () => {
+    expect(request.thinking).toEqual({ type: "disabled" });
+    expect(request.max_tokens).toBe(1024);
   });
 
   it("pins the ruled model", () => {
@@ -196,8 +277,11 @@ describe("prompt v4 (2026-08-28 product feedback)", () => {
   // for two independent reasons at once - the split-HST rule and the new
   // tip field - so a v3 record's hstCents and a v4 record's hstCents are not
   // answers to the same question (v3 was never asked to sum components).
-  it("carries prompt version 4", () => {
-    expect(RECEIPT_PARSE_PROMPT_VERSION).toBe(4);
+  // The version assertion moved to the v5 block above when v5 shipped; what
+  // stays here is that v4's own rules survived the rewrite, which is the
+  // part that would regress silently.
+  it("is not the current version any more - v5 superseded it 2026-09-01", () => {
+    expect(RECEIPT_PARSE_PROMPT_VERSION).toBeGreaterThan(4);
   });
 
   it("asks for tipCents, required and nullable like every other amount", () => {
@@ -249,6 +333,134 @@ describe("prompt v4 (2026-08-28 product feedback)", () => {
   });
 });
 
+/**
+ * Prompt v5 (2026-09-01), driven by the diagnosis over 136 real production
+ * receipts rather than by a field report.
+ *
+ * ⚠ These are text-content assertions on a prompt string, brittle against
+ * rewording by design - the same deliberate choice the v4 block below
+ * documents. Every phrase asserted here corresponds to a receipt that was
+ * actually parsed wrongly in production, so a wording change that breaks
+ * one is the moment to re-read the rule and confirm the new wording still
+ * says it.
+ */
+describe("prompt v5 (2026-09-01 parse diagnosis)", () => {
+  it("carries prompt version 5", () => {
+    expect(RECEIPT_PARSE_PROMPT_VERSION).toBe(5);
+  });
+
+  it("asks for otherFeesCents and paymentMethod, required like everything else", () => {
+    const properties = Object.keys(RECEIPT_PARSE_JSON_SCHEMA.properties);
+    expect(properties).toContain("otherFeesCents");
+    expect(properties).toContain("paymentMethod");
+    expect(RECEIPT_PARSE_JSON_SCHEMA.required).toContain("otherFeesCents");
+    expect(RECEIPT_PARSE_JSON_SCHEMA.required).toContain("paymentMethod");
+    expect(RECEIPT_PARSE_JSON_SCHEMA.properties.otherFeesCents.type).toEqual([
+      "integer",
+      "null",
+    ]);
+    expect(RECEIPT_PARSE_JSON_SCHEMA.properties.paymentMethod.type).toEqual([
+      "string",
+      "null",
+    ]);
+  });
+
+  it("explains the capture line the request now carries", () => {
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("Captured on: yyyy-mm-dd");
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain(
+      "it is not part of the receipt",
+    );
+  });
+
+  it("bounds the purchase date by the capture date", () => {
+    // MUJI prints DD/MM/YYYY; 09/05/2026 was read as September 5, after the
+    // day the photo was taken, and nothing rejected it.
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain(
+      "on or before the capture date",
+    );
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("never after it");
+  });
+
+  it("states the yy/mm/dd card-slip rule that 12 receipts got wrong", () => {
+    // Both parsers agreed on 2019-07-26 for "DateTime: 26/07/19", so the
+    // disagreement flag never fired and nobody noticed.
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("26/07/19");
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("2026-07-19, not 2019-07-26");
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toMatch(/footer date printed mm\/dd\/yyyy/);
+  });
+
+  it("names the decoy dates", () => {
+    for (const decoy of ["sweepstakes", "expires", "TIMED ORDER", "warranty"]) {
+      expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain(decoy);
+    }
+  });
+
+  it("states that a savings or discount line is never the total", () => {
+    // A $218.94 Costco purchase was stored as the $8.50 on its
+    // "TOTAL DISCOUNT(S)" line.
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("TOTAL DISCOUNT(S)");
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("Total of your savings");
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("is never the total");
+  });
+
+  it("states the card slip's AMOUNT + TIP = TOTAL arrangement", () => {
+    // Twice, the TIP line on such a slip was entered as HST.
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("AMOUNT + TIP = TOTAL");
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toMatch(
+      /"TIP" or "Gratuity" line is never tax/,
+    );
+  });
+
+  it("distinguishes a pre-discount item subtotal from the real one", () => {
+    // Longos: Items Subtotal 52.55, Multi-Save -0.45, Subtotal 52.10.
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("Items Subtotal");
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain(
+      'the later "Subtotal" is the one that pairs with the tax and the total',
+    );
+  });
+
+  it("lists the tax labels the heuristic misses", () => {
+    for (const label of [
+      "Sales tax total",
+      "Total Tax",
+      "H.S.T.",
+      "Food Tax",
+      "HST (TOTAL GST+PST)",
+      "HST Included in Total $:",
+      "H 13.000% of $109.80",
+      "hst5%",
+      "6.88 HST (13.000)%",
+    ]) {
+      expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain(label);
+    }
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain(
+      "never the percentage rate",
+    );
+  });
+
+  it("defines the fee and payment-method fields nobody was extracting", () => {
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("12% Service charge $5.99");
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("Credit card 2.4% surcharge");
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("Rounding 0.02");
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain(
+      "MASTERCARD, VISA, AMEX, DEBIT, INTERAC, CASH",
+    );
+  });
+
+  it("tells the model to answer null rather than derive or invent an amount", () => {
+    // A photo with the amount column cropped out produced 1750/201/1549 out
+    // of one visible item price; a faded "Subtotal 17 / Tax 35" produced
+    // confident wrong cents.
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain(
+      "Never derive one amount from the others",
+    );
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain("never invent digits");
+    expect(RECEIPT_PARSE_SYSTEM_PROMPT).toContain(
+      "re-read those lines before answering",
+    );
+  });
+});
+
 describe("resolveReceiptParseModel - the 2026-08-28 override", () => {
   it("defaults to Sonnet 5 when nothing is configured", () => {
     expect(resolveReceiptParseModel({})).toBe(DEFAULT_RECEIPT_PARSE_MODEL);
@@ -277,10 +489,11 @@ describe("resolveReceiptParseModel - the 2026-08-28 override", () => {
   });
 
   it("is what the request actually carries", () => {
-    expect(buildParseRequest("SUBTOTAL 1.00", "claude-haiku-4-5").model).toBe(
-      "claude-haiku-4-5",
-    );
-    expect(buildParseRequest("SUBTOTAL 1.00").model).toBe(
+    const capturedAt = new Date("2026-08-30T02:51:00Z");
+    expect(
+      buildParseRequest("SUBTOTAL 1.00", capturedAt, "claude-haiku-4-5").model,
+    ).toBe("claude-haiku-4-5");
+    expect(buildParseRequest("SUBTOTAL 1.00", capturedAt).model).toBe(
       DEFAULT_RECEIPT_PARSE_MODEL,
     );
   });

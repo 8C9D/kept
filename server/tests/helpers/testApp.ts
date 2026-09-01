@@ -10,12 +10,14 @@ import {
 } from "./testDatabase.js";
 import {
   exportJobs,
+  receiptFieldOptions,
   receiptImages,
   receipts,
   userEvents,
   users,
 } from "../../src/db/schema.js";
 import type { LlmParseSweepHandle } from "../../src/parse/llmParseSweep.js";
+import type { ParseOcrText } from "../../src/routes/receipts.js";
 import {
   fakeAppleTokenRevoker,
   type FakeAppleTokenRevoker,
@@ -68,6 +70,12 @@ export function createTestHarness(
   options: {
     edgeSharedSecret?: string;
     llmParseSweep?: LlmParseSweepHandle;
+    /**
+     * The synchronous capture-time parse (2026-09-01). Absent by default so
+     * every existing harness keeps the unconfigured-key shape - which is
+     * also what `POST /api/receipts/parse` answers 503 for.
+     */
+    parseOcrText?: ParseOcrText;
     webOrigins?: readonly string[];
     /** False builds an app with no revoker, as an unconfigured key would. */
     appleTokenRevoker?: false;
@@ -89,6 +97,9 @@ export function createTestHarness(
     ...(options.llmParseSweep !== undefined && {
       llmParseSweep: options.llmParseSweep,
     }),
+    ...(options.parseOcrText !== undefined && {
+      parseOcrText: options.parseOcrText,
+    }),
     ...(options.webOrigins !== undefined && {
       webOrigins: options.webOrigins,
     }),
@@ -104,6 +115,7 @@ export function createTestHarness(
       // Child tables first; no CASCADE so an unexpected new table cannot be
       // silently emptied.
       await db.delete(receiptImages);
+      await db.delete(receiptFieldOptions);
       await db.delete(receipts);
       await db.delete(exportJobs);
       await db.delete(userEvents);

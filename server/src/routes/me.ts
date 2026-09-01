@@ -5,6 +5,7 @@ import type { SessionTokens } from "../auth/session.js";
 import type { Db } from "../db/client.js";
 import {
   exportJobs,
+  receiptFieldOptions,
   receiptImages,
   receipts,
   userEvents,
@@ -177,6 +178,13 @@ export function meRoutes(deps: MeRouteDependencies): Hono<AuthedEnv> {
       // reason the test harness's reset does it by hand.
       await tx.delete(receiptImages).where(eq(receiptImages.userId, userId));
       await tx.delete(receipts).where(eq(receipts.userId, userId));
+      // The person's remembered vendors, categories and payment methods
+      // (2026-09-01). Nothing in object storage and no reference to a
+      // receipt - just their own vocabulary, which is theirs and goes with
+      // the account.
+      await tx
+        .delete(receiptFieldOptions)
+        .where(eq(receiptFieldOptions.userId, userId));
       await tx.delete(exportJobs).where(eq(exportJobs.userId, userId));
       // No object storage to clean up for these rows - user_events never
       // references anything outside the database (schema.ts: receipt_id is

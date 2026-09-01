@@ -7,6 +7,7 @@ import {
   compareSuggestionPaths,
   measureAccuracy,
   type AccuracyReport,
+  type ConfirmedFields,
   type MeasuredReceipt,
   type Mismatch,
   type ScoredField,
@@ -33,6 +34,10 @@ const FIELD_LABELS: Record<ScoredField, string> = {
   hstCents: "hst",
   subtotalCents: "subtotal",
   tipCents: "tip",
+  // Prompt v5 (2026-09-01). Both read low until v5 records accumulate: no
+  // earlier prompt asked for either, and the heuristic never will.
+  otherFeesCents: "other fees",
+  paymentMethod: "payment",
 };
 
 async function report() {
@@ -73,14 +78,7 @@ async function report() {
     return {
       id: row.id,
       suggestions: row.ocrSuggestions,
-      confirmed: {
-        vendor: row.vendor,
-        purchasedAt: row.purchasedAt,
-        totalCents: row.totalCents,
-        hstCents: row.hstCents,
-        subtotalCents: row.subtotalCents,
-        tipCents: row.tipCents,
-      },
+      confirmed: confirmedFields(row),
     };
   });
 
@@ -133,6 +131,8 @@ async function report() {
     hstCents: null,
     subtotalCents: null,
     tipCents: null,
+    otherFeesCents: null,
+    paymentMethod: null,
     vendorTaxNumber: null,
   };
   const failureCount = llmRows.filter(
@@ -153,14 +153,7 @@ async function report() {
     return {
       id: row.id,
       suggestions: row.llmSuggestions.suggestions ?? nothingSuggested,
-      confirmed: {
-        vendor: row.vendor,
-        purchasedAt: row.purchasedAt,
-        totalCents: row.totalCents,
-        hstCents: row.hstCents,
-        subtotalCents: row.subtotalCents,
-        tipCents: row.tipCents,
-      },
+      confirmed: confirmedFields(row),
     };
   });
   const llmResult = measureAccuracy(llmMeasured);
@@ -226,10 +219,29 @@ async function report() {
   await pool.end();
 }
 
+/**
+ * The human-confirmed values a suggestion is scored against, off the row.
+ * One function rather than the same literal twice: the heuristic table and
+ * the LLM table measure against identical ground truth, and a field added
+ * to one copy and not the other would silently score two different things.
+ */
+function confirmedFields(row: typeof receipts.$inferSelect): ConfirmedFields {
+  return {
+    vendor: row.vendor,
+    purchasedAt: row.purchasedAt,
+    totalCents: row.totalCents,
+    hstCents: row.hstCents,
+    subtotalCents: row.subtotalCents,
+    tipCents: row.tipCents,
+    otherFeesCents: row.otherFeesCents,
+    paymentMethod: row.paymentMethod,
+  };
+}
+
 function printAccuracyTable(title: string, result: AccuracyReport) {
   console.log(`${title}\n`);
   console.log(
-    padded("field", 12) +
+    padded("field", 13) +
       padded("accuracy", 10) +
       padded("kept", 6) +
       padded("fixed", 7) +
@@ -239,7 +251,7 @@ function printAccuracyTable(title: string, result: AccuracyReport) {
   for (const tally of result.tallies) {
     const percent = accuracyPercent(tally);
     console.log(
-      padded(FIELD_LABELS[tally.field], 12) +
+      padded(FIELD_LABELS[tally.field], 13) +
         padded(percent === null ? "-" : `${percent}%`, 10) +
         padded(String(tally.match), 6) +
         padded(String(tally.mismatch), 7) +

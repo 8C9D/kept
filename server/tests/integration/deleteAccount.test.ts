@@ -3,6 +3,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppleRevocationError } from "../../src/auth/appleTokenRevoker.js";
 import {
   exportJobs,
+  receiptFieldOptions,
   receiptImages,
   receipts,
   userEvents,
@@ -146,6 +147,10 @@ describe("DELETE /api/me (account deletion)", () => {
     // The behavioural log, too: leaving it behind would be a broken promise
     // to the person who asked to be deleted (2026-08-28 logging feature).
     expect(await harness.db.select().from(userEvents)).toHaveLength(0);
+    // And their remembered vendors, categories and payment methods
+    // (2026-09-01) - a table of the person's own words, which is exactly
+    // the kind of thing a deletion is expected to take with it.
+    expect(await harness.db.select().from(receiptFieldOptions)).toHaveLength(0);
 
     // And the bytes, read out of the store the same way.
     expect(harness.storage.objects.has(confirmed.objectKey)).toBe(false);
@@ -190,6 +195,13 @@ describe("DELETE /api/me (account deletion)", () => {
     expect(await harness.db.select().from(exportJobs)).toHaveLength(1);
     const survivingEvents = await harness.db.select().from(userEvents);
     expect(survivingEvents.map((row) => row.userId)).toEqual([other.userId]);
+    const survivingOptions = await harness.db
+      .select()
+      .from(receiptFieldOptions);
+    expect(
+      [...new Set(survivingOptions.map((row) => row.userId))],
+    ).toEqual([other.userId]);
+    expect(survivingOptions.length).toBeGreaterThan(0);
     expect(harness.storage.objects.has(theirs.objectKey)).toBe(true);
     expect(harness.storage.objects.has(theirExport)).toBe(true);
     // Mine, gone.

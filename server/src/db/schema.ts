@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import {
   char,
   check,
@@ -11,10 +11,16 @@ import {
   smallint,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
+import type { ReceiptOptionField } from "../domain/receiptFieldOptions.js";
+import type { ReviewedField } from "../domain/reviewedFields.js";
+import type {
+  OcrFieldSuggestions,
+  OcrSource,
+} from "../domain/ocrSuggestions.js";
 import type { LlmSuggestionRecord } from "../domain/llmSuggestions.js";
 import type {
   EventAction,
@@ -89,7 +95,36 @@ export const receipts = pgTable(
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     // Defaulting to 'pending' is fail-closed: pending rows never export.
     status: receiptStatus("status").notNull().default("pending"),
+    /**
+     * Which fields a human has entered or explicitly reviewed while this
+     * receipt is still pending (2026-09-01) - the vocabulary and the whole
+     * reasoning are in domain/reviewedFields.ts. Field NAMES only, never
+     * values, and the schema layer validates against the closed list.
+     *
+     * NOT NULL with an empty-array default rather than nullable: "no field
+     * has been reviewed yet" and "this client does not report reviews" are
+     * the same fact from the merge's point of view (suppress nothing), and a
+     * nullable array would make every reader handle a third state that means
+     * neither.
+     *
+     * Meaningless once `status` is 'confirmed' - a confirmed receipt's
+     * values are all a human's - and deliberately not cleared on confirm:
+     * clearing it would be a write whose only purpose is tidiness, and the
+     * unconfirm-then-edit path would then have lost what it knew.
+     */
+    reviewedFields: text("reviewed_fields")
+      .array()
+      .$type<ReviewedField[]>()
+      .notNull()
+      .default(sql`'{}'`),
     ocrRawText: text("ocr_raw_text"),
+    /**
+     * Where `ocr_raw_text` came from: on-device OCR of a photo, or a PDF's
+     * own text layer (domain/ocrSuggestions.ts, OCR_SOURCES). Null on every
+     * row created before 2026-09-01, which reads as vision-era - the only
+     * capture path that existed then.
+     */
+    ocrSource: text("ocr_source").$type<OcrSource>(),
     // What the on-device parser suggested at capture, verbatim and
     // immutable: no route updates it. Comparing it with the fields a human
     // went on to confirm is how per-field parse accuracy is measured
@@ -115,6 +150,68 @@ export const receipts = pgTable(
     check(
       "receipts_confirmed_complete_ck",
       sql`status <> 'confirmed' OR total_cents IS NOT NULL`,
+    ),
+  ],
+);
+
+/**
+ * The values a person has used before for vendor, category and payment
+ * method, offered back by `GET /api/receipts/options` so nobody retypes
+ * "office supplies" for the fortieth time (2026-09-01; the reasoning for
+ * promoting this from a query over `receipts` to a table of its own is in
+ * domain/receiptFieldOptions.ts).
+ *
+ * Free text, stored verbatim - the same 2026-08-26 ruling that governs the
+ * receipt columns these mirror. Nothing here is trimmed, case-folded or
+ * merged, because the list feeds an exact-match filter and an option this
+ * server rewrote is an option its own filter would then fail to find.
+ *
+ * `last_used_at` is maintained by the create and PATCH routes, which upsert
+ * every non-null vendor/category/payment_method of the row they just wrote.
+ * It is deliberately NOT touched by a soft delete or a restore: deleting a
+ * receipt is not a statement about the vocabulary, and the whole point of a
+ * separate table is that removing an option no longer requires destroying a
+ * retained tax record. `DELETE /api/receipts/options/:field` is how an
+ * option goes away.
+ *
+ * The unique constraint is what makes the upsert an upsert (it is the
+ * ON CONFLICT target); the index is the read order the route serves,
+ * most-recently-used first.
+ */
+export const receiptFieldOptions = pgTable(
+  "receipt_field_options",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    // Checked against the closed vocabulary in the database as well as in
+    // the route: this column decides which receipt column a rename rewrites,
+    // and a value outside the three would name no column at all.
+    field: text("field").notNull().$type<ReceiptOptionField>(),
+    value: text("value").notNull(),
+    // No default: every writer sets it explicitly to the moment of the save
+    // that used the value, and a defaulted "now()" would quietly make an
+    // unrelated backfill look like a use.
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("receipt_field_options_user_id_field_value_uq").on(
+      t.userId,
+      t.field,
+      t.value,
+    ),
+    index("receipt_field_options_user_id_field_last_used_at_idx").on(
+      t.userId,
+      t.field,
+      desc(t.lastUsedAt),
+    ),
+    check(
+      "receipt_field_options_field_ck",
+      sql`field in ('vendor', 'category', 'payment_method')`,
     ),
   ],
 );

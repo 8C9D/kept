@@ -57,7 +57,8 @@ async function backfill() {
   const result = await runLlmParseSweep({
     db,
     model: receiptParseModel,
-    parse: (ocrRawText) => parseReceiptText(client, ocrRawText, receiptParseModel),
+    parse: (ocrRawText, capturedAt) =>
+      parseReceiptText(client, ocrRawText, capturedAt, receiptParseModel),
     onRow(row, outcome, error) {
       const label = `${row.vendor ?? "no vendor"} · ${row.status} · ${row.id.slice(0, 8)}`;
       if (outcome === "failed") {

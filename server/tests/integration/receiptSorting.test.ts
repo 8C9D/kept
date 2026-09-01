@@ -1,4 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import { receiptImages, receipts } from "../../src/db/schema.js";
 import {
   createTestHarness,
   imageFor,
@@ -455,6 +457,205 @@ describe("the list cursor under a sort", () => {
     expect(second.status).toBe(200);
     const body = (await second.json()) as ListResponse;
     expect(body.receipts.map(labelOf)).toEqual(["charlie", "bravo"]);
+  });
+
+  /**
+   * Case-insensitive vendor sorting (2026-09-01): the route sorts and
+   * compares by `lower(vendor)` rather than by the raw column, so the order
+   * does not depend on the collation the database was created with (see
+   * LIST_SORTS.vendor's comment - `C` puts every capital first, `en_US.utf8`
+   * already folds case, and both are ordinary setups).
+   *
+   * ⚠ **A note on what this suite can and cannot prove here.** The
+   * docker-compose database is `en_US.utf8`, so `ORDER BY vendor` and
+   * `ORDER BY lower(vendor)` already agree on the ordering cases below -
+   * asserting the order alone would pass against either implementation. The
+   * property that is genuinely under test, and that a page boundary
+   * actually depends on, is that the ORDER BY and the keyset comparison use
+   * the SAME expression: every case pages at a limit small enough to put a
+   * boundary between two vendors that differ only in case, including the
+   * pair `lower()` makes exactly EQUAL, where the keyset has to fall
+   * through to the (created_at, id) tiebreak or drop a row.
+   */
+  describe("vendor sorting, case-insensitively", () => {
+    /**
+     * Mixed capitalisation, including two spellings of one vendor -
+     * "Apple" and "apple" are one string to `lower()` and two to the raw
+     * column, which is the boundary the keyset has to survive.
+     */
+    const MIXED_CASE = [
+      "amazon",
+      "apple",
+      "Apple",
+      "BEST BUY",
+      "costco",
+      "Dell",
+    ];
+
+    /**
+     * ⚠ The order of "apple" before "Apple" in the array above is load
+     * bearing, and it is what makes this suite discriminating on an
+     * `en_US.utf8` database. Each fixture is stamped with a `created_at` in
+     * array order, oldest first, so "apple" is the OLDER of the pair:
+     *
+     *   - `ORDER BY vendor` (en_US) makes case a tertiary difference and
+     *     puts the lowercase one first: apple, then Apple.
+     *   - `ORDER BY lower(vendor)` makes them EQUAL, so the (created_at, id)
+     *     DESC tiebreak decides - newest first: Apple, then apple.
+     *
+     * Reverse the pair and the two agree again, which is exactly the trap
+     * this comment exists to stop a later edit walking into.
+     */
+    async function captureMixedCase(): Promise<void> {
+      // The fixture receipts are cleared first: this suite is about vendor
+      // order alone, and five extra rows would only make the expectations
+      // harder to read.
+      await harness.db.delete(receiptImages);
+      await harness.db.delete(receipts);
+      ids = {};
+      for (const [index, vendor] of MIXED_CASE.entries()) {
+        const response = await harness.request(token, "POST", "/api/receipts", {
+          ...receiptBody({ vendor }),
+          image: imageFor(userId, `c${String(index)}`.padStart(64, "0")),
+        });
+        expect(response.status).toBe(201);
+        const id = ((await response.json()) as { id: string }).id;
+        ids[vendor] = id;
+        // Stamped rather than relied upon: two HTTP round-trips are
+        // microseconds apart, and an ordering that leans on that is a flake.
+        await harness.db
+          .update(receipts)
+          .set({ createdAt: new Date(Date.UTC(2026, 7, 26, 9, index, 0)) })
+          .where(eq(receipts.id, id));
+      }
+    }
+
+    async function vendorsOf(query: string): Promise<string[]> {
+      const response = await harness.request(
+        token,
+        "GET",
+        `/api/receipts?${query}`,
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        receipts: { vendor: string | null }[];
+      };
+      return body.receipts.map((receipt) => receipt.vendor ?? "(none)");
+    }
+
+    beforeEach(captureMixedCase);
+
+    it("groups vendors by lower(vendor), whatever their capitalisation", async () => {
+      // What a `C`-collation database would give from the raw column:
+      // ["Apple", "BEST BUY", "Dell", "amazon", "apple", "costco"] - every
+      // capital ahead of every lowercase, the two Apples split apart.
+      const ascending = await vendorsOf("sort=vendor&order=asc");
+      expect(ascending.map((vendor) => vendor.toLowerCase())).toEqual([
+        "amazon",
+        "apple",
+        "apple",
+        "best buy",
+        "costco",
+        "dell",
+      ]);
+      const descending = await vendorsOf("sort=vendor&order=desc");
+      expect(descending.map((vendor) => vendor.toLowerCase())).toEqual([
+        "dell",
+        "costco",
+        "best buy",
+        "apple",
+        "apple",
+        "amazon",
+      ]);
+    });
+
+    it("treats two spellings of one vendor as tied, breaking on recency", async () => {
+      // The case that separates `lower(vendor)` from the raw column on an
+      // en_US database (see captureMixedCase's comment): the pair is EQUAL,
+      // so the (created_at, id) DESC tiebreak orders it - newest first -
+      // rather than the collation's lowercase-first tertiary rule.
+      expect(await vendorsOf("sort=vendor&order=asc")).toEqual([
+        "amazon",
+        "Apple",
+        "apple",
+        "BEST BUY",
+        "costco",
+        "Dell",
+      ]);
+    });
+
+    it("carries a page boundary that falls between two spellings of one vendor", async () => {
+      // Page two ends on one of the two Apples - which `lower()` makes
+      // EQUAL to the other, so the keyset can only get past it via the
+      // (created_at, id) tiebreak. A comparison on the raw column would
+      // repeat or drop the second one.
+      const pages: string[] = [];
+      let cursor: string | null = null;
+      for (let page = 0; page < 10; page += 1) {
+        const suffix: string =
+          cursor === null ? "" : `&cursor=${encodeURIComponent(cursor)}`;
+        const response = await harness.request(
+          token,
+          "GET",
+          `/api/receipts?sort=vendor&order=asc&limit=2${suffix}`,
+        );
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          receipts: { vendor: string }[];
+          nextCursor: string | null;
+        };
+        pages.push(...body.receipts.map((r) => r.vendor));
+        cursor = body.nextCursor;
+        if (cursor === null) {
+          break;
+        }
+      }
+      // Every fixture exactly once, in the unpaged order.
+      expect([...pages].sort()).toEqual([...MIXED_CASE].sort());
+      expect(pages).toEqual(await vendorsOf("sort=vendor&order=asc"));
+    });
+
+    it.each([1, 2, 3])(
+      "pages the whole list at limit %i to exactly the unpaged order",
+      async (limit) => {
+        for (const order of ["asc", "desc"] as const) {
+          const query = `sort=vendor&order=${order}`;
+          const labels: string[] = [];
+          let cursor: string | null = null;
+          for (let page = 0; page < 20; page += 1) {
+            const suffix: string =
+              cursor === null ? "" : `&cursor=${encodeURIComponent(cursor)}`;
+            const response = await harness.request(
+              token,
+              "GET",
+              `/api/receipts?${query}&limit=${String(limit)}${suffix}`,
+            );
+            expect(response.status).toBe(200);
+            const body = (await response.json()) as {
+              receipts: { vendor: string }[];
+              nextCursor: string | null;
+            };
+            labels.push(...body.receipts.map((r) => r.vendor));
+            cursor = body.nextCursor;
+            if (cursor === null) {
+              break;
+            }
+          }
+          expect(labels).toEqual(await vendorsOf(query));
+        }
+      },
+    );
+
+    it("still places a vendorless receipt last in both directions", async () => {
+      const response = await harness.request(token, "POST", "/api/receipts", {
+        ...receiptBody({ vendor: null }),
+        image: imageFor(userId, "e".repeat(64)),
+      });
+      expect(response.status).toBe(201);
+
+      expect((await vendorsOf("sort=vendor&order=asc")).at(-1)).toBe("(none)");
+      expect((await vendorsOf("sort=vendor&order=desc")).at(-1)).toBe("(none)");
+    });
   });
 
   it("keeps a sorted page inside the caller's own receipts", async () => {

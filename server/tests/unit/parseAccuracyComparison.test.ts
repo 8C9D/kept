@@ -16,6 +16,8 @@ function suggestions(
     hstCents: 89,
     subtotalCents: 4465,
     tipCents: 500,
+    otherFeesCents: null,
+    paymentMethod: "MASTERCARD",
     vendorTaxNumber: "R105216170",
     ...overrides,
   };

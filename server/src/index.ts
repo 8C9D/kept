@@ -296,16 +296,31 @@ const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
 // the value, so the id recorded on a stored record is always the id that
 // produced it (2026-08-28).
 const receiptParseModel = resolveReceiptParseModel(process.env);
-const llmParseSweep =
+/**
+ * The one bound parse path, built once and shared (2026-09-01). It used to
+ * be constructed inside `createLlmParseSweep`'s argument list, where the
+ * sweep was its only caller; `POST /api/receipts/parse` is now a second
+ * one, and the two must not be two different bindings - a route answering
+ * from a different model than the sweep records would make the stored
+ * `model` stamp a lie about what the person actually saw.
+ */
+const parseOcrText =
   anthropicApiKey !== undefined && anthropicApiKey !== ""
+    ? (() => {
+        const client = new Anthropic({ apiKey: anthropicApiKey });
+        return {
+          model: receiptParseModel,
+          parse: (ocrRawText: string, capturedAt: Date) =>
+            parseReceiptText(client, ocrRawText, capturedAt, receiptParseModel),
+        };
+      })()
+    : undefined;
+const llmParseSweep =
+  parseOcrText !== undefined
     ? createLlmParseSweep({
         db,
-        model: receiptParseModel,
-        parse: (() => {
-          const client = new Anthropic({ apiKey: anthropicApiKey });
-          return (ocrRawText: string) =>
-            parseReceiptText(client, ocrRawText, receiptParseModel);
-        })(),
+        model: parseOcrText.model,
+        parse: parseOcrText.parse,
       })
     : undefined;
 if (llmParseSweep === undefined) {
@@ -345,6 +360,10 @@ const app = createApp({
   edgeSharedSecret: process.env.EDGE_SHARED_SECRET,
   webOrigins,
   ...(llmParseSweep !== undefined && { llmParseSweep }),
+  // The capture-time parse endpoint, on exactly the same terms as the
+  // sweep: present when a key is configured, absent (and answered 503) when
+  // one is not.
+  ...(parseOcrText !== undefined && { parseOcrText }),
   ...(appleSignInKey !== null && {
     // Always the real revoker, for the verifier's reason: this file offers
     // no way to construct a fake one.

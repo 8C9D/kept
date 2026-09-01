@@ -60,6 +60,14 @@ const FIELDS = [
   // still wants to see it move: a tip that fails to change under digit
   // rotation would be as suspicious as any other field.
   "tipCents",
+  // Prompt v5 (2026-09-01). otherFeesCents rotates like every other amount;
+  // paymentMethod deliberately does NOT have to - "MASTERCARD" carries no
+  // digits, so a stable payment method under digit rotation is the correct
+  // answer, not a suspicious one. It is listed because the exhaustiveness
+  // check below demands every suggestion field appear, and printed because
+  // seeing it unchanged beside four changed amounts is itself the evidence.
+  "otherFeesCents",
+  "paymentMethod",
   "vendorTaxNumber",
 ] as const;
 
@@ -69,8 +77,17 @@ const { pool } = createDb(databaseUrl);
 const client = new Anthropic({ apiKey });
 
 async function probe() {
-  const result = await pool.query<{ id: string; vendor: string | null; ocr_raw_text: string | null }>(
-    "select id, vendor, ocr_raw_text from receipts where id::text like $1 || '%' and deleted_at is null",
+  const result = await pool.query<{
+    id: string;
+    vendor: string | null;
+    ocr_raw_text: string | null;
+    // The parse takes the capture date since 2026-09-01, so the probe has
+    // to select it. Deliberately NOT rotated with the digits below: it is
+    // request metadata, not receipt text, and corrupting it would test
+    // something other than "does the output track the raw text".
+    captured_at: Date;
+  }>(
+    "select id, vendor, ocr_raw_text, captured_at from receipts where id::text like $1 || '%' and deleted_at is null",
     [idArg],
   );
   if (result.rows.length !== 1) {
@@ -89,8 +106,18 @@ async function probe() {
   );
   console.log("Corruption: every digit rotated +1 (0->1 ... 9->0)\n");
 
-  const intact = await parseReceiptText(client, row.ocr_raw_text, receiptParseModel);
-  const corrupted = await parseReceiptText(client, corruptedText, receiptParseModel);
+  const intact = await parseReceiptText(
+    client,
+    row.ocr_raw_text,
+    row.captured_at,
+    receiptParseModel,
+  );
+  const corrupted = await parseReceiptText(
+    client,
+    corruptedText,
+    row.captured_at,
+    receiptParseModel,
+  );
 
   const width = Math.max(
     ...FIELDS.map((f) => String(intact[f] ?? "null").length),

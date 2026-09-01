@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  checkAmountFloor,
   checkHstRatePlausibility,
   checkReceiptArithmetic,
   deriveMissingAmount,
+  suggestDefaultRateHst,
 } from "../../src/domain/arithmetic.js";
 import { MAX_STORABLE_CENTS, cents } from "../../src/domain/money.js";
 
@@ -267,6 +269,100 @@ describe("deriveMissingAmount", () => {
     });
     expect(result).toEqual({ field: "totalCents", cents: -11300 });
   });
+
+  /**
+   * 2026-09-01: a blank tip and a blank other-fees line stopped counting as
+   * unknowns when the field being solved for is HST, subtotal or total.
+   * Before this, the commonest receipt shape there is - a subtotal and a
+   * total, no tip, no fees - had three nulls and derived nothing, which made
+   * the feature almost unreachable.
+   */
+  describe("a blank tip or other-fees line, which most receipts have", () => {
+    it("derives hst from a subtotal and a total alone", () => {
+      // The proposal's own worked example.
+      const result = deriveMissingAmount({
+        subtotalCents: cents(1270),
+        hstCents: null,
+        tipCents: null,
+        otherFeesCents: null,
+        totalCents: cents(1435),
+      });
+      expect(result).toEqual({ field: "hstCents", cents: 165 });
+    });
+
+    it("derives the total from a subtotal and an hst alone", () => {
+      const result = deriveMissingAmount({
+        subtotalCents: cents(1270),
+        hstCents: cents(165),
+        tipCents: null,
+        otherFeesCents: null,
+        totalCents: null,
+      });
+      expect(result).toEqual({ field: "totalCents", cents: 1435 });
+    });
+
+    it("derives the subtotal from an hst and a total alone", () => {
+      const result = deriveMissingAmount({
+        subtotalCents: null,
+        hstCents: cents(165),
+        tipCents: null,
+        otherFeesCents: null,
+        totalCents: cents(1435),
+      });
+      expect(result).toEqual({ field: "subtotalCents", cents: 1270 });
+    });
+
+    it("derives nothing from a subtotal alone - two real unknowns", () => {
+      const result = deriveMissingAmount({
+        subtotalCents: cents(1270),
+        hstCents: null,
+        tipCents: null,
+        otherFeesCents: null,
+        totalCents: null,
+      });
+      expect(result).toBeNull();
+    });
+
+    it("still refuses to invent a tip from four other numbers that do not balance", () => {
+      // The asymmetry, pinned: "the tip line is blank, so there was no tip"
+      // is a reading anyone would make; "the tip is whatever makes these
+      // balance" invents a gratuity out of a rounding difference. Solving
+      // FOR tip still needs the other four present.
+      const result = deriveMissingAmount({
+        subtotalCents: cents(1270),
+        hstCents: cents(165),
+        tipCents: null,
+        otherFeesCents: null,
+        totalCents: cents(1635),
+      });
+      // otherFeesCents is blank too, so there is no single soft unknown to
+      // solve for - and neither of the two may be conjured.
+      expect(result).toBeNull();
+    });
+
+    it("still derives a negative hst on a refund receipt with no tip line", () => {
+      const result = deriveMissingAmount({
+        subtotalCents: cents(-1270),
+        hstCents: null,
+        tipCents: null,
+        otherFeesCents: null,
+        totalCents: cents(-1435),
+      });
+      expect(result).toEqual({ field: "hstCents", cents: -165 });
+    });
+
+    it("treats a blank line beside one real unknown as zero, not as a second unknown", () => {
+      // Subtotal missing, tip blank, everything else present: one unknown.
+      const result = deriveMissingAmount({
+        subtotalCents: null,
+        hstCents: cents(165),
+        tipCents: null,
+        otherFeesCents: cents(300),
+        totalCents: cents(1735),
+      });
+      expect(result).toEqual({ field: "subtotalCents", cents: 1270 });
+    });
+  });
 });
 
 /**
@@ -379,5 +475,147 @@ describe("checkHstRatePlausibility", () => {
         hstCents: cents(7749), // just under 7.75%
       }),
     ).toBe("plausible");
+  });
+});
+
+/**
+ * `suggestDefaultRateHst` (2026-09-01): the HST a rate would produce on a
+ * subtotal, for a confirm screen to offer as a one-tap fill on a receipt
+ * whose tax line the parser could not read. A suggestion generator like
+ * everything else in this file - nothing here writes.
+ */
+describe("suggestDefaultRateHst", () => {
+  it("applies Ontario's 13% by default", () => {
+    expect(suggestDefaultRateHst(cents(10000))).toEqual({
+      hstCents: 1300,
+      totalCents: 11300,
+    });
+  });
+
+  it("rounds half up, in integer arithmetic", () => {
+    // 1270 * 1300 / 10000 = 165.1 -> 165
+    expect(suggestDefaultRateHst(cents(1270))?.hstCents).toBe(165);
+    // 50 * 1300 / 10000 = 6.5 -> 7, the exact half that decides the rule
+    expect(suggestDefaultRateHst(cents(50))?.hstCents).toBe(7);
+    // 1 * 1300 / 10000 = 0.13 -> 0: a penny is not taxed into another penny
+    expect(suggestDefaultRateHst(cents(1))).toEqual({
+      hstCents: 0,
+      totalCents: 1,
+    });
+  });
+
+  it("adds the derived tax to the subtotal for the total", () => {
+    const result = suggestDefaultRateHst(cents(4349));
+    expect(result).toEqual({ hstCents: 565, totalCents: 4914 });
+  });
+
+  it("takes another rate in basis points", () => {
+    // GST-only, 5%.
+    expect(suggestDefaultRateHst(cents(10000), 500)).toEqual({
+      hstCents: 500,
+      totalCents: 10500,
+    });
+    // A zero-rated basket: a real answer, not a refusal.
+    expect(suggestDefaultRateHst(cents(10000), 0)).toEqual({
+      hstCents: 0,
+      totalCents: 10000,
+    });
+  });
+
+  it("suggests nothing for a subtotal that cannot anchor a rate", () => {
+    // Zero and a refund's negative both have no honest 13% to offer - the
+    // same guard checkHstRatePlausibility uses.
+    expect(suggestDefaultRateHst(cents(0))).toBeNull();
+    expect(suggestDefaultRateHst(cents(-10000))).toBeNull();
+  });
+
+  it("suggests nothing when the total would not be storable", () => {
+    expect(suggestDefaultRateHst(cents(MAX_STORABLE_CENTS))).toBeNull();
+  });
+
+  it("throws on a rate that is not a non-negative integer of basis points", () => {
+    // A programming error, not a receipt: loud rather than quietly computed.
+    expect(() => suggestDefaultRateHst(cents(10000), -100)).toThrow(RangeError);
+    expect(() => suggestDefaultRateHst(cents(10000), 13.5)).toThrow(RangeError);
+  });
+});
+
+/**
+ * `checkAmountFloor` (2026-09-01): the one direction of arithmetic mismatch
+ * that is never a legitimate receipt - a total below the sum of the lines
+ * the receipt itself prints. Advisory like everything else here.
+ */
+describe("checkAmountFloor", () => {
+  const base = {
+    subtotalCents: cents(10000),
+    hstCents: cents(1300),
+    tipCents: null,
+    otherFeesCents: null,
+    totalCents: cents(11300),
+  };
+
+  it("is ok when the total exactly covers the components", () => {
+    expect(checkAmountFloor(base)).toBe("ok");
+  });
+
+  it("is ok when the total exceeds the components", () => {
+    // An unprinted line, a rounding entry: a mismatch checkReceiptArithmetic
+    // reports, but not this one - the total still covers what is printed.
+    expect(checkAmountFloor({ ...base, totalCents: cents(11500) })).toBe("ok");
+  });
+
+  it("flags a total that falls below the components", () => {
+    expect(checkAmountFloor({ ...base, totalCents: cents(11299) })).toBe(
+      "total-below-components",
+    );
+  });
+
+  it("counts a missing tip or other-fees line as nothing", () => {
+    expect(
+      checkAmountFloor({
+        ...base,
+        tipCents: cents(2000),
+        totalCents: cents(13300),
+      }),
+    ).toBe("ok");
+    expect(
+      checkAmountFloor({
+        ...base,
+        tipCents: cents(2000),
+        totalCents: cents(13299),
+      }),
+    ).toBe("total-below-components");
+  });
+
+  it("is not applicable without a subtotal or without a total", () => {
+    expect(checkAmountFloor({ ...base, subtotalCents: null })).toBe(
+      "not-applicable",
+    );
+    expect(checkAmountFloor({ ...base, totalCents: null })).toBe(
+      "not-applicable",
+    );
+  });
+
+  it("reads a refund receipt by the same rule, not by sign", () => {
+    // -11300 covers -10000 + -1300 exactly; nothing about a negative
+    // receipt makes it a floor violation.
+    expect(
+      checkAmountFloor({
+        subtotalCents: cents(-10000),
+        hstCents: cents(-1300),
+        tipCents: null,
+        otherFeesCents: null,
+        totalCents: cents(-11300),
+      }),
+    ).toBe("ok");
+    expect(
+      checkAmountFloor({
+        subtotalCents: cents(-10000),
+        hstCents: cents(-1300),
+        tipCents: null,
+        otherFeesCents: null,
+        totalCents: cents(-11301),
+      }),
+    ).toBe("total-below-components");
   });
 });

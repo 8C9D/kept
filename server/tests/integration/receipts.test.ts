@@ -232,6 +232,11 @@ describe("POST /api/receipts", () => {
       hstCents: null,
       subtotalCents: null,
       tipCents: null,
+      // Prompt v5's two fields (2026-09-01): the client sent neither and
+      // the stored record states both as the absences they are, so no later
+      // reader has to tell "key absent" from "parser found nothing".
+      otherFeesCents: null,
+      paymentMethod: null,
       vendorTaxNumber: null,
     };
     const rows = await harness.db

@@ -14,6 +14,8 @@ const emptySuggestions: OcrFieldSuggestions = {
   hstCents: null,
   subtotalCents: null,
   tipCents: null,
+  otherFeesCents: null,
+  paymentMethod: null,
   vendorTaxNumber: null,
 };
 
@@ -24,6 +26,8 @@ const emptyConfirmed: MeasuredReceipt["confirmed"] = {
   hstCents: null,
   subtotalCents: null,
   tipCents: null,
+  otherFeesCents: null,
+  paymentMethod: null,
 };
 
 function receipt(

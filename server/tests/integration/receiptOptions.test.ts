@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { receipts } from "../../src/db/schema.js";
+import { receiptFieldOptions, receipts } from "../../src/db/schema.js";
 import {
   createTestHarness,
   imageFor,
@@ -132,7 +132,17 @@ describe("GET /api/receipts/options", () => {
     expect(options.vendors).toEqual(["Pending Vendor"]);
   });
 
-  it("forgets a value that survives only on a deleted receipt", async () => {
+  /**
+   * ⚠ CHANGED 2026-09-01, deliberately. Until this date the list was derived
+   * from `receipts` and scoped by `visibleTo`, so deleting the last receipt
+   * carrying a value silently deleted the value from the pick-list too. It
+   * now reads `receipt_field_options`, and a delete says nothing about the
+   * vocabulary: an option is a thing the person keeps, and
+   * `DELETE /api/receipts/options/:field` is how it goes away - which is the
+   * whole reason it can go away at all without destroying a retained tax
+   * record to do it.
+   */
+  it("keeps a value whose only receipt was deleted - the option is not the receipt", async () => {
     await capture(token, userId, { category: "kept", vendor: "Kept Vendor" });
     const removed = await capture(token, userId, { category: "removed", vendor: "Removed Vendor" });
     expect(
@@ -142,8 +152,47 @@ describe("GET /api/receipts/options", () => {
     const options = (await (
       await harness.request(token, "GET", "/api/receipts/options")
     ).json()) as OptionsResponse;
-    expect(options.categories).toEqual(["kept"]);
-    expect(options.vendors).toEqual(["Kept Vendor"]);
+    expect([...options.categories].sort()).toEqual(["kept", "removed"]);
+    expect([...options.vendors].sort()).toEqual(["Kept Vendor", "Removed Vendor"]);
+
+    // And the way it does go away, which the delete above is no longer:
+    expect(
+      (
+        await harness.request(
+          token,
+          "DELETE",
+          "/api/receipts/options/category?value=removed",
+        )
+      ).status,
+    ).toBe(204);
+    const after = (await (
+      await harness.request(token, "GET", "/api/receipts/options")
+    ).json()) as OptionsResponse;
+    expect(after.categories).toEqual(["kept"]);
+  });
+
+  it("offers every value, with no cap at a hundred", async () => {
+    // The retired query capped each list at 100 because it scanned every
+    // receipt the person had; the cap silently truncated the very list the
+    // exact-match filter is supposed to be able to reach - a category on
+    // receipt 101 could not be offered back. Inserted directly rather than
+    // through 150 HTTP captures, which is a different test that takes a
+    // minute to run.
+    const values = Array.from({ length: 150 }, (_, i) => `category-${String(i).padStart(3, "0")}`);
+    await harness.db.insert(receiptFieldOptions).values(
+      values.map((value, i) => ({
+        userId,
+        field: "category" as const,
+        value,
+        lastUsedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)),
+      })),
+    );
+
+    const options = (await (
+      await harness.request(token, "GET", "/api/receipts/options")
+    ).json()) as OptionsResponse;
+    expect(options.categories).toHaveLength(150);
+    expect([...options.categories].sort()).toEqual([...values].sort());
   });
 
   it("never shows one user the values another user typed", async () => {

@@ -19,6 +19,7 @@ import { meRoutes } from "./routes/me.js";
 import { receiptRoutes } from "./routes/receipts.js";
 import type { ObjectStorage } from "./storage/objectStorage.js";
 import type { LlmParseSweepHandle } from "./parse/llmParseSweep.js";
+import type { ParseOcrText } from "./routes/receipts.js";
 
 /**
  * Everything the app needs arrives here as a value; nothing inside reads
@@ -49,6 +50,20 @@ export interface AppDependencies {
    * (productionEnv.ts refuses to start without the key).
    */
   llmParseSweep?: LlmParseSweepHandle;
+  /**
+   * The same bound parse the sweep runs, called synchronously by
+   * `POST /api/receipts/parse` (2026-09-01). Optional on exactly the sweep's
+   * terms - absent without an ANTHROPIC_API_KEY, always present in
+   * production - and the route answers 503 rather than pretending when it
+   * is missing.
+   *
+   * Injected beside the sweep rather than reached through it: the sweep is
+   * a fire-and-forget handle over rows, and the route needs an answer back.
+   * The entrypoint binds both to one client and one model id so a person's
+   * capture-time suggestion and the record the sweep later stores can never
+   * come from different models.
+   */
+  parseOcrText?: ParseOcrText;
   /**
    * Browser origins the web client (spec §7A) is served from - exactly
    * these and no others are answered with CORS headers. Empty or absent

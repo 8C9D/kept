@@ -68,9 +68,13 @@ async function reparse() {
     id: string;
     vendor: string | null;
     ocr_raw_text: string | null;
+    // Selected since 2026-09-01: the parse request states the capture date,
+    // and a reparse that invented one would not be reparsing the same
+    // request the stored record came from.
+    captured_at: Date;
     llm_suggestions: LlmSuggestionRecord;
   }>(
-    `select id, vendor, ocr_raw_text, llm_suggestions
+    `select id, vendor, ocr_raw_text, captured_at, llm_suggestions
      from receipts
      where status = 'confirmed' and llm_suggestions is not null and deleted_at is null
      order by created_at`,
@@ -102,7 +106,14 @@ async function reparse() {
     }
     const samples: OcrFieldSuggestions[] = [];
     for (let i = 0; i < runs; i += 1) {
-      samples.push(await parseReceiptText(client, row.ocr_raw_text, receiptParseModel));
+      samples.push(
+        await parseReceiptText(
+          client,
+          row.ocr_raw_text,
+          row.captured_at,
+          receiptParseModel,
+        ),
+      );
     }
 
     const oldGen = oldRecord.promptVersion ?? 1;

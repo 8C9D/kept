@@ -63,8 +63,17 @@ export interface LlmParseSweepDependencies {
    * The one parse path (claudeReceiptParser's parseReceiptText, bound to a
    * client), injected as a value so tests exercise the sweep without an
    * Anthropic key and no second implementation ever grows here.
+   *
+   * Takes the receipt's `captured_at` since 2026-09-01: the request's first
+   * line states the day the photo was taken, which is what bounds the
+   * purchase date and breaks ties between two readings of one ambiguous
+   * date token (claudeReceiptParser.ts carries why that does not breach the
+   * Aug 7 "never a field a person typed" ruling).
    */
-  parse: (ocrRawText: string) => Promise<OcrFieldSuggestions>;
+  parse: (
+    ocrRawText: string,
+    capturedAt: Date,
+  ) => Promise<OcrFieldSuggestions>;
   /**
    * The model id `parse` is bound to, recorded verbatim on every record
    * this sweep writes. Required, not defaulted: the whole value of the
@@ -96,6 +105,10 @@ export async function runLlmParseSweep(
       vendor: receipts.vendor,
       status: receipts.status,
       ocrRawText: receipts.ocrRawText,
+      // The capture date rides along to the parse (2026-09-01): the model
+      // is told what day the photo was taken so a purchase date can never
+      // land after it.
+      capturedAt: receipts.capturedAt,
     })
     .from(receipts)
     .where(
@@ -120,7 +133,7 @@ export async function runLlmParseSweep(
       throw new Error(`Receipt ${row.id} lost its OCR text between query and read`);
     }
     try {
-      const suggestions = await deps.parse(row.ocrRawText);
+      const suggestions = await deps.parse(row.ocrRawText, row.capturedAt);
       const record: LlmParseSuccessRecord = {
         model: deps.model,
         promptVersion: RECEIPT_PARSE_PROMPT_VERSION,

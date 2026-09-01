@@ -59,6 +59,19 @@ const { db, pool } = createDb(databaseUrl);
  */
 const MIN_READABLE_N = 5;
 
+/**
+ * `status` is NOT NULL on the table, so the only reason the LEFT JOIN types
+ * it nullable is the no-match case - which the `receiptId === null` branch
+ * has already taken. Narrowed loudly rather than defaulted: a default would
+ * quietly file a real row under whichever status was chosen.
+ */
+function joinedStatus(status: "pending" | "confirmed" | null): "pending" | "confirmed" {
+  if (status === null) {
+    throw new Error("An event joined to a receipt whose status is null");
+  }
+  return status;
+}
+
 async function report() {
   // A LEFT JOIN, deliberately: `user_events.receipt_id` is a weak
   // reference (no FK, spec §5), so an event can legitimately name a
@@ -72,6 +85,8 @@ async function report() {
       receiptId: receipts.id,
       ocrSuggestions: receipts.ocrSuggestions,
       llmSuggestions: receipts.llmSuggestions,
+      status: receipts.status,
+      ocrSource: receipts.ocrSource,
     })
     .from(userEvents)
     .leftJoin(receipts, eq(userEvents.receiptId, receipts.id));
@@ -92,6 +107,8 @@ async function report() {
             // `suggestions: null` - "the LLM produced nothing", not "the
             // LLM never ran". Either way there is no LLM value to merge.
             llmSuggestions: row.llmSuggestions?.suggestions ?? null,
+            status: joinedStatus(row.status),
+            ocrSource: row.ocrSource,
           },
   }));
 
@@ -162,8 +179,8 @@ async function report() {
         "evidence a parse path is unreliable · 'not_suggested' = the receipt " +
         "is known but neither parser produced a value - filling a gap, not " +
         "correcting a wrong answer · 'not_parseable' = this field has no " +
-        "suggestion path at all (category, paymentMethod, notes, otherFees) " +
-        "- always a person typing from scratch · 'unknown_receipt' = the " +
+        "suggestion path at all (category, notes) - always a person typing " +
+        "from scratch · 'unknown_receipt' = the " +
         "event's receipt reference did not resolve (not synced yet, or since " +
         `deleted) - parse path genuinely unknown, not the same as ` +
         `'not_suggested' · '*' after edited (n) = n below ${MIN_READABLE_N}, ` +

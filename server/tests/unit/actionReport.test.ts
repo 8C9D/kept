@@ -26,9 +26,27 @@ function suggestions(
     hstCents: null,
     subtotalCents: null,
     tipCents: null,
+    otherFeesCents: null,
+    paymentMethod: null,
     vendorTaxNumber: null,
     ...overrides,
   };
+}
+
+/**
+ * The receipt facts an event's classification needs (2026-09-01): the two
+ * parse records plus the row's own status and OCR source. Defaults are a
+ * pending, vision-captured receipt - the shape every case in this file was
+ * written against before the merge learned to read context.
+ */
+function captured(
+  records: Pick<
+    NonNullable<RawEvent["receiptSuggestions"]>,
+    "ocrSuggestions" | "llmSuggestions"
+  > &
+    Partial<NonNullable<RawEvent["receiptSuggestions"]>>,
+): NonNullable<RawEvent["receiptSuggestions"]> {
+  return { status: "pending", ocrSource: null, ...records };
 }
 
 describe("aggregateActionReport", () => {
@@ -126,10 +144,10 @@ describe("aggregateActionReport - parse path breakdown", () => {
     const result = aggregateActionReport([
       event({
         field: "total",
-        receiptSuggestions: {
+        receiptSuggestions: captured({
           ocrSuggestions: suggestions({ totalCents: 1199 }),
           llmSuggestions: null,
-        },
+        }),
       }),
     ]);
     const row = result.parsePathBreakdown.find(
@@ -145,10 +163,10 @@ describe("aggregateActionReport - parse path breakdown", () => {
     const result = aggregateActionReport([
       event({
         field: "vendor",
-        receiptSuggestions: {
+        receiptSuggestions: captured({
           ocrSuggestions: suggestions({ vendor: null }),
           llmSuggestions: suggestions({ vendor: "Loblaws" }),
-        },
+        }),
       }),
     ]);
     const row = result.parsePathBreakdown.find(
@@ -161,10 +179,10 @@ describe("aggregateActionReport - parse path breakdown", () => {
     const result = aggregateActionReport([
       event({
         field: "hst",
-        receiptSuggestions: {
+        receiptSuggestions: captured({
           ocrSuggestions: suggestions(),
           llmSuggestions: suggestions(),
-        },
+        }),
       }),
     ]);
     const row = result.parsePathBreakdown.find(
@@ -187,18 +205,23 @@ describe("aggregateActionReport - parse path breakdown", () => {
   });
 
   it("classifies every edit to a field with no suggestion path as 'not_parseable', even with a resolved receipt", () => {
-    // otherFees, category, paymentMethod and notes have no suggestion
-    // field at all (ocrSuggestions.ts) - editing them is always a person
-    // typing from scratch, regardless of what the receipt's other fields
-    // carry.
-    for (const field of ["otherFees", "category", "paymentMethod", "notes"] as const) {
+    // `category` and `notes` have no suggestion field at all - no parser
+    // has ever produced either - so editing them is always a person typing
+    // from scratch, regardless of what the receipt's other fields carry.
+    //
+    // This list was four names until 2026-09-01: `otherFees` and
+    // `paymentMethod` left it when prompt v5 started asking the model for
+    // them, and they are covered by the case below instead. Keeping them
+    // here would have asserted that a field the model now reads has no
+    // parse path, which is exactly the drift this report exists to avoid.
+    for (const field of ["category", "notes"] as const) {
       const result = aggregateActionReport([
         event({
           field,
-          receiptSuggestions: {
+          receiptSuggestions: captured({
             ocrSuggestions: suggestions({ totalCents: 500 }),
             llmSuggestions: null,
-          },
+          }),
         }),
       ]);
       const row = result.parsePathBreakdown.find(
@@ -211,23 +234,59 @@ describe("aggregateActionReport - parse path breakdown", () => {
     }
   });
 
+  it("classifies v5's two new fields by whether a suggestion actually existed", () => {
+    // `otherFees` and `paymentMethod` gained suggestions on 2026-09-01
+    // (prompt v5). A receipt where no parser produced one reads
+    // `not_suggested` - a person filling a gap - and one where the LLM did
+    // reads `suggested`, which is the only row that is evidence about parse
+    // quality.
+    const nothingSuggested = aggregateActionReport([
+      event({
+        field: "paymentMethod",
+        receiptSuggestions: captured({
+          ocrSuggestions: suggestions(),
+          llmSuggestions: suggestions(),
+        }),
+      }),
+    ]);
+    expect(
+      nothingSuggested.parsePathBreakdown.find(
+        (r) => r.field === "paymentMethod",
+      )?.parsePath,
+    ).toBe("not_suggested");
+
+    const suggested = aggregateActionReport([
+      event({
+        field: "paymentMethod",
+        receiptSuggestions: captured({
+          ocrSuggestions: suggestions(),
+          llmSuggestions: suggestions({ paymentMethod: "VISA" }),
+        }),
+      }),
+    ]);
+    expect(
+      suggested.parsePathBreakdown.find((r) => r.field === "paymentMethod")
+        ?.parsePath,
+    ).toBe("suggested");
+  });
+
   it("sums editedTotal per (field, parse path), not just editedEvents", () => {
     const result = aggregateActionReport([
       event({
         field: "total",
         count: 3,
-        receiptSuggestions: {
+        receiptSuggestions: captured({
           ocrSuggestions: suggestions({ totalCents: 1199 }),
           llmSuggestions: null,
-        },
+        }),
       }),
       event({
         field: "total",
         count: 4,
-        receiptSuggestions: {
+        receiptSuggestions: captured({
           ocrSuggestions: suggestions({ totalCents: 500 }),
           llmSuggestions: null,
-        },
+        }),
       }),
     ]);
     const row = result.parsePathBreakdown.find(
@@ -241,17 +300,17 @@ describe("aggregateActionReport - parse path breakdown", () => {
     const result = aggregateActionReport([
       event({
         field: "hst",
-        receiptSuggestions: {
+        receiptSuggestions: captured({
           ocrSuggestions: suggestions({ hstCents: 130 }),
           llmSuggestions: null,
-        },
+        }),
       }),
       event({
         field: "hst",
-        receiptSuggestions: {
+        receiptSuggestions: captured({
           ocrSuggestions: suggestions(),
           llmSuggestions: suggestions(),
-        },
+        }),
       }),
     ]);
     const suggested = result.parsePathBreakdown.find(
@@ -268,10 +327,10 @@ describe("aggregateActionReport - parse path breakdown", () => {
     const result = aggregateActionReport([
       event({
         field: "total",
-        receiptSuggestions: {
+        receiptSuggestions: captured({
           ocrSuggestions: suggestions({ totalCents: 1199 }),
           llmSuggestions: null,
-        },
+        }),
       }),
     ]);
     expect(result.parsePathBreakdown).toHaveLength(1);

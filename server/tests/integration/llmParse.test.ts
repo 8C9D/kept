@@ -69,6 +69,10 @@ function llmValues(
     // scored, never served (mergedSuggestions.ts stays heuristic-only for
     // money either way, which is what the sweep tests below actually pin).
     tipCents: null,
+    // Prompt v5 (2026-09-01) asks for both; a fixture that stated neither
+    // would be asserting the shape of a v4 record.
+    otherFeesCents: null,
+    paymentMethod: null,
     vendorTaxNumber: "R105216170",
     ...overrides,
   };
@@ -231,6 +235,8 @@ describe("runLlmParseSweep", () => {
         hstCents: null,
         subtotalCents: null,
         tipCents: null,
+        otherFeesCents: null,
+        paymentMethod: null,
         vendorTaxNumber: null,
       },
     });
@@ -408,6 +414,8 @@ describe("the capture routes kick the sweep", () => {
     expect(detailBody.suggestions.totalCents).toEqual({
       value: 4554,
       source: "heuristic",
+      disagreement: false,
+      withheld: false,
     });
     // The heuristic found no HST or subtotal; the LLM's amounts are stored
     // but never served - the fields come back absent. Not a disagreement
@@ -416,10 +424,13 @@ describe("the capture routes kick the sweep", () => {
       value: null,
       source: null,
       disagreement: false,
+      withheld: false,
     });
     expect(detailBody.suggestions.subtotalCents).toEqual({
       value: null,
       source: null,
+      disagreement: false,
+      withheld: false,
     });
     // ⚠ TRANSITIONAL: the merge computes no tax number any more, but the
     // response still carries the key as a stated absence, because the

@@ -5,7 +5,7 @@ import {
   type EventField,
 } from "./userEvents.js";
 import { mergeSuggestions, type MergedSuggestions } from "./mergedSuggestions.js";
-import type { OcrFieldSuggestions } from "./ocrSuggestions.js";
+import type { OcrFieldSuggestions, OcrSource } from "./ocrSuggestions.js";
 
 /**
  * The aggregation behind `npm run action-report` (db/actionReport.ts),
@@ -74,6 +74,14 @@ export interface RawEvent {
   receiptSuggestions?: {
     ocrSuggestions: OcrFieldSuggestions | null;
     llmSuggestions: OcrFieldSuggestions | null;
+    /**
+     * The receipt's own status and OCR source, which the merge needs to
+     * decide what it serves (2026-09-01, mergedSuggestions.ts). Carried
+     * for the same reason the two raw records are: so the rule stays in
+     * one place instead of being approximated here.
+     */
+    status: "pending" | "confirmed";
+    ocrSource: OcrSource | null;
   };
 }
 
@@ -104,9 +112,14 @@ export interface FieldActivity {
  *     value for this field. Editing it is filling a gap, not correcting a
  *     wrong answer.
  *   - `not_parseable`: this EVENT_FIELD has no suggestion field at all
- *     (`otherFees`, `category`, `paymentMethod`, `notes` - see
- *     `FIELD_SUGGESTION_KEY` below). Every edit here is a person typing
- *     from scratch, by construction, not a parser being second-guessed.
+ *     (`category` and `notes` - see `FIELD_SUGGESTION_KEY` below). Every
+ *     edit here is a person typing from scratch, by construction, not a
+ *     parser being second-guessed. `otherFees` and `paymentMethod` were in
+ *     this bucket until 2026-09-01 and are not any more - prompt v5 asks
+ *     the model for both, so their edits now classify as `suggested` or
+ *     `not_suggested` like every other parseable field. Edits to them
+ *     logged before that date will read as `not_suggested`, which is the
+ *     true statement about those receipts: no parser produced a value.
  *   - `unknown_receipt`: the event's receipt reference did not resolve
  *     (`RawEvent.receiptSuggestions` is `undefined`) - an offline event
  *     whose receipt has not synced, or has since been deleted. The parse
@@ -173,13 +186,19 @@ export interface ActionReportResult {
 
 /**
  * Which merged-suggestion key an EVENT_FIELD maps to, when it has one.
- * Four of the ten fields in EVENT_FIELDS have no suggestion field at all:
- * `otherFees` (ocrSuggestions.ts's own comment explains why - no consistent
- * printed label for a heuristic to match), and `category` / `paymentMethod`
- * / `notes`, which have never had an OCR path (spec §7.3's heuristics are
- * all money, vendor, or date). Editing one of those four is always a
- * person typing from scratch; there is no parser to have been right or
- * wrong, so it is never worth asking which one supplied it.
+ *
+ * Two of the ten fields in EVENT_FIELDS have no suggestion field at all:
+ * `category` and `notes`, which have never had a parse path of any kind
+ * (spec §7.3's heuristics are all money, vendor, or date, and no prompt
+ * asks for either). Editing one of those is always a person typing from
+ * scratch; there is no parser to have been right or wrong, so it is never
+ * worth asking which one supplied it.
+ *
+ * `otherFees` and `paymentMethod` joined this map on 2026-09-01. The
+ * argument that used to exclude them was about the HEURISTIC - no
+ * consistent printed label for a fee line, no OCR rule for a card brand -
+ * and prompt v5 makes it moot: the model is asked for both, so a merged
+ * suggestion for them can exist and this report should say whether it did.
  */
 const FIELD_SUGGESTION_KEY: Partial<Record<EventField, keyof MergedSuggestions>> =
   {
@@ -189,6 +208,8 @@ const FIELD_SUGGESTION_KEY: Partial<Record<EventField, keyof MergedSuggestions>>
     hst: "hstCents",
     subtotal: "subtotalCents",
     tip: "tipCents",
+    otherFees: "otherFeesCents",
+    paymentMethod: "paymentMethod",
   };
 
 function classifyParsePath(
@@ -205,6 +226,18 @@ function classifyParsePath(
   const merged = mergeSuggestions(
     receiptSuggestions.ocrSuggestions,
     receiptSuggestions.llmSuggestions,
+    {
+      status: receiptSuggestions.status,
+      // ⚠ Deliberately empty, and NOT the receipt's stored reviewed set.
+      // This report asks what the PARSERS offered for a field a human then
+      // edited; the 2026-09-01 suppression rule hides a suggestion for
+      // exactly the fields a human has already been through, so passing the
+      // real set would answer "not_suggested" for every field this report
+      // most wants to count. Suppression governs what a client prefills
+      // from, which is not the question here.
+      reviewedFields: [],
+      ocrSource: receiptSuggestions.ocrSource,
+    },
   );
   const value = merged === null ? null : merged[suggestionKey].value;
   return value !== null ? "suggested" : "not_suggested";
