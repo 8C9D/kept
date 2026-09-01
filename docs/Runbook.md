@@ -37,7 +37,7 @@ A missing one stops the process at startup with the name in the message, rather 
 | `SESSION_JWT_SECRET` | yes | Signs session tokens. At least 32 characters in production |
 | `APPLE_CLIENT_ID` | yes | `com.arthurzhang.kept` |
 | `ANTHROPIC_API_KEY` | yes in production | The server-side LLM parse sweep (spec §7.3). Unset in development the sweep disables itself, stated at boot; unset in production the server refuses to start, because the alternative is silent feature loss |
-| `RECEIPT_PARSE_MODEL` | no | Overrides the model the parse sweep uses; defaults to `claude-sonnet-5`. Added 2026-08-28, when the move off Haiku 4.5 was made on the owner's field report rather than on the accuracy table, so the model can be moved against real traffic without a deploy and `npm run parse-accuracy` can compare the two populations afterwards. Every stored `llm_suggestions` record stamps the model that actually produced it, so changing this never rewrites history. Empty or whitespace falls back to the default; the resolved id is printed at boot, which is where a typo shows up |
+| `RECEIPT_PARSE_MODEL` | no | Overrides the model the parse sweep uses; defaults to `claude-sonnet-5`. Added 2026-08-28, when the move off Haiku 4.5 was made on the owner's field report rather than on the accuracy table, so the model can be moved against real traffic without a deploy and `npm run parse-accuracy` can compare the two populations afterwards. Every stored `llm_suggestions` record stamps the model that actually produced it, so changing this never rewrites history. Empty or whitespace falls back to the default; the resolved id is printed at boot, which is where a typo shows up. ⚠ **Whatever model this names, the request disables extended thinking** (`thinking: {type: "disabled"}`, 2026-09-01). That is not a tuning preference: Sonnet 5 runs *adaptive* thinking when the parameter is omitted, thinking tokens count against `max_tokens`, and the request's 1024 was spent entirely on thinking - `stop_reason: max_tokens`, no text block, three attempts, one permanent failure record on a real receipt. If you point this variable at a model whose defaults differ again, check that the parse still returns text before assuming a quiet failure is a bad receipt |
 | `STORAGE_ENDPOINT` | yes in production | R2 S3 API endpoint, `https://<account-id>.r2.cloudflarestorage.com` |
 | `STORAGE_BUCKET` | yes in production | `kept` |
 | `STORAGE_ACCESS_KEY_ID` | yes in production | R2 API token access key |
@@ -91,6 +91,16 @@ That builds `Dockerfile`, ships it, and rolls the machine.
 The image runs the same entrypoint local development runs (`node --import tsx src/index.ts`) - deliberately, so the deployed process is not a second code shape that only exists in production.
 
 **Migrations do not run on deploy.** See §2.
+
+⚠ **The batch waiting to deploy as of 2026-09-01 has an order, and it is not the default one.** Built and committed, nothing run against production. In sequence:
+
+1. **A fresh verified dump** (§4) — the two taken on 2026-09-01 are point-in-time artifacts, not a licence to skip this.
+2. **Migration `0009_reviewed-fields-and-options.sql`, BEFORE the deploy** — see §2 for why an additive migration goes first this time.
+3. **`fly deploy`**, then the §1 confirmation checks below.
+4. **The Cloudflare Pages redeploy**, in the same session.
+5. **Then, and only then, TestFlight build 1.0 (5).**
+
+⚠ **Step 5 cannot move ahead of step 3.** The deployed build's create and update schemas are **strict**, so a phone running 1.0 (5) against today's production would have **every save answered 400** on the unknown `ocrSource` and `reviewedFields` keys — surfacing in the app as outbox items needing attention, which is the honest failure and still a broken app in someone's hand. The reverse is safe: 1.0 (4) sends neither key and the new columns default.
 
 ### Confirm the deploy is real
 
@@ -186,6 +196,8 @@ Run it **after** `fly deploy` when a migration only adds things (a new nullable 
 Wave 6 needs neither: the schema is unchanged since `0003_one-active-export-per-user`.
 
 ⚠ **Not every migration is purely additive, and the rule above is a default, not a guarantee about what any given migration does.** Migration `0008_receipt-images-page-partial.sql` (2026-08-28, `docs/proposals/2026-08-28-ux-enhancements.md` proposal #6, built and applied to the local database only - not yet run against production) is the migration to have in mind before reading the two bullets above as if every migration were additive. It does not add anything: it `DROP CONSTRAINT`s the existing plain unique constraint on `receipt_images (receipt_id, page)` and recreates it as `CREATE UNIQUE INDEX … WHERE deleted_at IS NULL`, in the same transaction. Two things follow that a `new nullable column` does not carry. **First**, changing an existing constraint rather than adding one means it belongs in the **before-deploy** half of the rule above: the new route this migration exists for (`PUT /api/receipts/:id/images/:page`, replacing a page's image) would 23505 against its own just-soft-deleted predecessor on every single call under the old plain constraint - not misbehave at the edges, fail outright, the first time anyone used it. **Second**, `CREATE UNIQUE INDEX` without `CONCURRENTLY` takes an `ACCESS EXCLUSIVE` lock on `receipt_images` for the statement's duration, briefly blocking every read and write on that table - trivial at today's row count, but the kind of cost an `ADD COLUMN` (instant regardless of table size in modern Postgres) does not carry, and worth knowing about before assuming every future migration is as cheap as the last few have been.
+
+⚠ **And an additive migration can still belong before the deploy, for a reason that is not about locks.** Migration `0009_reviewed-fields-and-options.sql` (2026-09-01, built and applied to the local database only) is purely additive by the letter of the rule - one new table (`receipt_field_options`), two columns on `receipts` (`reviewed_fields`, `ocr_source`), nothing dropped and no constraint tightened, both `ADD COLUMN`s metadata-only. It still goes **first**, because it **backfills** the new table from existing receipts and the new code reads that table to serve `GET /api/receipts/options`. Deploying first would not break the API; it would make it serve **an empty vocabulary, confidently**, to two people whose pick lists had just vanished - a wrong answer rather than an error, which is worse to notice. **Read the rule as "before the deploy when the new code depends on it", not as "before the deploy only when the migration is destructive."**
 
 **Take a backup first (§4).** Every migration in this project runs against tax records under a six-year retention requirement.
 
@@ -298,6 +310,17 @@ file**. The drill procedure itself was executed 2026-08-20 against a manual
 production dump - row counts verified; the image leg is vacuous until
 production holds an image (see below).
 
+### Two verified backups exist for 2026-09-01, and the second one is a photograph, not a policy
+
+Both were taken by hand, both were **restored and verified** rather than merely written (§10B: an untested backup is an assumption).
+
+- **Morning**, before anything: `~/.kept/backups/kept-prod-20260901.dump`, with its images beside it — **2 users, 136 receipts, 136 images**, every image hash-checked.
+- **Afternoon**, a second dump the same day: `~/.kept/backups/kept-prod-20260901-postbackfill.dump` and `kept-backups/pg/kept-20260901-manual-164645.dump` in R2 (16:46 UTC) — **237 receipts, 237 images**.
+
+⚠ **The second one is a point-in-time artifact and stops being a pre-migration backup the moment anything is written.** It is not the backup for the `0009` deploy described in §1/§2 — **take a fresh dump then**, and verify it. A dump's value is entirely in how little has happened since.
+
+⚠ **Both are manual, and that is still the standing gap.** The scheduled agent below refuses every night for want of the R2 `kept-backups` API token, so what protects the data between hand-run dumps is Neon's 6-hour history window and nothing else.
+
 ### Restore it, and verify the restore
 
 **Never restore into the live database to check a backup.** Restore into a scratch one and compare.
@@ -382,6 +405,34 @@ npm run parse-accuracy
 **Re-capturing the identical file: delete first, then capture** *(N-3, recorded 2026-08-20)*. The duplicate-image constraint is scoped to live rows, so uploading **byte-identical** bytes a second time - the re-dragged PDF case, or retrying a receipt whose presigned PUT failed while the bytes are still on the device - answers 409 until the old receipt is deleted. The working order is **delete the old receipt, then capture again**; capture-then-delete is the order that fails. This matters only for identical bytes: re-photographing a paper receipt produces different bytes and collides with nothing. The export-failure message teaches the same order; this paragraph exists so the rule is findable before an export fails.
 
 **"I deleted a receipt by accident"** *(2026-08-28, proposal #9)*. `POST /api/receipts/:id/restore` un-tombstones a receipt and its images without touching the database directly - a support path that does not need this file's backup/restore section at all, since a soft delete never left the row. On iOS this is what the Home list's swipe-to-delete undo toast calls; it is reachable the same way for a receipt deleted any other way, or after the toast's own six-second window has passed, since the route itself is **not time-limited**. It can legitimately answer **409 `restore_conflict`**: if the same image bytes (or the same page number) were re-captured onto a *different* receipt after this one was deleted and before it was restored, un-tombstoning the old image would collide with the new receipt's live one. The message names the remedy - delete or replace the other receipt's colliding image, or leave this one deleted - and the failure is atomic, so a 409 here never leaves a receipt half-restored.
+
+**"A vendor is spelled wrong, or spelled two different ways"** *(2026-09-01)*. **This is a route now, not an in-app receipt-by-receipt edit and never a SQL `UPDATE`.**
+
+```sh
+# Rename a value everywhere the caller uses it. :field is vendor | category | paymentMethod.
+curl -X PATCH https://api.keptapp.net/api/receipts/options/vendor \
+  -H "authorization: Bearer $SESSION" -H 'content-type: application/json' \
+  -d '{"from":"Tim Nortons.","to":"Tim Hortons"}'
+# -> {"receiptsUpdated": 3}
+
+# Remove a stale entry from the pick list, leaving every receipt's text alone.
+curl -X DELETE "https://api.keptapp.net/api/receipts/options/vendor?value=Domno%27s" \
+  -H "authorization: Bearer $SESSION"    # -> 204
+```
+
+The rename rewrites **every receipt of that user carrying the exact old string, in every status, soft-deleted rows included**, and merges onto an existing target value rather than colliding with it. The delete does the opposite and only that: **the list entry goes, the receipts keep their text.** Know which one you want before you type it. The real cases this exists for are the ones the 2026-09-01 review found: `Tim Nortons.`, `Domno's`, and one shop stored under both a curly and a straight apostrophe.
+
+**"Is the parser reading this receipt correctly?"** *(2026-09-01)*. `POST /api/receipts/parse` runs the server-side LLM parse over text you supply and **writes nothing at all** — no receipt, no `llm_suggestions` row — so it is safe to point at production while diagnosing:
+
+```sh
+# Locally, mint a session first: npm run dev:session-token
+curl -X POST http://localhost:3000/api/receipts/parse \
+  -H "authorization: Bearer $SESSION" -H 'content-type: application/json' \
+  -d '{"ocrRawText":"FOOD BASICS\nSUBTOTAL 9.86\nTOTAL 9-86\n07/19/2026","capturedAt":"2026-09-01T12:00:00Z"}'
+# -> {"suggestions": {...}, "model": "claude-sonnet-5", "promptVersion": 5}
+```
+
+**503** means the server has no `ANTHROPIC_API_KEY`; **502** means the model call itself failed and carries the reason. It is also what the iOS capture screen calls for its second opinion (spec §7.2), so a 502 here and a confirm screen that never fills in the vendor are the same fault.
 
 ⚠ **`npm run db:seed` and `npm run db:claim` refuse to run against anything that is not a loopback database**, deliberately and unarguably. They rewrite tax records. Neon hostnames are remote by construction, so neither can ever touch production. Do not add an escape hatch.
 

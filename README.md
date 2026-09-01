@@ -122,9 +122,11 @@ up locally, so the guarantee cannot quietly regress.
 ### Two parsers, merged per field, and neither of them saves anything
 
 On-device Vision OCR gives raw text and a heuristic parser turns it into
-suggested fields. Separately, a server-side sweep sends the stored OCR text
-(and only the OCR text — never a field a human typed) to Claude Haiku for
-structured extraction. Both records are written verbatim and are immutable: no
+suggested fields. Separately, a server-side sweep sends the stored OCR text —
+plus, since September 2026, the capture date, and nothing else; never a field
+a human typed — to Claude Sonnet (configurable, and the model that produced
+each record is stamped on it) for structured extraction. Both records are
+written verbatim and are immutable: no
 route updates either one, which is what makes per-field accuracy measurable
 after the fact by comparing suggestions against what the human went on to
 confirm.
