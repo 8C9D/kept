@@ -2,12 +2,12 @@ import UIKit
 import XCTest
 @testable import Kept
 
-/// The confirm screen's state logic without a camera or a view: amber
-/// starts on every prefilled suggestion, clears permanently on touch, the
-/// counter follows, arithmetic warns without blocking, and save is
+/// The confirm screen's state logic without a camera or a view: every
+/// prefilled suggestion starts unreviewed and clears permanently on touch,
+/// the count follows, arithmetic warns without blocking, and save is
 /// disabled - with the reason stated - until there is a valid total.
 /// The same form opened to edit an already-confirmed receipt carries no
-/// amber at all.
+/// suggestions at all.
 @MainActor
 final class ConfirmReceiptModelTests: XCTestCase {
     private var api: StubKeptAPI!
@@ -1012,11 +1012,76 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertEqual(model.categoryText, "Groceries")
         XCTAssertEqual(model.paymentMethodText, "Visa")
         XCTAssertEqual(model.notesText, "weekly shop")
-        // The screen says what it is instead of counting suggestions that
-        // are not there, and leaving is a cancel, not a "later".
+        // The screen says what it is, and leaving is a cancel, not a
+        // "later".
         XCTAssertEqual(model.screenTitle, "Edit receipt")
         XCTAssertEqual(model.dismissLabel, "Cancel")
         XCTAssertTrue(model.canSave)
+    }
+
+    // MARK: - Delete (2026-09-01)
+
+    /// The confirm queue's missing exit: a pending receipt could only be
+    /// saved or deferred from this form, so a scan of the wrong thing came
+    /// back every time the badge was tapped.
+    func testAServerBackedConfirmCanDeleteThroughTheSameRouteTheDetailScreenUses() async {
+        var deleted: [UUID] = []
+        api.deleteReceiptHandler = { deleted.append($0) }
+        let receipt = scannedReceipt()
+        let model = model(receipt: receipt)
+
+        XCTAssertTrue(model.canDelete)
+        let didDelete = await model.delete()
+
+        XCTAssertTrue(didDelete)
+        XCTAssertEqual(deleted, [receipt.id])
+        XCTAssertNil(model.deleteError)
+        XCTAssertFalse(model.isDeleting)
+    }
+
+    /// A failed delete says so and changes nothing else - the same shape
+    /// save() already has, so the view can advance only on a real success.
+    func testAFailedDeleteStatesItselfAndReportsFailure() async {
+        struct Boom: LocalizedError {
+            var errorDescription: String? { "no network" }
+        }
+        api.deleteReceiptHandler = { _ in throw Boom() }
+        let model = model(receipt: scannedReceipt())
+
+        let didDelete = await model.delete()
+
+        XCTAssertFalse(didDelete)
+        XCTAssertEqual(model.deleteError, "no network")
+        model.clearDeleteError()
+        XCTAssertNil(model.deleteError)
+    }
+
+    /// The two forms that must not offer it: a capture confirmed on the
+    /// spot has no server row to delete, and an edit is only ever reached
+    /// from the detail screen, which is already showing a Delete of its
+    /// own.
+    func testCaptureTimeAndEditFormsOfferNoDelete() async {
+        var suggestions = ReceiptSuggestions()
+        suggestions.totalCents = 4520
+        let draft = CapturedReceiptDraft(
+            imageData: Data("scan".utf8),
+            suggestions: suggestions,
+            ocrRawText: nil,
+            capturedAt: Date(timeIntervalSince1970: 1_774_000_000),
+            ocrFailureNote: nil
+        )
+        let captureModel = ConfirmReceiptModel(draft: draft) { _ in }
+        XCTAssertFalse(captureModel.canDelete)
+        let deletedNothing = await captureModel.delete()
+        XCTAssertFalse(deletedNothing)
+        XCTAssertTrue(api.deleteReceiptCalls.isEmpty)
+
+        let editModel = ConfirmReceiptModel(
+            api: api,
+            detail: Fixtures.detail(receipt: Fixtures.receipt(status: .confirmed)),
+            purpose: .edit
+        )
+        XCTAssertFalse(editModel.canDelete)
     }
 
     func testAnEditSavesThroughTheSamePatchAndStaysConfirmed() async {
@@ -1042,16 +1107,22 @@ final class ConfirmReceiptModelTests: XCTestCase {
         XCTAssertEqual(call?.request.category, "Supplies")
     }
 
-    /// Confirming keeps its counter title and its "Later"; the edit case
-    /// must not have leaked into it.
-    func testConfirmingKeepsTheCounterTitleAndTheLaterExit() {
+    /// Confirming says what it is and keeps its "Later"; the edit case
+    /// must not have leaked into it. The title stopped counting unreviewed
+    /// suggestions on 2026-09-01 - it is a fixed name now, so reviewing
+    /// every field must not change it - but `unreviewedCount` still has to
+    /// move, because the inline notes and the save-time accept/override
+    /// report are still built on it.
+    func testConfirmingSaysWhatItIsAndKeepsTheLaterExit() {
         let model = model(receipt: scannedReceipt(suggestions: matchingSuggestions()))
-        XCTAssertEqual(model.screenTitle, "5 to check")
+        XCTAssertEqual(model.screenTitle, "Confirm receipt")
         XCTAssertEqual(model.dismissLabel, "Later")
+        XCTAssertEqual(model.unreviewedCount, 5)
         for field in ConfirmReceiptModel.SuggestedField.allCases {
             model.markTouched(field)
         }
-        XCTAssertEqual(model.screenTitle, "All checked")
+        XCTAssertEqual(model.screenTitle, "Confirm receipt")
+        XCTAssertEqual(model.unreviewedCount, 0)
     }
 
     func testPickedDateSavesAsTheDayShownRegardlessOfDeviceZone() async {
@@ -1309,5 +1380,250 @@ final class MoneyInputTests: XCTestCase {
         XCTAssertEqual(MoneyInput.parse(MoneyInput.text(fromCents: 123456)), .cents(123456))
         // A refund prefill must not block its own confirmation.
         XCTAssertEqual(MoneyInput.parse(MoneyInput.text(fromCents: -4520)), .cents(-4520))
+    }
+}
+
+// MARK: - Withheld amounts and the server's second opinion (2026-09-01)
+
+/// Two things the confirm screen gained on 2026-09-01: it refuses to
+/// prefill a set of amounts that cannot be true, and it accepts the
+/// server's LLM answer arriving over the top of the on-device parse.
+@MainActor
+final class ConfirmSuggestionArrivalTests: XCTestCase {
+    private func captureModel(
+        _ suggestions: ReceiptSuggestions,
+        saved: @escaping (ConfirmedReceiptFields) -> Void = { _ in }
+    ) -> ConfirmReceiptModel {
+        ConfirmReceiptModel(
+            draft: CapturedReceiptDraft(
+                imageData: Data("scan".utf8),
+                suggestions: suggestions,
+                ocrRawText: "TOTAL 45.20",
+                capturedAt: Date(timeIntervalSince1970: 1_774_000_000),
+                ocrFailureNote: nil
+            ),
+            saveAction: { saved($0) }
+        )
+    }
+
+    // MARK: Withheld amounts
+
+    /// The Costco set: subtotal 211.60, HST 7.34, total read off the
+    /// discount line as 8.50. The total does not prefill, and the screen
+    /// says why - "nothing was read" and "what was read could not be true"
+    /// are different facts about a blank field.
+    func testAnImpossibleTotalIsNotPrefilledAndTheScreenSaysWhy() {
+        let model = captureModel(ReceiptSuggestions(
+            totalCents: 850,
+            hstCents: 734,
+            subtotalCents: 21160
+        ))
+
+        XCTAssertEqual(model.totalText, "")
+        XCTAssertEqual(model.subtotalText, "211.60", "the subtotal and the tax corroborate each other")
+        XCTAssertEqual(model.hstText, "7.34")
+        XCTAssertEqual(
+            model.withheldAmountNote,
+            "The amounts read from this receipt didn't add up, so the total was left blank - enter it from the paper."
+        )
+        XCTAssertFalse(model.isUnreviewed(.total), "a withheld amount is not a suggestion to review")
+    }
+
+    /// An HST that is not a possible fraction of its subtotal: two of the
+    /// three numbers already disagree, so both go.
+    func testAnImpossibleRateWithholdsTheSubtotalTooAndSaysSo() {
+        let model = captureModel(ReceiptSuggestions(
+            totalCents: 500,
+            hstCents: 900,
+            subtotalCents: 1000
+        ))
+
+        XCTAssertEqual(model.totalText, "")
+        XCTAssertEqual(model.subtotalText, "")
+        XCTAssertEqual(model.hstText, "9.00")
+        XCTAssertEqual(
+            model.withheldAmountNote,
+            "The amounts read from this receipt didn't add up, so the total and subtotal were left blank - enter them from the paper."
+        )
+    }
+
+    /// The three legitimate `13.50 / 1.76 / 15.25` receipts: one cent out
+    /// by the merchant's own rounding, and nothing is withheld or said.
+    func testAOneCentGapPrefillsEverythingAndSaysNothing() {
+        let model = captureModel(ReceiptSuggestions(
+            totalCents: 1525,
+            hstCents: 176,
+            subtotalCents: 1350
+        ))
+
+        XCTAssertEqual(model.totalText, "15.25")
+        XCTAssertEqual(model.subtotalText, "13.50")
+        XCTAssertNil(model.withheldAmountNote)
+    }
+
+    /// The note describes a blank; once the person has filled it, it stops.
+    func testTheWithheldNoteGoesQuietOnceTheTotalIsEntered() {
+        let model = captureModel(ReceiptSuggestions(totalCents: 850, hstCents: 734, subtotalCents: 21160))
+        XCTAssertNotNil(model.withheldAmountNote)
+        model.totalText = "218.94"
+        XCTAssertNil(model.withheldAmountNote)
+    }
+
+    /// The same rule on the served merge, and the server's own flag
+    /// honoured when it comes.
+    func testTheServedMergeGoesThroughTheSameCheck() {
+        let receipt = Fixtures.receipt(
+            subtotalCents: nil,
+            hstCents: nil,
+            totalCents: nil,
+            status: .pending,
+            suggestions: Fixtures.merged(
+                purchasedAt: "2026-03-20",
+                totalCents: 850,
+                hstCents: 734,
+                subtotalCents: 21160
+            )
+        )
+        let model = ConfirmReceiptModel(api: StubKeptAPI(), detail: Fixtures.detail(receipt: receipt))
+        XCTAssertEqual(model.totalText, "")
+        XCTAssertNotNil(model.withheldAmountNote)
+
+        // A server that already withheld it serves a nil value plus the
+        // flag; the note still appears even though there is nothing left
+        // for the local check to catch.
+        let flagged = Fixtures.receipt(
+            totalCents: nil,
+            status: .pending,
+            suggestions: Fixtures.merged(purchasedAt: "2026-03-20", totalCents: nil, totalWithheld: true)
+        )
+        let flaggedModel = ConfirmReceiptModel(api: StubKeptAPI(), detail: Fixtures.detail(receipt: flagged))
+        XCTAssertNotNil(flaggedModel.withheldAmountNote)
+    }
+
+    // MARK: The server's second opinion
+
+    /// A set that adds up - 14.50 + 2.01 + 0.99 = 17.50 - so nothing in it
+    /// is withheld by the arithmetic-sanity rule before it is applied.
+    private let serverAnswer = ConfirmSuggestionSet(parse: ReceiptSuggestions(
+        totalCents: 1750,
+        hstCents: 201,
+        subtotalCents: 1450,
+        otherFeesCents: 99,
+        paymentMethod: "MASTERCARD",
+        purchasedAt: "2026-04-01",
+        vendor: "JIMMY THE GREEK"
+    ))
+
+    func testUntouchedTextFieldsAreReplacedAndStayMarkedAsSuggestions() {
+        let model = captureModel(ReceiptSuggestions(vendor: "In Store 392"))
+        model.applyServerSuggestions(serverAnswer)
+
+        XCTAssertEqual(model.vendorText, "JIMMY THE GREEK")
+        XCTAssertEqual(ReceiptFormat.isoDate(fromPicker: model.purchasedDate), "2026-04-01")
+        XCTAssertEqual(model.paymentMethodText, "MASTERCARD")
+        XCTAssertTrue(model.isUnreviewed(.vendor))
+        XCTAssertTrue(model.isUnreviewed(.date))
+        XCTAssertTrue(model.isUnreviewed(.paymentMethod))
+    }
+
+    func testBlankMoneyFieldsAreFilled() {
+        let model = captureModel(ReceiptSuggestions())
+        model.applyServerSuggestions(serverAnswer)
+
+        XCTAssertEqual(model.totalText, "17.50")
+        XCTAssertEqual(model.hstText, "2.01")
+        XCTAssertEqual(model.subtotalText, "14.50")
+        XCTAssertEqual(model.otherFeesText, "0.99")
+        XCTAssertTrue(model.serverAmountAlternatives.isEmpty)
+    }
+
+    /// A number changing under someone's eyes while they read a receipt is
+    /// the one behaviour this screen must not have: a disagreement over a
+    /// field that already shows an amount is offered, not applied.
+    func testADisagreementOverAFilledAmountIsOfferedNotApplied() {
+        let model = captureModel(ReceiptSuggestions(totalCents: 1749, hstCents: 201))
+        model.applyServerSuggestions(serverAnswer)
+
+        XCTAssertEqual(model.totalText, "17.49", "the on-device value stands")
+        XCTAssertEqual(model.serverAmountAlternatives.map(\.field), [.total])
+        let alternative = try? XCTUnwrap(model.serverAmountAlternatives.first)
+        guard let alternative else { return }
+        XCTAssertEqual(model.serverAlternativeLabel(alternative), "Server read the total as $17.50 - use it")
+
+        XCTAssertTrue(model.applyServerAlternative(alternative))
+        XCTAssertEqual(model.totalText, "17.50")
+        XCTAssertTrue(model.serverAmountAlternatives.isEmpty)
+        XCTAssertTrue(model.isUnreviewed(.total), "an applied chip is still a suggestion until touched")
+    }
+
+    /// §10A.1's rule, unchanged: a machine may fill a field a human has not
+    /// looked at, and may never change one they have.
+    func testATouchedFieldIsNeverTouchedByTheServer() {
+        let model = captureModel(ReceiptSuggestions(totalCents: 1749, vendor: "In Store 392"))
+        model.markTouched(.vendor)
+        model.markTouched(.total)
+        model.vendorText = "Jimmy's"
+
+        model.applyServerSuggestions(serverAnswer)
+
+        XCTAssertEqual(model.vendorText, "Jimmy's")
+        XCTAssertEqual(model.totalText, "17.49")
+        XCTAssertTrue(model.serverAmountAlternatives.isEmpty, "no chip for a field the person has decided")
+    }
+
+    /// The server's answer goes through the same arithmetic-sanity rule the
+    /// on-device one does - a set of amounts that cannot be true is not made
+    /// truer by which parser produced it.
+    func testAnImpossibleServerSetIsWithheldToo() {
+        let model = captureModel(ReceiptSuggestions())
+        model.applyServerSuggestions(ConfirmSuggestionSet(parse: ReceiptSuggestions(
+            totalCents: 850,
+            hstCents: 734,
+            subtotalCents: 21160
+        )))
+
+        XCTAssertEqual(model.totalText, "")
+        XCTAssertEqual(model.subtotalText, "211.60")
+    }
+
+    /// The save-time accept/override report scores the person against the
+    /// value they were shown LAST, not the one that was shown first.
+    func testTelemetryScoresAgainstTheMostRecentSuggestion() {
+        let model = captureModel(ReceiptSuggestions(vendor: "In Store 392"))
+        model.applyServerSuggestions(serverAnswer)
+
+        let outcomes = Dictionary(uniqueKeysWithValues: model.suggestionOutcomes().map { ($0.field, $0.accepted) })
+        XCTAssertEqual(outcomes[.vendor], true, "the server's vendor left alone is accepted")
+        XCTAssertEqual(outcomes[.total], true)
+
+        model.vendorText = "Something Else"
+        let overridden = Dictionary(uniqueKeysWithValues: model.suggestionOutcomes().map { ($0.field, $0.accepted) })
+        XCTAssertEqual(overridden[.vendor], false)
+    }
+
+    /// An edit form is showing a person their own confirmed values back;
+    /// nothing on it is a machine suggestion and nothing may become one.
+    func testAnEditFormIgnoresTheServerEntirely() {
+        let receipt = Fixtures.receipt(vendor: "Jimmy's", totalCents: 1749, status: .confirmed)
+        let model = ConfirmReceiptModel(api: StubKeptAPI(), detail: Fixtures.detail(receipt: receipt), purpose: .edit)
+        model.applyServerSuggestions(serverAnswer)
+
+        XCTAssertEqual(model.vendorText, "Jimmy's")
+        XCTAssertEqual(model.totalText, "17.49")
+    }
+
+    /// Other fees and payment method now prefill from a suggestion set and
+    /// start unreviewed like every other suggested field.
+    func testFeesAndPaymentMethodPrefillFromTheParseAndStartUnreviewed() {
+        let model = captureModel(ReceiptSuggestions(
+            totalCents: 6320,
+            otherFeesCents: 659,
+            paymentMethod: "MASTERCARD"
+        ))
+
+        XCTAssertEqual(model.otherFeesText, "6.59")
+        XCTAssertEqual(model.paymentMethodText, "MASTERCARD")
+        XCTAssertTrue(model.isUnreviewed(.otherFees))
+        XCTAssertTrue(model.isUnreviewed(.paymentMethod))
     }
 }

@@ -45,7 +45,11 @@ struct ConfirmQueueView: View {
                     eventLogger: eventLogger,
                     api: api,
                     onSaved: { await queue.advanceAfterSave() },
-                    onSetAside: { await queue.setAsideCurrent() }
+                    onSetAside: { await queue.setAsideCurrent() },
+                    // A binned receipt is one the person dealt with, so
+                    // the queue moves on exactly as it does after a save
+                    // (ConfirmQueueModel.advanceAfterDelete()).
+                    onDeleted: { await queue.advanceAfterDelete() }
                 )
                 // A fresh identity per receipt: focus state and scroll
                 // position must not leak from the last form into the next.

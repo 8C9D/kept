@@ -22,10 +22,31 @@ struct ReceiptSuggestions: Codable, Equatable {
     var hstCents: Int?
     var subtotalCents: Int?
     /// Gratuity, from a TIP- or GRATUITY-labelled row (2026-08-28 product
-    /// feedback). No `otherFeesCents` field here: "other fees" has no
-    /// consistent printed label for a heuristic to match, so it is
-    /// human-entered only and never a parser suggestion.
+    /// feedback).
     var tipCents: Int?
+
+    /// Delivery, service charges, surcharges, rounding, eco fees and
+    /// deposits, summed (2026-09-01).
+    ///
+    /// The spec said this field deliberately had no suggestion - "other
+    /// fees is a residual with no consistent printed label for a heuristic
+    /// to match" - and that was written before the second user's receipts were read.
+    /// Across the 130 live receipts in the 2026-09-01 restore the labels
+    /// are consistent and few: `12% Service charge`, `Credit card 2.4%
+    /// surcharge`, `Rounding`, `Delivery`, `Eco fee`, a bottle deposit. A
+    /// residual with no label was the right description of the FIELD, not
+    /// of what real paper prints into it. Still exactly as replaceable as
+    /// every other value here: a suggestion a human reads before anything
+    /// saves (constraint 2).
+    var otherFeesCents: Int?
+
+    /// The card or cash label the slip prints (2026-09-01) - `MASTERCARD`,
+    /// `VISA`, `INTERAC`, `DEBIT`, `AMEX`, `CASH`, `APPLE PAY`. Printed on
+    /// roughly four receipts in five and stored on none of the 130 live
+    /// ones, because nothing ever offered it. Free text, like `category`:
+    /// this suggests the person's own vocabulary back, it does not impose
+    /// one (engineering rule: no enum, no taxonomy).
+    var paymentMethod: String?
 
     /// The purchase date as yyyy-mm-dd - a calendar date, same as the API.
     var purchasedAt: String?
@@ -36,6 +57,7 @@ struct ReceiptSuggestions: Codable, Equatable {
     /// receipt starts from a blank form rather than suggestions.
     var isEmpty: Bool {
         totalCents == nil && hstCents == nil && subtotalCents == nil && tipCents == nil
+            && otherFeesCents == nil && paymentMethod == nil
             && purchasedAt == nil && vendor == nil
     }
 }

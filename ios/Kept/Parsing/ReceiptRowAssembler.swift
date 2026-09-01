@@ -45,6 +45,34 @@ enum ReceiptRowAssembler {
     /// noise; the skew stays zero and behaviour is wave-4's exactly.
     private static let minimumSkewSamples = 3
 
+    /// Assembly repeated until it stops changing anything (2026-09-01).
+    ///
+    /// One pass is NOT idempotent, contrary to what this module's callers
+    /// assumed for two waves: a merged row takes the MEAN of its
+    /// fragments' centers, which moves the row, which can bring a
+    /// neighbour inside the band on the next pass. The consequence was
+    /// invisible and material - `VisionReceiptTextRecognizer` stored the
+    /// text of ONE pass as `ocr_raw_text` while `ReceiptParser` ran a
+    /// second pass over the same lines, so the text the server's LLM reads
+    /// disagreed with the text the on-device heuristic read on 16 of the
+    /// 130 live receipts. Tim Hortons `81cfa0eb` is the clearest: the
+    /// stored text has `Subtotal:` and `$8.99` on separate lines, and the
+    /// heuristic's second pass had already paired them.
+    ///
+    /// Bounded rather than looped-until-stable-forever: each pass can only
+    /// merge rows, so the count strictly decreases or the result is stable,
+    /// and the bound is belt-and-braces against a pathological oscillation
+    /// in a capture path that must never hang.
+    static func assembledToFixedPoint(_ fragments: [RecognizedLine], maximumPasses: Int = 5) -> [RecognizedLine] {
+        var current = assembleRows(fragments)
+        for _ in 1..<max(1, maximumPasses) {
+            let next = assembleRows(current)
+            if next == current { break }
+            current = next
+        }
+        return current
+    }
+
     static func assembleRows(_ fragments: [RecognizedLine]) -> [RecognizedLine] {
         let skew = columnSkew(of: fragments)
 

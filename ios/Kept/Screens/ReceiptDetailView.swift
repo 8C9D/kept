@@ -121,7 +121,16 @@ struct ReceiptDetailView: View {
                         // must know about it next time.
                         await options.refresh()
                     },
-                    onSetAside: { confirmModel = nil }
+                    onSetAside: { confirmModel = nil },
+                    // The same end as this screen's own Delete button
+                    // below: the row is gone, so the list behind reloads
+                    // and this screen - which is about a receipt that no
+                    // longer exists - goes with it.
+                    onDeleted: {
+                        confirmModel = nil
+                        await onDeleted()
+                        dismiss()
+                    }
                 )
             }
         }
@@ -273,8 +282,8 @@ struct ReceiptDetailView: View {
                     // A confirmed receipt is still correctable - a typo in
                     // a total or a category is found weeks later, and
                     // re-scanning the paper is not the remedy (2026-08-26
-                    // ruling). The same form, opened with nothing amber:
-                    // these values are the person's own.
+                    // ruling). The same form, opened with nothing marked
+                    // as a suggestion: these values are the person's own.
                     Button {
                         confirmModel = ConfirmReceiptModel(api: api, detail: detail, purpose: .edit)
                     } label: {

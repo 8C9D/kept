@@ -288,3 +288,79 @@ final class ReceiptArithmeticTests: XCTestCase {
         )
     }
 }
+
+// MARK: - Suggested-amount sanity (2026-09-01)
+
+/// `validateSuggestedAmounts`, the client mirror of the server's rule in
+/// server/src/domain/suggestedAmounts.ts. The owner's rule: the total must be
+/// at least the subtotal plus HST plus tip plus fees, and a set that is not
+/// is a misread label rather than a receipt anyone printed.
+final class SuggestedAmountValidationTests: XCTestCase {
+    private func withheld(
+        subtotal: Int? = nil,
+        hst: Int? = nil,
+        tip: Int? = nil,
+        otherFees: Int? = nil,
+        total: Int? = nil
+    ) -> Set<WithheldAmountField> {
+        ReceiptArithmetic.validateSuggestedAmounts(
+            subtotalCents: subtotal,
+            hstCents: hst,
+            tipCents: tip,
+            otherFeesCents: otherFees,
+            totalCents: total
+        )
+    }
+
+    /// The Costco receipt this rule exists for: a $218.94 purchase whose
+    /// total was read off `TOTAL DISCOUNT(S) $ 8.50`, with the subtotal and
+    /// HST from the same slip both correct. 734 on 21160 is 3.5% - a
+    /// plausible tax fraction on a basket of mostly zero-rated groceries -
+    /// so those two corroborate each other and only the total goes.
+    func testCostcoShapeWithholdsTheTotal() {
+        XCTAssertEqual(withheld(subtotal: 21160, hst: 734, total: 850), [.totalCents])
+    }
+
+    /// The same verdict with no HST at all: nothing corroborates the
+    /// subtotal, but nothing impugns it either.
+    func testNoHstStillWithholdsOnlyTheTotal() {
+        XCTAssertEqual(withheld(subtotal: 986, total: 325), [.totalCents])
+    }
+
+    /// An HST that is not a possible fraction of the subtotal means two of
+    /// the three numbers already disagree with each other; there is nothing
+    /// left to trust and the person types both from the paper.
+    func testImpossibleTaxRateWithholdsTheSubtotalToo() {
+        XCTAssertEqual(withheld(subtotal: 1000, hst: 900, total: 500), [.totalCents, .subtotalCents])
+    }
+
+    /// A subtotal that cannot anchor a rate at all.
+    func testZeroSubtotalWithANonNilHstWithholdsBoth() {
+        XCTAssertEqual(withheld(subtotal: 0, hst: 100, total: -50), [.totalCents, .subtotalCents])
+    }
+
+    /// The three legitimate receipts printing `13.50 / 1.76 / 15.25`, whose
+    /// parts sum to 15.26: a merchant rounded the tax and the total
+    /// independently. Two cents is where "off by rounding" stops.
+    func testAOneCentRoundingGapIsNotAnError() {
+        XCTAssertTrue(withheld(subtotal: 1350, hst: 176, total: 1525).isEmpty)
+        XCTAssertTrue(withheld(subtotal: 1350, hst: 176, total: 1524).isEmpty)
+        XCTAssertEqual(withheld(subtotal: 1350, hst: 176, total: 1400), [.totalCents])
+    }
+
+    /// Tip and other fees count toward the components, so a restaurant bill
+    /// that reconciles is untouched and one whose total is below its own
+    /// parts is not.
+    func testTipAndFeesCountTowardTheComponents() {
+        XCTAssertTrue(withheld(subtotal: 8400, hst: 1092, tip: 1500, total: 10992).isEmpty)
+        XCTAssertEqual(withheld(subtotal: 8400, hst: 1092, tip: 1500, otherFees: 500, total: 9000), [.totalCents])
+    }
+
+    /// With either end missing there is no sum to compare against
+    /// anything, and an absent amount is already served as an absence.
+    func testAMissingSubtotalOrTotalWithholdsNothing() {
+        XCTAssertTrue(withheld(hst: 734, total: 850).isEmpty)
+        XCTAssertTrue(withheld(subtotal: 21160, hst: 734).isEmpty)
+        XCTAssertTrue(withheld().isEmpty)
+    }
+}

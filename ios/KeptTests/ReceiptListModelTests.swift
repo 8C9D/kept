@@ -217,6 +217,41 @@ final class ReceiptListModelTests: XCTestCase {
         XCTAssertEqual(api.receiptsPageCalls.count, callsAfterResort)
     }
 
+    /// Picking a sort key carries that key's own direction with it
+    /// (2026-09-01). Vendor is the case this exists for: it used to
+    /// inherit whatever the date sort was on - "newest first", i.e.
+    /// descending - and serve the alphabet from Z. Every other key still
+    /// resolves to descending, so nothing about the list's opening
+    /// ordering moved.
+    func testPickingVendorSortsAToZAndTheOtherKeysStayBiggestFirst() async {
+        stubPages(byCursor: [nil: Fixtures.page([Fixtures.receipt()])])
+        let model = makeModel()
+        await model.loadFirstPage()
+        XCTAssertEqual(model.query.order, .desc)
+
+        await model.setSort(.vendor)
+        XCTAssertEqual(model.query.order, .asc)
+        XCTAssertEqual(api.receiptsPageCalls.last?.query.order, .asc)
+        XCTAssertEqual(api.receiptsPageCalls.last?.query.sort, .vendor)
+
+        await model.setSort(.total)
+        XCTAssertEqual(model.query.order, .desc)
+        XCTAssertEqual(api.receiptsPageCalls.last?.query.order, .desc)
+    }
+
+    /// The flip stays flipped until the sort changes again: the default is
+    /// where a key opens, not a rule that overrides the person.
+    func testFlippingTheOrderSurvivesUntilTheSortChangesAgain() async {
+        stubPages(byCursor: [nil: Fixtures.page([Fixtures.receipt()])])
+        let model = makeModel()
+        await model.loadFirstPage()
+
+        await model.setSort(.vendor)
+        await model.setOrder(.desc)
+        XCTAssertEqual(model.query.order, .desc)
+        XCTAssertEqual(model.query.sort, .vendor)
+    }
+
     func testEachFilterAndTheOrderReachTheServerAndRestartPaging() async {
         stubPages(byCursor: [nil: Fixtures.page([Fixtures.receipt()])])
         let model = makeModel()
@@ -625,7 +660,7 @@ final class ReceiptListModelTests: XCTestCase {
         let model = makeModel()
         await model.loadFirstPage()
         let confirmed = Fixtures.receipt(id: pending.id, totalCents: 1500, status: .confirmed)
-        api.quickConfirmReceiptHandler = { id in
+        api.quickConfirmReceiptHandler = { id, _ in
             XCTAssertEqual(id, pending.id)
             return confirmed
         }
@@ -633,7 +668,7 @@ final class ReceiptListModelTests: XCTestCase {
 
         await model.quickConfirmReceipt(pending)
 
-        XCTAssertEqual(api.quickConfirmReceiptCalls, [pending.id])
+        XCTAssertEqual(api.quickConfirmReceiptCalls.map(\.id), [pending.id])
         XCTAssertEqual(model.receipts, [confirmed])
         XCTAssertNil(model.actionError)
     }
@@ -648,7 +683,7 @@ final class ReceiptListModelTests: XCTestCase {
         stubPages(byCursor: [nil: Fixtures.page([pending])])
         let model = makeModel()
         await model.loadFirstPage()
-        api.quickConfirmReceiptHandler = { _ in
+        api.quickConfirmReceiptHandler = { _, _ in
             throw APIError.requestFailed(
                 code: "invalid_request",
                 message: "a confirmed receipt requires a total",
@@ -660,5 +695,102 @@ final class ReceiptListModelTests: XCTestCase {
 
         XCTAssertEqual(model.actionError, "a confirmed receipt requires a total")
         XCTAssertEqual(model.receipts, [pending], "a failed quick-confirm leaves the row untouched")
+    }
+}
+
+// MARK: - Swipe-to-confirm saves what the row shows (2026-09-01)
+
+/// The bug this fixes shipped in 1.0 (4): the Home row renders the served
+/// §7.3 merge (`ReceiptDisplay`) while the swipe PATCHed `status` alone, so
+/// a row reading `JIMMY THE GREEK` confirmed as `In Store 392` - the
+/// capture-time heuristic's guess, still sitting in the column.
+@MainActor
+final class QuickConfirmDisplayedValuesTests: XCTestCase {
+    private func pendingRow() -> Receipt {
+        Fixtures.receipt(
+            purchasedAt: "2026-08-01",
+            vendor: "In Store 392",
+            subtotalCents: nil,
+            hstCents: nil,
+            tipCents: nil,
+            totalCents: nil,
+            status: .pending,
+            suggestions: Fixtures.merged(
+                vendor: "JIMMY THE GREEK",
+                purchasedAt: "2026-08-29",
+                totalCents: 1749,
+                hstCents: 201,
+                subtotalCents: 1548,
+                tipCents: 100
+            )
+        )
+    }
+
+    func testTheRequestCarriesTheDisplayedValues() {
+        let request = QuickConfirmRequest(displaying: pendingRow())
+
+        XCTAssertEqual(request.vendor, "JIMMY THE GREEK")
+        XCTAssertEqual(request.purchasedAt, "2026-08-29")
+        XCTAssertEqual(request.totalCents, 1749)
+        XCTAssertEqual(request.hstCents, 201)
+        XCTAssertEqual(request.subtotalCents, 1548)
+        XCTAssertEqual(request.tipCents, 100)
+    }
+
+    /// A confirmed row renders its own values, never the merge (the merge
+    /// is still served on confirmed receipts, for the accuracy set), so
+    /// re-confirming one must not rewrite it from a parser.
+    func testAConfirmedRowsRequestCarriesItsOwnValues() {
+        let confirmed = Fixtures.receipt(
+            purchasedAt: "2026-08-01",
+            vendor: "Jimmy The Greek",
+            totalCents: 1750,
+            status: .confirmed,
+            suggestions: Fixtures.merged(vendor: "IN STORE 392", purchasedAt: "2026-01-01", totalCents: 1)
+        )
+        let request = QuickConfirmRequest(displaying: confirmed)
+
+        XCTAssertEqual(request.vendor, "Jimmy The Greek")
+        XCTAssertEqual(request.purchasedAt, "2026-08-01")
+        XCTAssertEqual(request.totalCents, 1750)
+    }
+
+    /// The gate widened with the request: the swipe now writes the total
+    /// the server's check reads, so it can be offered wherever a total is
+    /// VISIBLE rather than only where the raw column holds one.
+    func testTheGateFollowsWhatTheRowShows() {
+        XCTAssertTrue(pendingRow().canQuickConfirm, "a merge-supplied total is a total the swipe can save")
+        XCTAssertFalse(
+            Fixtures.receipt(totalCents: nil, status: .pending, suggestions: nil).canQuickConfirm,
+            "no total anywhere: nothing to confirm"
+        )
+        XCTAssertFalse(
+            Fixtures.receipt(totalCents: 1750, status: .confirmed).canQuickConfirm,
+            "already confirmed"
+        )
+    }
+
+    func testTheModelSendsTheRequestBuiltFromTheRow() async {
+        let api = StubKeptAPI()
+        let row = pendingRow()
+        api.receiptsPageHandler = { _, _, _ in Fixtures.page([row]) }
+        api.receiptsSummaryHandler = { _ in Fixtures.summary() }
+        let model = ReceiptListModel(
+            api: api,
+            eventLogger: EventLogger(
+                api: api,
+                connectivity: StubConnectivityMonitor(),
+                backgroundContinuation: StubBackgroundContinuation()
+            )
+        )
+        await model.loadFirstPage()
+        api.quickConfirmReceiptHandler = { _, _ in Fixtures.receipt(id: row.id, totalCents: 1749, status: .confirmed) }
+
+        await model.quickConfirmReceipt(row)
+
+        XCTAssertEqual(api.quickConfirmReceiptCalls.count, 1)
+        XCTAssertEqual(api.quickConfirmReceiptCalls.first?.request.vendor, "JIMMY THE GREEK")
+        XCTAssertEqual(api.quickConfirmReceiptCalls.first?.request.totalCents, 1749)
+        XCTAssertNil(model.actionError)
     }
 }

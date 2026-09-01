@@ -31,10 +31,15 @@ struct OcrSuggestionsPayload: Encodable, Equatable {
     let hstCents: Int?
     let subtotalCents: Int?
     /// The tip heuristic's guess (2026-08-28), recorded verbatim like
-    /// every other amount for the §7.3 accuracy measurement. No
-    /// `otherFeesCents` key here: nothing heuristic ever suggests it, so
-    /// there is nothing to record.
+    /// every other amount for the §7.3 accuracy measurement.
     let tipCents: Int?
+    /// Added 2026-09-01, when the heuristics learned to read them - see
+    /// `ReceiptSuggestions.otherFeesCents` for why the "no suggestion,
+    /// deliberately" ruling was reversed. Recorded verbatim like every
+    /// other value here: this payload is the immutable record of what the
+    /// parser said, never what the person then confirmed.
+    let otherFeesCents: Int?
+    let paymentMethod: String?
 
     init(_ suggestions: ReceiptSuggestions) {
         vendor = suggestions.vendor
@@ -43,6 +48,8 @@ struct OcrSuggestionsPayload: Encodable, Equatable {
         hstCents = suggestions.hstCents
         subtotalCents = suggestions.subtotalCents
         tipCents = suggestions.tipCents
+        otherFeesCents = suggestions.otherFeesCents
+        paymentMethod = suggestions.paymentMethod
     }
 
     // The server's strict schema takes absent keys, not explicit nulls, so
@@ -55,10 +62,13 @@ struct OcrSuggestionsPayload: Encodable, Equatable {
         try container.encodeIfPresent(hstCents, forKey: .hstCents)
         try container.encodeIfPresent(subtotalCents, forKey: .subtotalCents)
         try container.encodeIfPresent(tipCents, forKey: .tipCents)
+        try container.encodeIfPresent(otherFeesCents, forKey: .otherFeesCents)
+        try container.encodeIfPresent(paymentMethod, forKey: .paymentMethod)
     }
 
     private enum CodingKeys: String, CodingKey {
         case vendor, purchasedAt, totalCents, hstCents, subtotalCents, tipCents
+        case otherFeesCents, paymentMethod
     }
 }
 
@@ -84,6 +94,12 @@ struct CreateReceiptRequest: Encodable, Equatable {
     let notes: String?
     let status: ReceiptStatus?
     let ocrRawText: String?
+    /// How the text was read (2026-09-01): `"vision"` for every capture
+    /// from this app - the camera is the only source it has. Optional, and
+    /// encoded only when set, so an outbox item queued by an earlier build
+    /// (which stores the image and the parse, not this request) still
+    /// produces a body the server's strict schema accepts.
+    let ocrSource: String?
     let ocrSuggestions: OcrSuggestionsPayload
     let image: Image
 
@@ -108,9 +124,11 @@ struct CreateReceiptRequest: Encodable, Equatable {
         notes: String? = nil,
         status: ReceiptStatus? = nil,
         ocrRawText: String?,
+        ocrSource: String? = nil,
         ocrSuggestions: OcrSuggestionsPayload,
         image: Image
     ) {
+        self.ocrSource = ocrSource
         self.purchasedAt = purchasedAt
         self.capturedAt = capturedAt
         self.vendor = vendor
@@ -146,6 +164,7 @@ struct CreateReceiptRequest: Encodable, Equatable {
         try container.encodeIfPresent(notes, forKey: .notes)
         try container.encodeIfPresent(status, forKey: .status)
         try container.encodeIfPresent(ocrRawText, forKey: .ocrRawText)
+        try container.encodeIfPresent(ocrSource, forKey: .ocrSource)
         try container.encode(ocrSuggestions, forKey: .ocrSuggestions)
         try container.encode(image, forKey: .image)
     }
@@ -154,7 +173,60 @@ struct CreateReceiptRequest: Encodable, Equatable {
         case purchasedAt, capturedAt, vendor
         case subtotalCents, hstCents, totalCents, tipCents, otherFeesCents
         case category, paymentMethod, notes, status
-        case ocrRawText, ocrSuggestions, image
+        case ocrRawText, ocrSource, ocrSuggestions, image
+    }
+}
+
+/// PATCH /api/receipts/:id for proposal #9's swipe-to-confirm on the Home
+/// list, rebuilt 2026-09-01.
+///
+/// It used to send `{status: "confirmed"}` alone, mirroring the web
+/// client's bulk-confirm - and that was a bug on this screen, because the
+/// Home row does not render the raw stored values: it renders the served
+/// §7.3 merge (`ReceiptDisplay`). The row said `JIMMY THE GREEK` while the
+/// swipe saved `In Store 392`, the capture-time heuristic's guess still
+/// sitting in the column. A one-gesture confirmation must save exactly what
+/// the person was looking at when they made it (constraint 2 - and the
+/// gesture IS the human confirmation).
+///
+/// ⚠ Absent keys, never explicit nulls - the opposite of
+/// `ConfirmReceiptRequest`, and deliberately. That request is the whole
+/// reviewed form, where a blank field means "clear it"; this one carries
+/// only the fields the ROW rendered, so anything it does not carry must be
+/// left exactly as it is rather than wiped.
+struct QuickConfirmRequest: Encodable, Equatable {
+    let purchasedAt: String
+    let vendor: String?
+    let subtotalCents: Int?
+    let hstCents: Int?
+    let totalCents: Int?
+    let tipCents: Int?
+
+    /// Built from what `ReceiptDisplay` renders for this row, so the two
+    /// cannot drift: a field added to the row's rendering is a field this
+    /// request has to carry, and the one place to notice that is here.
+    init(displaying receipt: Receipt) {
+        purchasedAt = receipt.displayPurchasedAt
+        vendor = receipt.displayVendor
+        subtotalCents = receipt.displaySubtotalCents
+        hstCents = receipt.displayHstCents
+        totalCents = receipt.displayTotalCents
+        tipCents = receipt.displayTipCents
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(purchasedAt, forKey: .purchasedAt)
+        try container.encodeIfPresent(vendor, forKey: .vendor)
+        try container.encodeIfPresent(subtotalCents, forKey: .subtotalCents)
+        try container.encodeIfPresent(hstCents, forKey: .hstCents)
+        try container.encodeIfPresent(totalCents, forKey: .totalCents)
+        try container.encodeIfPresent(tipCents, forKey: .tipCents)
+        try container.encode("confirmed", forKey: .status)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case purchasedAt, vendor, subtotalCents, hstCents, totalCents, tipCents, status
     }
 }
 

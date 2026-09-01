@@ -604,25 +604,129 @@ final class APIClientTests: XCTestCase {
 
     // MARK: - Swipe actions (proposal #9, 2026-08-28)
 
-    /// The one thing that matters most about this request: the body is
-    /// EXACTLY `{"status":"confirmed"}` - never the vendor/total/etc. keys
-    /// `ConfirmReceiptRequest` always sends explicitly, which would
-    /// silently clear whatever the row does not carry a value for (see
-    /// `KeptAPI.quickConfirmReceipt`'s own doc comment).
-    func testQuickConfirmReceiptPatchesStatusConfirmedAloneNoOtherFields() async throws {
+    /// The two things that matter about this request (rewritten
+    /// 2026-09-01): it carries the values the ROW was showing - the served
+    /// merge, not the stored column, which is the bug this replaced - and
+    /// it carries them as ABSENT keys where the row shows nothing, never
+    /// explicit nulls, so a swipe cannot clear a field it never rendered.
+    func testQuickConfirmReceiptPatchesTheDisplayedValuesWithTheStatus() async throws {
         let client = try makeClient()
         let id = try XCTUnwrap(UUID(uuidString: "0a1b2c3d-0000-4000-8000-000000000001"))
         transport.enqueue(status: 200, jsonBody: singleReceiptJSON)
+        // A pending row whose served merge disagrees with its stored
+        // column on the vendor and the total - the Jimmy the Greek shape.
+        let row = Fixtures.receipt(
+            id: id,
+            purchasedAt: "2026-08-01",
+            vendor: "In Store 392",
+            totalCents: nil,
+            status: .pending,
+            suggestions: Fixtures.merged(
+                vendor: "JIMMY THE GREEK",
+                purchasedAt: "2026-08-29",
+                totalCents: 1749,
+                hstCents: 201
+            )
+        )
 
-        let receipt = try await client.quickConfirmReceipt(id: id)
+        let receipt = try await client.quickConfirmReceipt(id: id, QuickConfirmRequest(displaying: row))
 
         let request = try XCTUnwrap(transport.requests.first)
         XCTAssertEqual(request.httpMethod, "PATCH")
         XCTAssertEqual(request.url?.path, "/api/receipts/\(id.uuidString.lowercased())")
         let body = try XCTUnwrap(request.httpBody)
-        XCTAssertEqual(String(decoding: body, as: UTF8.self), #"{"status":"confirmed"}"#)
+        let decoded = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        XCTAssertEqual(decoded["status"] as? String, "confirmed")
+        XCTAssertEqual(decoded["vendor"] as? String, "JIMMY THE GREEK")
+        XCTAssertEqual(decoded["purchasedAt"] as? String, "2026-08-29")
+        XCTAssertEqual(decoded["totalCents"] as? Int, 1749)
+        XCTAssertEqual(decoded["hstCents"] as? Int, 201)
+        XCTAssertFalse(decoded.keys.contains("subtotalCents"), "an absent value is an absent key, never a null")
+        XCTAssertFalse(decoded.keys.contains("tipCents"))
         XCTAssertEqual(receipt.id, id)
         XCTAssertEqual(receipt.status, .confirmed)
+    }
+
+    // MARK: - The capture-time second opinion (2026-09-01)
+
+    /// POST /api/receipts/parse: the OCR text and the capture instant go
+    /// up, the suggestion set comes back, and nothing is written.
+    func testParseReceiptTextPostsTheTextAndTheCaptureInstant() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: """
+        {
+          "suggestions": {
+            "vendor": "JIMMY THE GREEK", "purchasedAt": "2026-08-29",
+            "totalCents": 1750, "hstCents": 201, "subtotalCents": 1549,
+            "tipCents": null, "otherFeesCents": null,
+            "paymentMethod": "MASTERCARD", "vendorTaxNumber": null
+          },
+          "model": "claude-sonnet-5", "promptVersion": 3
+        }
+        """)
+
+        let result = try await client.parseReceiptText(
+            ocrRawText: "TOTAL 17.50",
+            capturedAt: Date(timeIntervalSince1970: 1_788_264_000)
+        )
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/api/receipts/parse")
+        let body = try XCTUnwrap(request.httpBody)
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(decoded["ocrRawText"] as? String, "TOTAL 17.50")
+        XCTAssertNotNil(decoded["capturedAt"] as? String, "the instant rides along, with its offset")
+        XCTAssertEqual(result.suggestions.vendor, "JIMMY THE GREEK")
+        XCTAssertEqual(result.model, "claude-sonnet-5")
+    }
+
+    /// The two "not now" answers become their own error type, so the
+    /// capture screen can stay silent about them in its own vocabulary
+    /// rather than matching on a string code.
+    func testParseUnavailableAndParseFailedBecomeTypedErrors() async throws {
+        let client = try makeClient()
+
+        transport.enqueue(
+            status: 503,
+            jsonBody: #"{"error":{"code":"parse_unavailable","message":"no model key configured"}}"#
+        )
+        do {
+            _ = try await client.parseReceiptText(ocrRawText: "x", capturedAt: Date())
+            XCTFail("expected parse_unavailable to throw")
+        } catch let error as ServerParseError {
+            XCTAssertEqual(error, .unavailable)
+        }
+
+        transport.enqueue(
+            status: 502,
+            jsonBody: #"{"error":{"code":"parse_failed","message":"the model failed"}}"#
+        )
+        do {
+            _ = try await client.parseReceiptText(ocrRawText: "x", capturedAt: Date())
+            XCTFail("expected parse_failed to throw")
+        } catch let error as ServerParseError {
+            XCTAssertEqual(error, .failed)
+        }
+    }
+
+    /// Anything else stays an APIError - a 401 must still tear the session
+    /// down rather than being swallowed as "the parser is busy".
+    func testAnUnrelatedParseFailureIsStillAnAPIError() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 401, jsonBody: #"{"error":{"code":"unauthorized","message":"nope"}}"#)
+
+        do {
+            _ = try await client.parseReceiptText(ocrRawText: "x", capturedAt: Date())
+            XCTFail("expected a session rejection")
+        } catch let error as APIError {
+            guard case .sessionRejected = error else {
+                return XCTFail("expected sessionRejected, got \(error)")
+            }
+        }
+        XCTAssertEqual(sessionRejections, 1)
     }
 
     func testRestoreReceiptPostsWithNoBodyToTheRestoreRoute() async throws {

@@ -27,7 +27,12 @@ final class StubKeptAPI: KeptAPI {
     var uploadImageHandler: ((_ target: UploadTarget, _ data: Data, _ contentType: ImageUploadContentType) async throws -> Void)?
     var createReceiptHandler: ((_ request: CreateReceiptRequest) async throws -> Receipt)?
     var confirmReceiptHandler: ((_ id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt)?
-    var quickConfirmReceiptHandler: ((_ id: UUID) async throws -> Receipt)?
+    var quickConfirmReceiptHandler: ((_ id: UUID, _ request: QuickConfirmRequest) async throws -> Receipt)?
+    /// POST /api/receipts/parse (2026-09-01). Unstubbed by default: the
+    /// capture path fires it in the background and swallows every failure,
+    /// so an UnstubbedCall here is the correct "the server said nothing"
+    /// answer for every test that is not about the second opinion.
+    var parseReceiptTextHandler: ((_ ocrRawText: String, _ capturedAt: Date) async throws -> ServerParseResult)?
     var restoreReceiptHandler: ((_ id: UUID) async throws -> Receipt)?
     var fetchProfileHandler: (() async throws -> Profile)?
     var deleteReceiptHandler: ((_ id: UUID) async throws -> Void)?
@@ -51,7 +56,8 @@ final class StubKeptAPI: KeptAPI {
     private var recordedReplaceReceiptImageCalls: [(receiptId: UUID, page: Int, objectKey: String, sha256: String)] = []
     private var recordedCreateReceiptCalls: [CreateReceiptRequest] = []
     private var recordedConfirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] = []
-    private var recordedQuickConfirmReceiptCalls: [UUID] = []
+    private var recordedQuickConfirmReceiptCalls: [(id: UUID, request: QuickConfirmRequest)] = []
+    private var recordedParseReceiptTextCalls: [(ocrRawText: String, capturedAt: Date)] = []
     private var recordedRestoreReceiptCalls: [UUID] = []
     private var recordedFetchProfileCalls = 0
     private var recordedDeleteReceiptCalls: [UUID] = []
@@ -97,7 +103,11 @@ final class StubKeptAPI: KeptAPI {
         callLock.withLock { recordedConfirmReceiptCalls }
     }
 
-    var quickConfirmReceiptCalls: [UUID] {
+    var parseReceiptTextCalls: [(ocrRawText: String, capturedAt: Date)] {
+        callLock.withLock { recordedParseReceiptTextCalls }
+    }
+
+    var quickConfirmReceiptCalls: [(id: UUID, request: QuickConfirmRequest)] {
         callLock.withLock { recordedQuickConfirmReceiptCalls }
     }
 
@@ -211,10 +221,16 @@ final class StubKeptAPI: KeptAPI {
         return try await confirmReceiptHandler(id, request)
     }
 
-    func quickConfirmReceipt(id: UUID) async throws -> Receipt {
-        callLock.withLock { recordedQuickConfirmReceiptCalls.append(id) }
+    func quickConfirmReceipt(id: UUID, _ request: QuickConfirmRequest) async throws -> Receipt {
+        callLock.withLock { recordedQuickConfirmReceiptCalls.append((id, request)) }
         guard let quickConfirmReceiptHandler else { throw UnstubbedCall(endpoint: "quickConfirmReceipt") }
-        return try await quickConfirmReceiptHandler(id)
+        return try await quickConfirmReceiptHandler(id, request)
+    }
+
+    func parseReceiptText(ocrRawText: String, capturedAt: Date) async throws -> ServerParseResult {
+        callLock.withLock { recordedParseReceiptTextCalls.append((ocrRawText, capturedAt)) }
+        guard let parseReceiptTextHandler else { throw UnstubbedCall(endpoint: "parseReceiptText") }
+        return try await parseReceiptTextHandler(ocrRawText, capturedAt)
     }
 
     func restoreReceipt(id: UUID) async throws -> Receipt {

@@ -66,7 +66,15 @@ struct VisionReceiptTextRecognizer: ReceiptTextRecognizer {
 
         // Rows as printed, not fragments as recognized: this is what lets
         // the stored raw text keep "Subtotal 13.50" together for a future
-        // re-parse, and the parser assembles again anyway (stable).
-        return RecognizedText(lines: ReceiptRowAssembler.assembleRows(lines))
+        // re-parse.
+        //
+        // To a FIXED POINT since 2026-09-01. One pass is not idempotent
+        // (ReceiptRowAssembler.assembledToFixedPoint carries the reasoning
+        // and the receipt that proved it), so this line used to hand the
+        // server one-pass text while the parser read two-pass text - the
+        // stored `ocr_raw_text` the LLM re-parses had orphaned amount-only
+        // lines on 16 of the 130 live receipts. Assembling to a fixed point
+        // here makes the text the server sees the text this device read.
+        return RecognizedText(lines: ReceiptRowAssembler.assembledToFixedPoint(lines))
     }
 }

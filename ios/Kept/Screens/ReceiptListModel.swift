@@ -234,6 +234,12 @@ final class ReceiptListModel: ObservableObject {
     func setSort(_ sort: ReceiptQuery.Sort) async {
         var pending = query
         pending.sort = sort
+        // The new key's own natural direction, not the previous key's
+        // (ReceiptQuery.Sort.naturalOrder states why): picking "Vendor"
+        // off a date sort used to inherit "newest first" and serve the
+        // alphabet backwards. One request either way - order travels with
+        // the sort in the same `apply`, so this never fetches twice.
+        pending.order = sort.naturalOrder
         await apply(pending, logging: .listSorted)
     }
 
@@ -346,22 +352,26 @@ final class ReceiptListModel: ObservableObject {
         actionError = nil
     }
 
-    /// Swipe-to-confirm's "quick confirm": accepts the row's already-stored
-    /// values as final - see `KeptAPI.quickConfirmReceipt`'s doc comment
-    /// for why this is its own request shape, never a synthesized
-    /// `ConfirmReceiptRequest` - and reloads the list the same way every
-    /// mutation here does. Never offered by the view unless
-    /// `receipt.totalCents` (the RAW stored field) is already non-nil; see
-    /// HomeView's own `canQuickConfirm` for why that must be checked
-    /// instead of `displayTotalCents`. `confirm_saved` is the closest fit
-    /// in the server's fixed vocabulary (server/src/domain/userEvents.ts)
-    /// - a receipt was confirmed and saved, which is exactly what
-    /// happened, whichever screen it happened from; there is no separate
-    /// action name for "confirmed without opening the form" to invent one
-    /// for, per the brief's own rule.
+    /// Swipe-to-confirm's "quick confirm": saves **what the row was
+    /// showing** as final - the served §7.3 merge, which is what
+    /// `ReceiptDisplay` renders and therefore what the person actually
+    /// looked at before swiping (2026-09-01; before that this sent
+    /// `status` alone and saved the stored column instead, so a row reading
+    /// `JIMMY THE GREEK` confirmed as `In Store 392`). See
+    /// `QuickConfirmRequest` for why absent keys, not nulls. Reloads the
+    /// list the same way every mutation here does.
+    ///
+    /// Offered by the view whenever `receipt.canQuickConfirm`
+    /// (ReceiptDisplay.swift) - a VISIBLE total, since this request now
+    /// sends that total and so satisfies the server's own check on its own.
+    /// `confirm_saved` is the closest fit in the server's fixed vocabulary
+    /// (server/src/domain/userEvents.ts) - a receipt was confirmed and
+    /// saved, which is exactly what happened, whichever screen it happened
+    /// from; there is no separate action name for "confirmed without
+    /// opening the form" to invent one for, per the brief's own rule.
     func quickConfirmReceipt(_ receipt: Receipt) async {
         do {
-            _ = try await api.quickConfirmReceipt(id: receipt.id)
+            _ = try await api.quickConfirmReceipt(id: receipt.id, QuickConfirmRequest(displaying: receipt))
             eventLogger.log(.confirmSaved, receiptId: receipt.id)
             await loadFirstPage()
         } catch {

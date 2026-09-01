@@ -2,12 +2,10 @@ import SwiftUI
 
 /// The confirm screen (spec §7.2, §10A.1) - the heart of the app. The
 /// scanned image up top for checking numbers against paper, the total as
-/// the loudest thing on screen, every OCR suggestion amber until touched,
-/// and a save that stays disabled - with the reason stated - until there
-/// is a valid total.
+/// the loudest thing on screen, and a save that stays disabled - with the
+/// reason stated - until there is a valid total.
 ///
-/// The same screen edits an already-confirmed receipt (`purpose == .edit`)
-/// with nothing amber on it: the values are the person's own.
+/// The same screen edits an already-confirmed receipt (`purpose == .edit`).
 ///
 /// This view renders and reports touches; every decision lives in
 /// ConfirmReceiptModel, where it is tested without a camera.
@@ -32,11 +30,20 @@ struct ConfirmReceiptView: View {
     var api: (any KeptAPI)? = nil
     let onSaved: () async -> Void
     let onSetAside: () async -> Void
+    /// Runs after the receipt is deleted from this form (2026-09-01),
+    /// before whatever presented it goes away. Nil means the caller offers
+    /// no Delete here - the capture-time confirm, which has no server row
+    /// to delete, and the UI-test harness. A server-backed caller that
+    /// wants the affordance has to say where control goes afterwards,
+    /// which is why this is a parameter rather than something the form
+    /// decides on its own.
+    var onDeleted: (() async -> Void)? = nil
 
     @FocusState private var focusedField: ConfirmReceiptModel.EditableField?
     @State private var showZoomedImage = false
     /// Non-nil while a proposal #8 match is open for comparison.
     @State private var openedDuplicateMatch: Receipt?
+    @State private var confirmingDelete = false
 
     var body: some View {
         Form {
@@ -61,12 +68,55 @@ struct ConfirmReceiptView: View {
         .navigationTitle(model.screenTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // Same control, same place, same words as the detail screen's
+            // (ReceiptDetailView) - the queue reached a pending receipt
+            // with no way to bin it, and the fix is the affordance the
+            // other route already had, not a second design for it.
+            if showsDelete {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(role: .destructive) {
+                        confirmingDelete = true
+                    } label: {
+                        Label("Delete receipt", systemImage: "trash")
+                    }
+                    .disabled(model.isDeleting)
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button(model.dismissLabel) {
                     logDeferralIfConfirming()
                     Task { await onSetAside() }
                 }
             }
+        }
+        // Verbatim the detail screen's dialog, down to the message: one
+        // delete, one set of words about what it does. It must keep saying
+        // the record is kept for retention (spec §10B) - it is a
+        // tombstone, not an erase.
+        .confirmationDialog(
+            "Delete this receipt?",
+            isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete receipt", role: .destructive) {
+                Task { await deleteReceipt() }
+            }
+            Button("Keep it", role: .cancel) {}
+        } message: {
+            Text("It disappears from your list and every future export. The record and its image stay stored for tax retention - they aren't erased - and this can't be undone from inside the app.")
+        }
+        .alert(
+            "Your receipt was not deleted",
+            isPresented: Binding(
+                get: { model.deleteError != nil },
+                set: { if !$0 { model.clearDeleteError() } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                model.clearDeleteError()
+            }
+        } message: {
+            Text(model.deleteError ?? "")
         }
         .task {
             // Only for a server-backed form. A capture-time confirm is
@@ -121,8 +171,10 @@ struct ConfirmReceiptView: View {
             model.checkForPossibleDuplicates()
         }
         .onChange(of: focusedField) { oldFocus, newFocus in
-            // Focusing a field is looking at it: the amber clears whether
-            // or not the person then edits (spec §10A.1).
+            // Focusing a field is looking at it, and a field that has been
+            // looked at stops raising notes about itself (spec §10A.1) -
+            // the date and HST disagreement notes and the HST rate hint
+            // all read this, and did so before the row tint existed.
             if let suggestion = newFocus?.suggestion {
                 model.markTouched(suggestion)
             }
@@ -182,7 +234,7 @@ struct ConfirmReceiptView: View {
     private var duplicateWarningSection: some View {
         if !model.possibleDuplicates.isEmpty {
             Section {
-                // Amber, never red, and phrased as a prompt to look - the
+                // Quiet, never red, and phrased as a prompt to look - the
                 // same family as the arithmetic warning (proposal #8's own
                 // words) - because a false positive here is normal and
                 // cheap to dismiss (two identical coffees on one Tuesday),
@@ -194,7 +246,7 @@ struct ConfirmReceiptView: View {
                     systemImage: "exclamationmark.triangle"
                 )
                 .font(.footnote)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.secondary)
                 ForEach(model.possibleDuplicates) { match in
                     Button {
                         openedDuplicateMatch = match
@@ -214,6 +266,26 @@ struct ConfirmReceiptView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Delete (2026-09-01)
+
+    /// Both halves have to be true: the model has a server row to delete
+    /// (`canDelete`), and whoever presented this form said where control
+    /// goes once it is gone. A capture-time confirm fails both.
+    private var showsDelete: Bool {
+        model.canDelete && onDeleted != nil
+    }
+
+    /// `receipt_deleted` is logged here rather than inside the model for
+    /// the same reason every other event on this screen is: the model is
+    /// deliberately network- and telemetry-free, and this view is the one
+    /// that already holds the EventLogger. It fires only on a real
+    /// success, so a failed delete never reports one.
+    private func deleteReceipt() async {
+        guard await model.delete() else { return }
+        eventLogger.log(.receiptDeleted, receiptId: model.receiptId)
+        await onDeleted?()
     }
 
     // MARK: - Vendor defaults (proposal #2, 2026-08-28)
@@ -319,8 +391,21 @@ struct ConfirmReceiptView: View {
                         .focused($focusedField, equals: .total)
                         .accessibilityIdentifier("field.Total")
                 }
+                if let withheldNote = model.withheldAmountNote {
+                    // A stated absence with its reason (2026-09-01): the
+                    // amounts read off this receipt could not all be true,
+                    // so the total was not prefilled at all. Same quiet
+                    // treatment as the arithmetic warning below - this is
+                    // a prompt to look at the paper, not an error - but a
+                    // different fact from it: that one is about numbers a
+                    // person typed, this one about a number nobody did.
+                    Label(withheldNote, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("note.withheldAmounts")
+                }
                 if model.showsArithmeticWarning {
-                    // Amber, not red, and inside the card: a prompt to
+                    // Quiet, not red, and inside the card: a prompt to
                     // look, not an error - plenty of legitimate receipts
                     // do not reconcile (spec §7.2, §10A.1). Four
                     // components now feed the check (2026-08-28: tip and
@@ -331,12 +416,11 @@ struct ConfirmReceiptView: View {
                         systemImage: "exclamationmark.triangle"
                     )
                     .font(.footnote)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.secondary)
                 }
                 derivedAmountAffordances
             }
             .padding(.vertical, 6)
-            .listRowBackground(suggestionBackground(for: .total))
         }
     }
 
@@ -366,6 +450,19 @@ struct ConfirmReceiptView: View {
                 model.applyReconciliationDifference(into: .otherFees)
             }
         }
+        // The server's second opinion, where it disagrees with an amount
+        // already on screen (2026-09-01). Offered, never applied: a number
+        // changing under someone's eyes while they read a receipt is the
+        // one behaviour this screen must not have. Same labelled-not-bare
+        // button as proposal #1's fills, for the same stated reason.
+        ForEach(model.serverAmountAlternatives) { alternative in
+            derivedAmountButton(
+                model.serverAlternativeLabel(alternative),
+                identifier: "serverAlternative.\(alternative.id)"
+            ) {
+                model.applyServerAlternative(alternative)
+            }
+        }
     }
 
     /// One button shape for both proposal #1 affordances, so the labelled-
@@ -387,11 +484,12 @@ struct ConfirmReceiptView: View {
     private var detailFieldsSection: some View {
         Section {
             // Date: always prefilled (parsed or capture-day fallback), so
-            // it participates in the amber marking. DatePicker taps don't
-            // move focus, so the row clears its tint on any interaction.
-            // The picker is pinned to the same UTC frame as the parse and
-            // format around it - unpinned, it shows the previous day west
-            // of Greenwich and saves the next day when "corrected".
+            // it participates in the reviewed/unreviewed bookkeeping.
+            // DatePicker taps don't move focus, so the row reports its own
+            // interaction below. The picker is pinned to the same UTC
+            // frame as the parse and format around it - unpinned, it shows
+            // the previous day west of Greenwich and saves the next day
+            // when "corrected".
             VStack(alignment: .leading, spacing: 4) {
                 DatePicker("Date", selection: $model.purchasedDate, displayedComponents: .date)
                     .receiptDatePickerPin()
@@ -401,21 +499,20 @@ struct ConfirmReceiptView: View {
                     // rather than passed off as something read from paper.
                     Text("No date was found on the receipt - this is the day it was scanned.")
                         .font(.caption2)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.secondary)
                 }
                 if model.showsDateDisagreementNote {
                     // The two parsers read different dates off the same
                     // text (§7.3) - free signal on the field that decides
                     // the fiscal year. Same treatment as the arithmetic
-                    // warning: amber, inside the field, never red - a
+                    // warning: quiet, inside the field, never red - a
                     // prompt to look, not a rule. Touching the date clears
-                    // this with the tint.
+                    // it: a human has had their look.
                     DisagreementNote(
                         message: "The date was read two different ways from this receipt. Worth a look."
                     )
                 }
             }
-            .listRowBackground(suggestionBackground(for: .date))
             .simultaneousGesture(TapGesture().onEnded {
                 model.markTouched(.date)
             })
@@ -425,9 +522,10 @@ struct ConfirmReceiptView: View {
             }
 
             // Vendor is both a suggestion row and a reusable-value row
-            // (2026-08-28): it carried the amber treatment before it ever
-            // had a menu, and the composed ReusableValueFieldRow keeps
-            // both rather than choosing one at the other's expense.
+            // (2026-08-28): the parser can prefill it AND the person's own
+            // past vendors are offered on it, which is why it states an
+            // absence as "Not found" where category and payment method say
+            // "None".
             ReusableValueFieldRow(
                 label: "Vendor",
                 text: $model.vendorText,
@@ -435,7 +533,6 @@ struct ConfirmReceiptView: View {
                 focus: $focusedField,
                 pastValues: options.options.vendors,
                 placeholder: "Not found",
-                isUnreviewed: model.isUnreviewed(.vendor),
                 onReuse: { eventLogger.log(.optionReused, field: .vendor, receiptId: model.receiptId) }
             )
             SuggestedFieldRow(
@@ -443,7 +540,6 @@ struct ConfirmReceiptView: View {
                 text: $model.hstText,
                 field: .hst,
                 focus: $focusedField,
-                isUnreviewed: model.isUnreviewed(.hst),
                 moneyInput: model.hstInput,
                 // The two parsers produced different HST amounts off the
                 // same text (§7.3, 2026-08-28) - free signal on the input
@@ -468,7 +564,6 @@ struct ConfirmReceiptView: View {
                 text: $model.subtotalText,
                 field: .subtotal,
                 focus: $focusedField,
-                isUnreviewed: model.isUnreviewed(.subtotal),
                 moneyInput: model.subtotalInput
             )
             SuggestedFieldRow(
@@ -476,22 +571,17 @@ struct ConfirmReceiptView: View {
                 text: $model.tipText,
                 field: .tip,
                 focus: $focusedField,
-                isUnreviewed: model.isUnreviewed(.tip),
                 moneyInput: model.tipInput
             )
-            // Other fees never starts amber from a parser (§6: no
-            // heuristic or LLM can match a residual with no consistent
-            // printed label) - but it CAN go amber from a proposal #1
-            // derived fill or reconciliation split (2026-08-28), so this
-            // reads the model exactly like every field above it rather
-            // than hard-coding false the way it used to when no source of
-            // amber existed for this field at all.
+            // Other fees is never suggested by a parser (§6: no heuristic
+            // or LLM can match a residual with no consistent printed
+            // label) - it is only ever filled by hand or by a proposal #1
+            // derived fill.
             SuggestedFieldRow(
                 label: "Other fees",
                 text: $model.otherFeesText,
                 field: .otherFees,
                 focus: $focusedField,
-                isUnreviewed: model.isUnreviewed(.otherFees),
                 moneyInput: model.otherFeesInput
             )
         }
@@ -502,17 +592,15 @@ struct ConfirmReceiptView: View {
     private var optionalFieldsSection: some View {
         Section {
             // Category and payment method carry no OCR suggestion, but
-            // either can go amber from a proposal #2 vendor default
-            // (2026-08-28) - same isUnreviewed wiring as every other
-            // suggestible field now, in place of the permanent false these
-            // two carried before a source of amber existed for them.
+            // either can be prefilled from a proposal #2 vendor default
+            // (2026-08-28) - identical rows, deliberately: whatever one of
+            // them gains, the other gains in the same edit.
             ReusableValueFieldRow(
                 label: "Category",
                 text: $model.categoryText,
                 field: .category,
                 focus: $focusedField,
                 pastValues: options.options.categories,
-                isUnreviewed: model.isUnreviewed(.category),
                 onReuse: { eventLogger.log(.optionReused, field: .category, receiptId: model.receiptId) }
             )
             ReusableValueFieldRow(
@@ -521,7 +609,6 @@ struct ConfirmReceiptView: View {
                 field: .paymentMethod,
                 focus: $focusedField,
                 pastValues: options.options.paymentMethods,
-                isUnreviewed: model.isUnreviewed(.paymentMethod),
                 onReuse: { eventLogger.log(.optionReused, field: .paymentMethod, receiptId: model.receiptId) }
             )
             TextField("Notes", text: $model.notesText, axis: .vertical)
@@ -574,16 +661,4 @@ struct ConfirmReceiptView: View {
         .listRowSeparator(.hidden)
     }
 
-    // MARK: - Amber
-
-    private func suggestionBackground(for field: ConfirmReceiptModel.SuggestedField) -> Color? {
-        model.isUnreviewed(field) ? Color.suggestionAmber : nil
-    }
-}
-
-extension Color {
-    /// The one amber used for every "unreviewed suggestion" marking - the
-    /// same hue family as the pending badge, because both mean "a human
-    /// has not looked yet".
-    static let suggestionAmber = Color.orange.opacity(0.16)
 }

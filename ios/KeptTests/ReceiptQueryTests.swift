@@ -30,6 +30,32 @@ final class ReceiptQueryTests: XCTestCase {
         XCTAssertFalse(ReceiptQuery.default.isFiltering)
     }
 
+    /// Every sort key says what its two directions mean in its own terms,
+    /// and opens on the direction a person means by picking it. Vendor is
+    /// the alphabetical odd one out on both counts (2026-09-01).
+    func testEverySortKeyNamesItsDirectionsAndOpensOnTheRightOne() {
+        XCTAssertEqual(ReceiptQuery.Sort.vendor.orderLabel(.asc), "A → Z")
+        XCTAssertEqual(ReceiptQuery.Sort.vendor.orderLabel(.desc), "Z → A")
+        XCTAssertEqual(ReceiptQuery.Sort.vendor.naturalOrder, .asc)
+
+        XCTAssertEqual(ReceiptQuery.Sort.purchasedAt.orderLabel(.desc), "Newest first")
+        XCTAssertEqual(ReceiptQuery.Sort.total.orderLabel(.desc), "Largest first")
+        for sort in [ReceiptQuery.Sort.purchasedAt, .capturedAt, .total] {
+            XCTAssertEqual(sort.naturalOrder, .desc, "\(sort) opens on the wrong end")
+        }
+    }
+
+    /// The menu offers exactly the four keys the server accepts - a fifth
+    /// case added here without a server `sort` value behind it would 400
+    /// the list rather than fail visibly.
+    func testTheSortMenuOffersEverySortKey() {
+        XCTAssertEqual(
+            ReceiptQuery.Sort.allCases.map(\.rawValue),
+            ["purchasedAt", "capturedAt", "total", "vendor"]
+        )
+        XCTAssertEqual(ReceiptQuery.Sort.vendor.label, "Vendor")
+    }
+
     func testEveryFilterIsOmittedRatherThanSentEmpty() {
         // The server's list schema is strict: `q`, `category` and
         // `paymentMethod` all have a minimum length of 1, so an unset

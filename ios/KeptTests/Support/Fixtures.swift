@@ -62,15 +62,21 @@ enum Fixtures {
         hstCents: Int? = nil,
         hstDisagreement: Bool = false,
         subtotalCents: Int? = nil,
-        tipCents: Int? = nil
+        tipCents: Int? = nil,
+        otherFeesCents: Int? = nil,
+        suggestedPaymentMethod: String? = nil,
+        totalWithheld: Bool = false,
+        subtotalWithheld: Bool = false
     ) -> MergedSuggestions {
         MergedSuggestions(
             vendor: MergedSuggestion(value: vendor),
             purchasedAt: MergedDateSuggestion(value: purchasedAt, disagreement: dateDisagreement),
-            totalCents: MergedSuggestion(value: totalCents),
+            totalCents: MergedSuggestion(value: totalCents, withheld: totalWithheld),
             hstCents: MergedAmountSuggestion(value: hstCents, disagreement: hstDisagreement),
-            subtotalCents: MergedSuggestion(value: subtotalCents),
-            tipCents: MergedSuggestion(value: tipCents)
+            subtotalCents: MergedSuggestion(value: subtotalCents, withheld: subtotalWithheld),
+            tipCents: MergedSuggestion(value: tipCents),
+            otherFeesCents: MergedSuggestion(value: otherFeesCents),
+            paymentMethod: MergedSuggestion(value: suggestedPaymentMethod)
         )
     }
 

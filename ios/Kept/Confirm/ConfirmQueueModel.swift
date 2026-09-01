@@ -82,6 +82,21 @@ final class ConfirmQueueModel: ObservableObject {
 
     /// Called by the view after the current form saves successfully.
     func advanceAfterSave() async {
+        await advanceAfterHandling()
+    }
+
+    /// Called by the view after the current form's receipt is deleted
+    /// (2026-09-01). Identical bookkeeping to a save, deliberately: the
+    /// row is no longer pending either way, so `loadNext()` will not
+    /// re-offer it, and the person dealt with it - which is the only thing
+    /// `handledCount` means. Two names over one implementation because the
+    /// call sites mean different things and should read that way; the
+    /// behaviour must not be able to drift between them.
+    func advanceAfterDelete() async {
+        await advanceAfterHandling()
+    }
+
+    private func advanceAfterHandling() async {
         handledCount += 1
         await loadNext()
     }

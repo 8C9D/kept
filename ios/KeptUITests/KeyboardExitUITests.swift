@@ -37,6 +37,26 @@ final class KeyboardExitUITests: XCTestCase {
         app.buttons["keyboard.done"]
     }
 
+    /// The bar is a plain view, not a toolbar (KeyboardDoneBar's own doc
+    /// comment says why), so it is found by identifier across every
+    /// element type rather than through `app.toolbars`.
+    private func doneBar(in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "keyboard.doneBar").firstMatch
+    }
+
+    /// Walks the form the way a person does: focusing each money field in
+    /// turn scrolls the next one up, which is what eventually brings the
+    /// notes field - the only one below the fold - into reach.
+    private func focus(_ field: String, in app: XCUIApplication) -> XCUIElement {
+        let textField = app.textFields["field.\(field)"].firstMatch
+        let target = textField.waitForExistence(timeout: 5)
+            ? textField
+            : app.textViews["field.\(field)"].firstMatch
+        XCTAssertTrue(target.waitForExistence(timeout: 5), "\(field) is not on the confirm screen")
+        target.tap()
+        return target
+    }
+
     /// The three decimal pads have no return key and notes' return key
     /// inserts a newline, so each of these four must raise a Done button
     /// a person can press.
@@ -117,6 +137,53 @@ final class KeyboardExitUITests: XCTestCase {
             doneButton(in: app).waitForExistence(timeout: 2),
             "Vendor's keyboard has a return key and must not also carry a Done bar"
         )
+    }
+
+    /// Where the bar sits, not just whether it can be pressed
+    /// (2026-09-01). The owner's report was that Done was on the number pad
+    /// rather than above it: on iOS 26 a `UIToolbar` serving as an
+    /// `inputAccessoryView` paints no background at all and anchors its
+    /// item to the bottom of the reserved band, so the Done capsule's
+    /// bottom edge landed within a point of the first row of keys, with
+    /// the form's own content showing through the band around it.
+    ///
+    /// The band itself was never in the wrong place - which is exactly why
+    /// this needed a frame assertion rather than another `isHittable` one.
+    func testTheDoneBarSitsAboveTheKeyboardAndNotOnIt() {
+        let app = launchConfirmScreen()
+
+        for field in ["Total", "HST", "Subtotal", "Notes"] {
+            _ = focus(field, in: app)
+            let bar = doneBar(in: app)
+            XCTAssertTrue(bar.waitForExistence(timeout: 5), "\(field) raised no Done bar")
+            let keyboard = app.keyboards.element
+            XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "\(field) raised no keyboard")
+
+            XCTAssertLessThanOrEqual(
+                bar.frame.maxY,
+                keyboard.frame.minY,
+                "\(field): the Done bar overlaps the keyboard"
+            )
+            XCTAssertLessThanOrEqual(
+                doneButton(in: app).frame.maxY,
+                keyboard.frame.minY,
+                "\(field): the Done button itself is drawn over the keyboard"
+            )
+
+            // And flush, not floating: no dead band between the two. Only
+            // asserted for the decimal pads, because `app.keyboards`
+            // reports the key plane alone - the alphabetic keyboard's
+            // prediction row is a sibling element, so the notes field
+            // legitimately measures a bar's height of daylight that is not
+            // daylight at all.
+            if field != "Notes" {
+                XCTAssertLessThan(
+                    keyboard.frame.minY - bar.frame.maxY,
+                    bar.frame.height,
+                    "\(field): the Done bar floats a whole bar's height above the pad"
+                )
+            }
+        }
     }
 
     /// The negative control (verification item 2). Launched with the bar

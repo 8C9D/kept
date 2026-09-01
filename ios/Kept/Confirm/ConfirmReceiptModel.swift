@@ -14,9 +14,13 @@ struct ConfirmSuggestionSet {
     let hstCents: Int?
     let subtotalCents: Int?
     /// Heuristic-only tip guess, same rule as every other amount here: no
-    /// LLM fallthrough (§7.3, extended 2026-08-28). Deliberately no
-    /// `otherFeesCents` counterpart - nothing ever suggests it (§6).
+    /// LLM fallthrough (§7.3, extended 2026-08-28).
     let tipCents: Int?
+    /// Added 2026-09-01, when 130 real receipts showed the fee labels are
+    /// consistent enough to read (`ReceiptSuggestions.otherFeesCents`) and
+    /// that the card type is printed on four slips in five.
+    let otherFeesCents: Int?
+    let paymentMethod: String?
     /// Both parsers read a date off the same text and they differ (§7.3).
     /// Only the server merge can raise this.
     let dateDisagreement: Bool
@@ -24,29 +28,86 @@ struct ConfirmSuggestionSet {
     /// 2026-08-28). Only the server merge can raise this - the served
     /// `hstCents` value is unchanged, heuristic-only either way.
     let hstDisagreement: Bool
+    /// Which amounts the arithmetic-sanity rule refused to prefill
+    /// (2026-09-01, `ReceiptArithmetic.validateSuggestedAmounts`). The
+    /// corresponding property above is already nil; this says WHY, so the
+    /// form can tell "nothing was read" from "what was read did not add
+    /// up" and say the second one out loud.
+    let withheldAmounts: Set<WithheldAmountField>
 
+    /// The served §7.3 merge. The server runs the same sanity rule on its
+    /// own side and flags what it withheld; this re-runs it locally
+    /// regardless - the check is cheap, the server may be an older build,
+    /// and a suggestion that reaches the form is one this client is
+    /// answerable for.
     init(merged: MergedSuggestions) {
+        let served = Self.withhold(
+            subtotalCents: merged.subtotalCents.value,
+            hstCents: merged.hstCents.value,
+            tipCents: merged.tipCents.value,
+            otherFeesCents: merged.otherFeesCents?.value,
+            totalCents: merged.totalCents.value
+        )
+        var withheld = served
+        if merged.totalCents.withheld { withheld.insert(.totalCents) }
+        if merged.subtotalCents.withheld { withheld.insert(.subtotalCents) }
+        withheldAmounts = withheld
+
         vendor = merged.vendor.value
         purchasedAt = merged.purchasedAt.value
-        totalCents = merged.totalCents.value
+        totalCents = withheld.contains(.totalCents) ? nil : merged.totalCents.value
         hstCents = merged.hstCents.value
-        subtotalCents = merged.subtotalCents.value
+        subtotalCents = withheld.contains(.subtotalCents) ? nil : merged.subtotalCents.value
         tipCents = merged.tipCents.value
+        otherFeesCents = merged.otherFeesCents?.value
+        paymentMethod = merged.paymentMethod?.value
         dateDisagreement = merged.purchasedAt.disagreement
         hstDisagreement = merged.hstCents.disagreement
     }
 
+    /// The on-device parse alone (a capture-time confirm), or - since
+    /// 2026-09-01 - the server's own LLM answer arriving over the top of it
+    /// (`ConfirmReceiptModel.applyServerSuggestions`). Both go through the
+    /// same sanity rule for the same reason: a set of amounts that cannot
+    /// be true is not made truer by which parser produced it.
     init(parse: ReceiptSuggestions) {
+        let withheld = Self.withhold(
+            subtotalCents: parse.subtotalCents,
+            hstCents: parse.hstCents,
+            tipCents: parse.tipCents,
+            otherFeesCents: parse.otherFeesCents,
+            totalCents: parse.totalCents
+        )
+        withheldAmounts = withheld
+
         vendor = parse.vendor
         purchasedAt = parse.purchasedAt
-        totalCents = parse.totalCents
+        totalCents = withheld.contains(.totalCents) ? nil : parse.totalCents
         hstCents = parse.hstCents
-        subtotalCents = parse.subtotalCents
+        subtotalCents = withheld.contains(.subtotalCents) ? nil : parse.subtotalCents
         tipCents = parse.tipCents
+        otherFeesCents = parse.otherFeesCents
+        paymentMethod = parse.paymentMethod
         dateDisagreement = false
         // The on-device parse alone has no LLM counterpart to disagree
         // with - only the server merge can raise this flag.
         hstDisagreement = false
+    }
+
+    private static func withhold(
+        subtotalCents: Int?,
+        hstCents: Int?,
+        tipCents: Int?,
+        otherFeesCents: Int?,
+        totalCents: Int?
+    ) -> Set<WithheldAmountField> {
+        ReceiptArithmetic.validateSuggestedAmounts(
+            subtotalCents: subtotalCents,
+            hstCents: hstCents,
+            tipCents: tipCents,
+            otherFeesCents: otherFeesCents,
+            totalCents: totalCents
+        )
     }
 }
 
@@ -56,12 +117,13 @@ struct ConfirmSuggestionSet {
 /// is the product.
 ///
 /// The rules it owns:
-/// - every prefilled (suggested) value starts unreviewed - amber in the
-///   UI - and touching a field clears that permanently;
-/// - the header counter is how many suggestions remain unreviewed;
+/// - every prefilled (suggested) value starts unreviewed, and touching a
+///   field clears that permanently - which is what the inline notes and
+///   the save-time accept/override telemetry read (the row tint that also
+///   read it was removed 2026-09-01);
 /// - the arithmetic check warns, inside the total card, and never blocks;
 /// - a date the two parsers disagreed on carries an inline note with the
-///   arithmetic warning's treatment, cleared with the amber by touch;
+///   arithmetic warning's treatment, cleared by touching the field;
 /// - save is disabled until there is a valid total, with the reason
 ///   stated;
 /// - a valid save hands the confirmed fields to whichever save path built
@@ -74,28 +136,28 @@ struct ConfirmSuggestionSet {
 final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// Why this form is open. The one difference between the two: an edit
     /// shows a person their own confirmed values back, so nothing on it is
-    /// a machine suggestion and nothing starts amber (2026-08-26 field
+    /// a machine suggestion and nothing starts unreviewed (2026-08-26 field
     /// reduction: confirmed receipts became editable).
     enum Purpose: Equatable {
         case confirm
         case edit
     }
 
-    /// The fields that can carry an amber "unreviewed suggestion" marking.
+    /// The fields that can carry an "unreviewed suggestion" marking.
     /// Originally exactly the fields an OCR/LLM suggestion could prefill;
     /// widened 2026-08-28 to `otherFees`, `category` and `paymentMethod`,
-    /// which now carry the SAME marking from a different source - a
+    /// which then carried the SAME marking from a different source - a
     /// proposal #1 derived-amount fill (`otherFees`) or a proposal #2
-    /// vendor default (`category`, `paymentMethod`) - never from a parser.
-    /// §10A.1's rule was always general ("every prefilled field is
-    /// visually marked as a suggestion until touched"), not OCR-specific;
-    /// this enum just catches up to that. None of the three ever starts
-    /// amber at construction (unlike the original six, `otherFees`
-    /// included: §6, no heuristic or LLM can match a residual with no
-    /// consistent printed label) - they can only ever be inserted into
-    /// `unreviewedFields` later, by `applyDerivedFill()`,
-    /// `applyReconciliationDifference(into:)` or
-    /// `applyVendorDefaultIfAvailable(_:)`.
+    /// vendor default (`category`, `paymentMethod`). §10A.1's rule was
+    /// always general ("every prefilled field is visually marked as a
+    /// suggestion until touched"), not OCR-specific; this enum just caught
+    /// up to that.
+    ///
+    /// **2026-09-01:** `otherFees` and `paymentMethod` can now start
+    /// unreviewed at construction after all, because the parser learned to
+    /// read both off real paper (`ReceiptSuggestions`). `category` remains
+    /// the one field no parser will ever suggest - it is the person's own
+    /// vocabulary, and only a vendor default can prefill it.
     enum SuggestedField: CaseIterable {
         case total, date, vendor, hst, subtotal, tip
         case otherFees, category, paymentMethod
@@ -139,10 +201,10 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         }
 
         /// The suggestion this field carries, if any. Focusing a field is
-        /// looking at it, which clears that amber permanently (§10A.1).
+        /// looking at it, which marks it reviewed permanently (§10A.1).
         /// `otherFees`, `category` and `paymentMethod` map to their own
         /// SuggestedField cases too (2026-08-28): none of the three ever
-        /// starts amber from a parser, but each can gain the marking
+        /// starts unreviewed from a parser, but each can gain the marking
         /// later - `otherFees` from a proposal #1 derived fill, the other
         /// two from a proposal #2 vendor default - and this is the same
         /// focus-clears-it wiring every other suggested field already
@@ -211,16 +273,72 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 
     @Published private(set) var unreviewedFields: Set<SuggestedField>
     @Published private(set) var isSaving = false
+    /// True once a save has actually succeeded (2026-09-01). The screen is
+    /// on its way out at that point, and a late arrival - the server's
+    /// second-opinion parse landing after the person hit Save - must not
+    /// write into a form whose values are already durable.
+    @Published private(set) var hasSaved = false
     @Published private(set) var saveError: String?
+    @Published private(set) var isDeleting = false
+    /// Why a delete did not happen, when it did not - kept apart from
+    /// `saveError`, which belongs to the button below it, exactly the way
+    /// ReceiptDetailModel keeps its own delete failure out of its load
+    /// phase.
+    @Published private(set) var deleteError: String?
 
     /// True when no date was read off the paper and the prefill is the day
     /// of capture - the one suggestion that can be fabricated, so the view
     /// says so out loud instead of passing it off as parsed.
     let dateIsCaptureDayFallback: Bool
 
+    /// What to say when the arithmetic-sanity rule suppressed an amount
+    /// (2026-09-01) - nil when it suppressed nothing, which is the ordinary
+    /// case. Constant for the form's life; `withheldAmountNote` below is
+    /// what the view reads, and it goes quiet once the total is filled in,
+    /// because by then the note is describing a blank that no longer
+    /// exists.
+    private let withheldNoteText: String?
+
+    /// The note under the total card when a suggested amount was withheld.
+    /// A stated absence with a reason: "nothing was read" and "what was
+    /// read could not be true" are different facts about a blank field, and
+    /// only the second one tells a person to go back to the paper.
+    var withheldAmountNote: String? {
+        guard let withheldNoteText, totalText.isEmpty else { return nil }
+        return withheldNoteText
+    }
+
+    private static func withheldNote(for withheld: Set<WithheldAmountField>) -> String? {
+        if withheld.contains(.subtotalCents) && withheld.contains(.totalCents) {
+            return "The amounts read from this receipt didn't add up, so the total and subtotal were left blank - enter them from the paper."
+        }
+        if withheld.contains(.totalCents) {
+            return "The amounts read from this receipt didn't add up, so the total was left blank - enter it from the paper."
+        }
+        return nil
+    }
+
+    // MARK: - The server's second opinion (2026-09-01)
+
+    /// A money field where the server's parse disagrees with a value this
+    /// form already has - offered as a one-tap chip rather than applied,
+    /// because overwriting a number already on screen is exactly what a
+    /// person would not expect a background request to do.
+    struct ServerAmountAlternative: Equatable, Identifiable {
+        let field: DerivableMoneyField
+        let cents: Int
+
+        var id: String { "\(field)" }
+    }
+
+    /// Non-empty only after `applyServerSuggestions(_:)` found a
+    /// disagreement it refused to resolve on its own. Rendered as chips
+    /// under the total card.
+    @Published private(set) var serverAmountAlternatives: [ServerAmountAlternative] = []
+
     /// §7.3: the injected suggestion set says both parsers read a date and
     /// they differ. Constant for the form's life; what the screen shows
-    /// follows the amber (showsDateDisagreementNote).
+    /// follows the unreviewed flag (showsDateDisagreementNote).
     private let dateDisagreement: Bool
     /// §7.3: the injected suggestion set says both parsers produced an HST
     /// value and it differs (added 2026-08-28). Same shape as
@@ -246,20 +364,27 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     // three each inventing their own "was it accepted" question.
     private var suggestedFields: Set<SuggestedField>
     private var initialSuggestedTotalCents: Int?
-    private let initialSuggestedVendor: String?
+    /// `var`, not `let`, since 2026-09-01: the server's second opinion can
+    /// replace an untouched vendor prefill, and the accept/override report
+    /// must score the person against the value they were shown LAST.
+    private var initialSuggestedVendor: String?
     private var initialSuggestedHstCents: Int?
     private var initialSuggestedSubtotalCents: Int?
     private var initialSuggestedTipCents: Int?
-    /// No construction-time value: `otherFees` never carries a suggestion
-    /// at open (§6) - only `applyDerivedFill()` ever sets this, at the
+    /// Set at construction when the suggestion set carries a fee
+    /// (2026-09-01), and otherwise only by `applyDerivedFill()` at the
     /// moment it fills the field.
     private var initialSuggestedOtherFeesCents: Int?
-    private let initialSuggestedPurchasedAtIso: String
+    /// `var` for the same reason as `initialSuggestedVendor` above.
+    private var initialSuggestedPurchasedAtIso: String
     /// Set only by `applyVendorDefaultIfAvailable(_:)` (proposal #2) -
     /// nil until a default is actually applied, since category never
-    /// carries a suggestion at construction.
+    /// carries a suggestion at construction (and never will: it is the
+    /// person's own vocabulary, not something printed on paper).
     private var initialSuggestedCategory: String?
-    /// Same shape as `initialSuggestedCategory`, for payment method.
+    /// Payment method's baseline. Unlike category's, this CAN be set at
+    /// construction since 2026-09-01 - the card type is printed on most
+    /// slips and the parser reads it.
     private var initialSuggestedPaymentMethod: String?
 
     // MARK: - Field-edit counting (behavioural telemetry, 2026-08-28)
@@ -278,13 +403,21 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 
     /// What a text field held the moment it last gained focus - lets
     /// losing focus tell "the value changed" from "the person only
-    /// looked", the same distinction §10A.1's amber-clearing already
-    /// draws for suggestions, applied here to counting instead.
+    /// looked", the same distinction §10A.1's touch rule already draws
+    /// for suggestions, applied here to counting instead.
     private var focusSnapshots: [EditableField: String] = [:]
 
     /// Where the confirmed fields go on save. Injected by whoever built
     /// the model; the form's rules above are identical either way.
     private let saveAction: (ConfirmedReceiptFields) async throws -> Void
+
+    /// Binning this receipt without confirming it (2026-09-01). Injected
+    /// the same way `saveAction` and `duplicateCheckAction` are, so this
+    /// model still holds no `KeptAPI` of its own and stays testable with
+    /// no server (spec §10.2). Nil for a capture-time confirm: there is no
+    /// server row to delete yet, and the way to bin an unwanted scan
+    /// before it exists is to not save it.
+    private let deleteAction: (() async throws -> Void)?
 
     // MARK: - Possible duplicates (proposal #8, 2026-08-28)
 
@@ -362,7 +495,12 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
                     vendor: vendor,
                     excludeId: id
                 )) ?? []
-            }
+            },
+            // The same route ReceiptDetailModel.delete(id:) calls, so
+            // "delete" means one thing in this app: a soft delete, the row
+            // and its image kept for retention (spec §10B). Only the
+            // server-backed form gets it.
+            deleteAction: { try await api.deleteReceipt(id: id) }
         )
     }
 
@@ -404,7 +542,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// The values already on the record before any suggestion applies:
     /// the server row's fields for a stored receipt, or - capture-time -
     /// nothing but the capture day. A value only here was written by
-    /// something other than a parser, so it prefills without amber.
+    /// something other than a parser, so it prefills as already reviewed.
     private struct ExistingValues {
         var purchasedAt: String
         var vendor: String?
@@ -425,8 +563,8 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// prefill over the row's copy - the row's field values on a pending
     /// receipt are the capture-time heuristic snapshot, and the served
     /// merge supersedes them (§7.3) - with the row filling only fields no
-    /// suggestion covers. Exactly the suggested fields start amber; the
-    /// date is always amber (always prefilled - parsed, or the capture-day
+    /// suggestion covers. Exactly the suggested fields start unreviewed;
+    /// the date always does (always prefilled - parsed, or the capture-day
     /// fallback, which is additionally called out).
     private init(
         receiptId: UUID?,
@@ -437,7 +575,8 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         suggestions: ConfirmSuggestionSet?,
         existing: ExistingValues,
         saveAction: @escaping (ConfirmedReceiptFields) async throws -> Void,
-        duplicateCheckAction: ((_ purchasedAt: String, _ totalCents: Int, _ vendor: String?) async -> [Receipt])?
+        duplicateCheckAction: ((_ purchasedAt: String, _ totalCents: Int, _ vendor: String?) async -> [Receipt])?,
+        deleteAction: (() async throws -> Void)? = nil
     ) {
         self.receiptId = receiptId
         self.currency = currency
@@ -446,6 +585,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         self.ocrFailureNote = ocrFailureNote
         self.saveAction = saveAction
         self.duplicateCheckAction = duplicateCheckAction
+        self.deleteAction = deleteAction
 
         // Each "seed" is exactly what prefills the field (suggestion over
         // the row's own copy) - captured here, once, so it can also seed
@@ -466,12 +606,15 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         subtotalText = seedSubtotalCents.map(MoneyInput.text(fromCents:)) ?? ""
         let seedTipCents = suggestions?.tipCents ?? existing.tipCents
         tipText = seedTipCents.map(MoneyInput.text(fromCents:)) ?? ""
-        // No suggestion source exists for other fees (§6) - the row's own
-        // value is the only thing that can ever prefill it.
-        otherFeesText = existing.otherFeesCents
-            .map(MoneyInput.text(fromCents:)) ?? ""
+        // Other fees and payment method gained suggestion sources
+        // 2026-09-01 (ReceiptSuggestions' own comments carry the evidence
+        // that reversed the "no suggestion, deliberately" ruling); like
+        // every other field here, a suggestion outranks the row's copy.
+        let seedOtherFeesCents = suggestions?.otherFeesCents ?? existing.otherFeesCents
+        otherFeesText = seedOtherFeesCents.map(MoneyInput.text(fromCents:)) ?? ""
         categoryText = existing.category ?? ""
-        paymentMethodText = existing.paymentMethod ?? ""
+        let seedPaymentMethod = suggestions?.paymentMethod ?? existing.paymentMethod
+        paymentMethodText = seedPaymentMethod ?? ""
         notesText = existing.notes ?? ""
 
         initialSuggestedTotalCents = seedTotalCents
@@ -479,13 +622,16 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         initialSuggestedHstCents = seedHstCents
         initialSuggestedSubtotalCents = seedSubtotalCents
         initialSuggestedTipCents = seedTipCents
+        initialSuggestedOtherFeesCents = suggestions?.otherFeesCents == nil ? nil : seedOtherFeesCents
+        initialSuggestedPaymentMethod = suggestions?.paymentMethod == nil ? nil : seedPaymentMethod
         initialSuggestedPurchasedAtIso = seedPurchasedAtIso
+        withheldNoteText = Self.withheldNote(for: suggestions?.withheldAmounts ?? [])
 
         switch purpose {
         case .edit:
             // Every value on screen is the human's own, already confirmed
             // once. Nothing here is a machine suggestion, so nothing is
-            // amber and nothing claims a fabricated date.
+            // unreviewed and nothing claims a fabricated date.
             unreviewedFields = []
             suggestedFields = []
             dateIsCaptureDayFallback = false
@@ -499,6 +645,8 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
                 if suggestions.hstCents != nil { unreviewed.insert(.hst) }
                 if suggestions.subtotalCents != nil { unreviewed.insert(.subtotal) }
                 if suggestions.tipCents != nil { unreviewed.insert(.tip) }
+                if suggestions.otherFeesCents != nil { unreviewed.insert(.otherFees) }
+                if suggestions.paymentMethod != nil { unreviewed.insert(.paymentMethod) }
                 dateIsCaptureDayFallback = suggestions.purchasedAt == nil
                 dateDisagreement = suggestions.dateDisagreement
                 hstDisagreement = suggestions.hstDisagreement
@@ -522,30 +670,50 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 
     // MARK: - Reviewing
 
-    /// Touching a field clears its amber permanently (spec §10A.1); the
-    /// views call this on focus and on edit.
+    /// Touching a field marks it reviewed, permanently (spec §10A.1); the
+    /// views call this on focus and on edit. What that now drives is the
+    /// inline notes (date and HST disagreement, the HST rate hint), which
+    /// go quiet once a human has looked - the row tint it also used to
+    /// drive was removed 2026-09-01.
     func markTouched(_ field: SuggestedField) {
         unreviewedFields.remove(field)
+        touchedFields.insert(field)
     }
+
+    /// Which fields a human has actually put a finger on this session.
+    /// Distinct from `unreviewedFields`, which only ever held fields that
+    /// carried a SUGGESTION: a field nobody ever suggested anything for is
+    /// "not unreviewed" and "not touched" at the same time, and
+    /// `applyServerSuggestions(_:)` (2026-09-01) is the first caller that
+    /// has to tell those two apart before it writes anything.
+    private var touchedFields: Set<SuggestedField> = []
 
     func isUnreviewed(_ field: SuggestedField) -> Bool {
         unreviewedFields.contains(field)
     }
 
-    /// The header counter: how many suggestions nobody has looked at yet.
+    /// How many suggestions nobody has looked at yet. No longer on
+    /// screen (see `screenTitle`); kept as the single readable summary of
+    /// `unreviewedFields`, which the notes and the save-time telemetry
+    /// still run on and which the unit suite asserts against directly.
     var unreviewedCount: Int {
         unreviewedFields.count
     }
 
-    /// The navigation title: the unreviewed counter while confirming -
-    /// the whole point of the screen - and a plain name while editing,
-    /// where there is nothing machine-suggested left to count.
+    /// The navigation title: what the screen is, not a running count.
+    ///
+    /// It counted unreviewed suggestions until 2026-09-01 - "5 to check",
+    /// then "All checked" - alongside the amber row tint that the same
+    /// change removed. Both were the same idea, and the idea did not
+    /// survive real use: nearly every field on a scanned receipt arrives
+    /// prefilled, so the counter opened at five or six every single time
+    /// and counted down to a congratulation nobody asked for. The title
+    /// now says which of the two things this screen is doing, which is the
+    /// only thing about it a person cannot already see.
     var screenTitle: String {
         switch purpose {
-        case .edit:
-            return "Edit receipt"
-        case .confirm:
-            return unreviewedCount == 0 ? "All checked" : "\(unreviewedCount) to check"
+        case .edit: return "Edit receipt"
+        case .confirm: return "Confirm receipt"
         }
     }
 
@@ -561,7 +729,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 
     /// The date-disagreement note (spec §7.2, §10A.1): shown while the
     /// date is still unreviewed, gone the moment it is touched - the
-    /// amber and the note clear together, because touched means a human
+    /// note goes when the field is touched, because touched means a human
     /// looked and decided. No separate dismissal, nothing persisted.
     var showsDateDisagreementNote: Bool {
         dateDisagreement && isUnreviewed(.date)
@@ -577,11 +745,10 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// The HST rate-plausibility hint (proposal #7, 2026-08-28) - the live
     /// mirror of the server's `checkHstRatePlausibility`
     /// (ReceiptArithmetic.swift carries the full reasoning for the ±0.25pp
-    /// band and why it must never widen). Tied to the SAME amber/touched
+    /// band and why it must never widen). Tied to the SAME touched
     /// lifecycle `showsHstDisagreementNote` above already uses: shown
-    /// while HST is still unreviewed, gone the moment it is touched
-    /// (§10A.1's "cleared with the amber") - a person who has just looked
-    /// at the field has had their look. `centsOrNil` reads `.invalid` text
+    /// while HST is still unreviewed, gone the moment it is touched - a
+    /// person who has just looked at the field has had their look. `centsOrNil` reads `.invalid` text
     /// as absent, the same suppression `showsArithmeticWarning` already
     /// applies to garbage input, so this never fires over unparseable
     /// text.
@@ -635,8 +802,8 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     }
 
     /// The bookkeeping every LIVE suggestion source added 2026-08-28 shares
-    /// - amber until touched (`unreviewedFields`, exactly the construction-
-    /// time rule) and enrolled in the save-time accept/override report
+    /// - unreviewed until touched (`unreviewedFields`, exactly the
+    /// construction-time rule) and enrolled in the save-time accept/override report
     /// above (`suggestedFields`). Callers set the matching
     /// `initialSuggested*` storage themselves, immediately before calling
     /// this, since the type differs per field (Int? for the money fields,
@@ -663,8 +830,8 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     // MARK: - Field-edit counting (behavioural telemetry, 2026-08-28)
 
     /// Call when a text field gains keyboard focus - the view's
-    /// `.onChange(of: focusedField)` (already wired for the amber rule)
-    /// is where this is called from.
+    /// `.onChange(of: focusedField)` (already wired for the
+    /// touch-marks-it-reviewed rule) is where this is called from.
     func fieldDidGainFocus(_ field: EditableField) {
         focusSnapshots[field] = currentText(for: field)
     }
@@ -817,13 +984,13 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     }
 
     /// Applies the one-tap fill: sets the derived field's text and marks
-    /// it amber, exactly like an OCR suggestion (spec: "the filled value
-    /// goes amber and stays amber... never applied automatically, never on
-    /// save"). Works identically on `.edit` (deliberately: editing after
-    /// confirmation is a stated feature the proposal names by name, "not
-    /// just the confirm screen") - `applyMachineSuggestedAmount` does not
-    /// branch on `purpose`, so a fill on an edit form is amber and
-    /// reportable exactly the way one during confirm is.
+    /// it unreviewed and machine-suggested, exactly like an OCR suggestion
+    /// (spec: never applied automatically, never on save). Works
+    /// identically on `.edit` (deliberately: editing after confirmation is
+    /// a stated feature the proposal names by name, "not just the confirm
+    /// screen") - `applyMachineSuggestedAmount` does not branch on
+    /// `purpose`, so a fill on an edit form is reportable exactly the way
+    /// one during confirm is.
     @discardableResult
     func applyDerivedFill() -> Bool {
         guard let derived = derivableFill else { return false }
@@ -902,9 +1069,9 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     }
 
     /// Applies the reconciliation difference to whichever target was
-    /// tapped - same amber treatment, same save-time accept/override
-    /// reporting as `applyDerivedFill()` above, and the identical
-    /// `.edit`-works-too behaviour.
+    /// tapped - same suggestion bookkeeping, same save-time
+    /// accept/override reporting as `applyDerivedFill()` above, and the
+    /// identical `.edit`-works-too behaviour.
     @discardableResult
     func applyReconciliationDifference(into target: ReconciliationTarget) -> Bool {
         guard let result = reconciliationResult(for: target) else { return false }
@@ -916,9 +1083,9 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// `applyReconciliationDifference(into:)`: writes `cents` into
     /// `field`'s text, records it as this session's suggestion baseline
     /// for the save-time accept/override report (`suggestionOutcomes()`),
-    /// and marks the field amber - the one place "applying a suggested
-    /// amount" is defined, so the two callers cannot drift on what it
-    /// means.
+    /// and marks the field unreviewed - the one place "applying a
+    /// suggested amount" is defined, so the two callers cannot drift on
+    /// what it means.
     private func applyMachineSuggestedAmount(_ field: DerivableMoneyField, cents: Int) {
         let text = MoneyInput.text(fromCents: cents)
         switch field {
@@ -945,7 +1112,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 
     /// Prefills category and payment method from the vendor's own
     /// remembered defaults (GET /api/receipts/options's `vendorDefaults`,
-    /// APIModels.swift) - amber, editable, and NEVER over what the person
+    /// APIModels.swift) - editable, and NEVER over what the person
     /// already typed (checked per field, independently: a vendor whose
     /// remembered category the person already typed over still offers its
     /// payment method). Exact, unnormalized match against `vendorText` -
@@ -992,6 +1159,118 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 
     private func isBlank(_ text: String) -> Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    // MARK: - The server's second opinion (2026-09-01)
+
+    /// The server's LLM answer, arriving a few seconds after the form came
+    /// up (`CaptureFlowModel.prepareSingleCapture`). Nothing about this
+    /// screen waits for it, and nothing says anything when it never comes.
+    ///
+    /// **Why this exists.** 51 of the 54 confirmations in production
+    /// happened on the capture-time confirm screen, which until now saw
+    /// only the on-device heuristic - while the server's LLM was right on
+    /// the vendor 63% of the time against the heuristic's 39%, and supplied
+    /// the right amount 57 times out of the 73 where the heuristic had
+    /// none. Median dwell on this screen is 47 seconds and the model
+    /// answers in 5, so the answer is simply there before most people have
+    /// finished reading the paper.
+    ///
+    /// **What it is allowed to touch**, and the rule is the same one
+    /// §10A.1 has always stated - a machine may fill a field a human has
+    /// not looked at, and may never change one they have:
+    ///
+    /// - **Text fields** (vendor, date, payment method): replaced when the
+    ///   field is still unreviewed and the server disagrees. The new value
+    ///   becomes the suggestion of record (`initialSuggested*`), so the
+    ///   save-time accept/override telemetry scores the person against
+    ///   what they were actually shown last.
+    /// - **Money fields**: filled only when the field is BLANK. When the
+    ///   form already shows an amount and the server disagrees, nothing is
+    ///   overwritten - the disagreement is offered as a chip
+    ///   (`serverAmountAlternatives`) the person can tap. A number changing
+    ///   under someone's eyes while they read a receipt is the one
+    ///   behaviour this screen must never have.
+    ///
+    /// A no-op once the receipt is saving or saved: the values are durable
+    /// by then and this arrives too late to matter.
+    func applyServerSuggestions(_ server: ConfirmSuggestionSet) {
+        guard !isSaving, !hasSaved, purpose == .confirm else { return }
+
+        if let vendor = server.vendor, !touchedFields.contains(.vendor), normalized(vendorText) != vendor {
+            vendorText = vendor
+            initialSuggestedVendor = vendor
+            markAsMachineSuggested(.vendor)
+        }
+        if let purchasedAt = server.purchasedAt,
+           !touchedFields.contains(.date),
+           let picked = ReceiptFormat.pickerDate(fromIso: purchasedAt),
+           purchasedAt != ReceiptFormat.isoDate(fromPicker: purchasedDate) {
+            purchasedDate = picked
+            initialSuggestedPurchasedAtIso = purchasedAt
+            markAsMachineSuggested(.date)
+        }
+        if let paymentMethod = server.paymentMethod,
+           !touchedFields.contains(.paymentMethod),
+           normalized(paymentMethodText) != paymentMethod {
+            paymentMethodText = paymentMethod
+            initialSuggestedPaymentMethod = paymentMethod
+            markAsMachineSuggested(.paymentMethod)
+        }
+
+        var alternatives: [ServerAmountAlternative] = []
+        for entry in serverMoneyEntries(server) {
+            guard let cents = entry.cents else { continue }
+            guard !touchedFields.contains(entry.suggested) else { continue }
+            switch entry.input {
+            case .empty:
+                applyMachineSuggestedAmount(entry.field, cents: cents)
+            case .cents(let current) where current != cents:
+                alternatives.append(ServerAmountAlternative(field: entry.field, cents: cents))
+            case .cents, .invalid:
+                break
+            }
+        }
+        serverAmountAlternatives = alternatives
+    }
+
+    private func serverMoneyEntries(
+        _ server: ConfirmSuggestionSet
+    ) -> [(field: DerivableMoneyField, suggested: SuggestedField, cents: Int?, input: MoneyInput)] {
+        [
+            (.total, .total, server.totalCents, totalInput),
+            (.subtotal, .subtotal, server.subtotalCents, subtotalInput),
+            (.hst, .hst, server.hstCents, hstInput),
+            (.tip, .tip, server.tipCents, tipInput),
+            (.otherFees, .otherFees, server.otherFeesCents, otherFeesInput),
+        ]
+    }
+
+    /// The chip's own words - named, not bare, exactly as proposal #1's
+    /// derived-fill buttons are and for the same stated reason: a person
+    /// must be able to read what a tap will do before they make it.
+    func serverAlternativeLabel(_ alternative: ServerAmountAlternative) -> String {
+        let amount = ReceiptFormat.money(cents: alternative.cents, currency: currency)
+        let name: String
+        switch alternative.field {
+        case .total: name = "the total"
+        case .subtotal: name = "the subtotal"
+        case .hst: name = "HST"
+        case .tip: name = "the tip"
+        case .otherFees: name = "other fees"
+        }
+        return "Server read \(name) as \(amount) - use it"
+    }
+
+    /// Applies one chip and removes it. The same bookkeeping every other
+    /// machine-suggested amount gets, so tapping this is reported at save
+    /// exactly like accepting a prefill.
+    @discardableResult
+    func applyServerAlternative(_ alternative: ServerAmountAlternative) -> Bool {
+        guard serverAmountAlternatives.contains(alternative) else { return false }
+        applyMachineSuggestedAmount(alternative.field, cents: alternative.cents)
+        serverAmountAlternatives.removeAll { $0 == alternative }
+        return true
     }
 
     // MARK: - Possible duplicates (proposal #8, 2026-08-28)
@@ -1066,6 +1345,49 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         saveBlocker == nil
     }
 
+    /// Whether this form can offer to bin the receipt instead of
+    /// confirming it (2026-09-01).
+    ///
+    /// The confirm queue used to be the one route to a pending receipt
+    /// with no way out but "Later" or "Save": a scan of the wrong thing,
+    /// or a page that photographed unreadably, kept coming back every
+    /// time the badge was tapped, and the only remedy was to leave the
+    /// queue, find the row on Home and delete it from the detail screen.
+    /// The per-receipt route always had Delete; this is the queue catching
+    /// up to it.
+    ///
+    /// `.edit` is excluded deliberately: that form is only ever reached
+    /// from the detail screen, which is already showing a Delete button of
+    /// its own two taps away, and a second one inside the sheet would be
+    /// two ways to do one thing on one screen.
+    var canDelete: Bool {
+        deleteAction != nil && purpose == .confirm
+    }
+
+    /// Soft-deletes this receipt (spec §10B: tombstoned, the bytes kept
+    /// for retention - not erased). Returns whether it succeeded, the same
+    /// shape as `save()` above and as ReceiptDetailModel.delete(id:), so
+    /// the view advances only on a real success rather than guessing from
+    /// state.
+    func delete() async -> Bool {
+        guard let deleteAction, !isDeleting else { return false }
+        isDeleting = true
+        deleteError = nil
+        defer { isDeleting = false }
+
+        do {
+            try await deleteAction()
+            return true
+        } catch {
+            deleteError = error.localizedDescription
+            return false
+        }
+    }
+
+    func clearDeleteError() {
+        deleteError = nil
+    }
+
     /// One tap, one durable save - a PATCH or an outbox write, whichever
     /// built this model - straight back to wherever the person came from,
     /// no success modal (spec §10A.1). Returns whether the receipt is now
@@ -1096,6 +1418,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
                 paymentMethod: normalized(paymentMethodText),
                 notes: normalized(notesText)
             ))
+            hasSaved = true
             return true
         } catch {
             saveError = error.localizedDescription
@@ -1118,7 +1441,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     }
 }
 
-/// Which SuggestedField carries this money field's amber marking - kept
+/// Which SuggestedField carries this money field's suggestion - kept
 /// here rather than on ReceiptArithmetic.swift's own enum, so that file
 /// stays exactly what §10.2 asks of a pure computation module (no
 /// knowledge of ConfirmReceiptModel or the view layer above it).

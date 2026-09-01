@@ -1,3 +1,4 @@
+import AudioToolbox
 import SwiftUI
 import VisionKit
 
@@ -29,6 +30,34 @@ struct DocumentScannerView: UIViewControllerRepresentable {
     /// nonisolated: an immutable constant the (nonisolated) delegate reads;
     /// the view struct's inferred MainActor isolation is irrelevant to it.
     private nonisolated static let jpegQuality: CGFloat = 0.8
+
+    /// The system camera shutter (`photoShutter`, 2026-09-01). Played once
+    /// per scanning session, when the session ends with at least one page.
+    ///
+    /// **It is deliberately not once per page, and cannot be.**
+    /// `VNDocumentCameraViewController`'s entire public surface is three
+    /// terminal delegate calls - `didFinishWith`, `didCancel`,
+    /// `didFailWithError` (checked against the iOS 26.2 SDK header) - and
+    /// `VNDocumentCameraScan` is handed over only at the end, with `init`
+    /// unavailable, so there is nothing to observe or KVO while the camera
+    /// is up. The only per-page signal that exists at all is the private
+    /// view hierarchy of a system view controller: its page counter, read
+    /// by polling and matched on its text. That is not an API, it is
+    /// archaeology - it degrades to silence when Apple relabels the
+    /// control and to spurious clicks when it relabels it into something
+    /// that still matches - and none of it could be exercised before
+    /// shipping, because the simulator has no camera and reports
+    /// `isSupported == false`, so the scanner cannot even be presented off
+    /// a device. A per-page shutter needs a camera we own, i.e. replacing
+    /// VisionKit - which is the one thing this app deliberately does not
+    /// do (spec §4.2). One honest click at the end beats a guess that
+    /// clicks at the wrong times.
+    ///
+    /// `AudioServicesPlaySystemSound` follows the ring/silent switch: on a
+    /// phone in silent this makes no sound. That is the correct behaviour
+    /// for an app - the Camera app overrides it in some regions for legal
+    /// reasons, which is an entitlement this app has no business wanting.
+    private nonisolated static let shutterSoundID: SystemSoundID = 1108
 
     let completion: (Outcome) -> Void
 
@@ -69,6 +98,9 @@ struct DocumentScannerView: UIViewControllerRepresentable {
                     return
                 }
                 pages.append(jpeg)
+            }
+            if !pages.isEmpty {
+                AudioServicesPlaySystemSound(DocumentScannerView.shutterSoundID)
             }
             completion(.scanned(pages))
         }

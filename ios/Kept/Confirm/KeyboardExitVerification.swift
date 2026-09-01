@@ -100,11 +100,14 @@ enum KeyboardExitVerification {
         // visible while something above it takes the touch.
         //
         // Found by walking for a `UIControl` rather than by accessibility
-        // identifier. `UIBarButtonItem`'s identifier reaches the view layer
-        // through accessibility, which is live under XCUITest and not in a
-        // plain device run - so the identifier lookup reported "no control"
-        // on device for a bar that was demonstrably on screen. The toolbar
-        // carries one control: the Done item; the flexible space has no view.
+        // identifier. When the bar was a toolbar, `UIBarButtonItem`'s
+        // identifier reached the view layer only through accessibility -
+        // live under XCUITest, not in a plain device run - so the
+        // identifier lookup reported "no control" on device for a bar that
+        // was demonstrably on screen. The bar is a plain view with a real
+        // `UIButton` now (KeyboardDoneBar), which the same walk finds
+        // first; the walk stays because it is the assertion that survived
+        // that lesson, and the bar still carries exactly one control.
         if let done = bar.firstControlDescendant {
             if let host = done.window {
                 let centre = done.convert(
@@ -181,7 +184,7 @@ enum KeyboardExitVerification {
 }
 
 private extension UIView {
-    /// A toolbar renders its items as private `UIControl` subclasses.
+    /// The bar's one control - its Done button (KeyboardDoneBar).
     var firstControlDescendant: UIControl? {
         if let control = self as? UIControl { return control }
         for subview in subviews {

@@ -79,6 +79,18 @@ final class ReceiptOptionsStore: ObservableObject {
         defaults.set(encoded, forKey: Self.defaultsKey)
     }
 
+    /// The last-fetched vendor list straight off disk, with no store
+    /// instance and no network (2026-09-01). The outbox drain's vendor
+    /// heuristic needs the person's own past vendor names
+    /// (`ReceiptParser.parse`), and the drain runs offline by design - so
+    /// it reads the same cache a capture-time confirm already relies on,
+    /// and an empty answer simply means the geometric heuristic decides
+    /// alone. Empty rather than nil for a missing cache: "no names known"
+    /// and "no cache" are the same instruction to the parser.
+    static func cachedVendors(in defaults: UserDefaults) -> [String] {
+        cached(in: defaults)?.vendors ?? []
+    }
+
     private static func cached(in defaults: UserDefaults) -> ReceiptOptions? {
         guard let data = defaults.data(forKey: Self.defaultsKey) else { return nil }
         // A cache written by another build, or edited from outside, is not

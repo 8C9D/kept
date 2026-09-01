@@ -48,6 +48,7 @@ final class OutboxControllerTests: XCTestCase {
 
     private func makeController(
         recognizer: StubTextRecognizer? = nil,
+        knownVendors: [String] = [],
         started: Bool = true
     ) async -> OutboxController {
         let controller = OutboxController(
@@ -57,6 +58,9 @@ final class OutboxControllerTests: XCTestCase {
             tokenStore: tokenStore,
             connectivity: connectivity,
             backgroundContinuation: background,
+            // Explicit, so the drain's vendor heuristic never reads the
+            // simulator's real UserDefaults out from under a test.
+            knownVendors: { knownVendors },
             now: { Self.captureInstant }
         )
         if started {
@@ -707,5 +711,109 @@ final class OutboxControllerTests: XCTestCase {
         store.loadAllResult = OutboxLoadResult(items: [], unreadableCount: 2)
         let controller = await makeController()
         XCTAssertEqual(controller.unreadableCount, 2)
+    }
+}
+
+// MARK: - What the drain's own parse is given (2026-09-01)
+
+/// The drain re-reads a batch-scanned page on its own, so the two things
+/// `ReceiptParser.parse` gained on 2026-09-01 - the capture instant and the
+/// person's own vendor list - have to reach it here as well as on the
+/// capture screen. It also stamps how the text was read.
+@MainActor
+final class OutboxDrainParseInputTests: XCTestCase {
+    private var store: InMemoryOutboxStore!
+    private var api: StubKeptAPI!
+    private var tokenStore: InMemoryTokenStore!
+    private var connectivity: StubConnectivityMonitor!
+    private var background: StubBackgroundContinuation!
+
+    private nonisolated static let userA = UUID(uuidString: "aaaaaaaa-1111-2222-3333-444444444444")!
+    /// The day the photograph was taken - deliberately much later than the
+    /// receipt's own printed date, which is the offline-weekend case.
+    private nonisolated static let captureInstant = Date(timeIntervalSince1970: 1_788_264_000)
+
+    override func setUp() async throws {
+        try await super.setUp()
+        store = InMemoryOutboxStore()
+        api = StubKeptAPI()
+        tokenStore = InMemoryTokenStore(stored: TestTokens.sessionToken(sub: Self.userA.uuidString.lowercased()))
+        connectivity = StubConnectivityMonitor()
+        background = StubBackgroundContinuation()
+        api.uploadTargetHandler = { _ in
+            UploadTarget(
+                objectKey: "\(Self.userA.uuidString.lowercased())/2026/09/upload.jpg",
+                uploadUrl: URL(string: "https://storage.example/put")!
+            )
+        }
+        api.uploadImageHandler = { _, _, _ in }
+        api.createReceiptHandler = { _ in Fixtures.receipt(status: .pending) }
+    }
+
+    private func drain(recognized: RecognizedText, knownVendors: [String] = []) async -> CreateReceiptRequest? {
+        let controller = OutboxController(
+            store: store,
+            api: api,
+            recognizer: StubTextRecognizer(repeating: recognized, count: 4),
+            tokenStore: tokenStore,
+            connectivity: connectivity,
+            backgroundContinuation: background,
+            knownVendors: { knownVendors },
+            now: { Self.captureInstant }
+        )
+        await controller.start()
+        while controller.isDraining { await Task.yield() }
+        try? await controller.enqueue(imageData: Data("page".utf8))
+        while controller.isDraining { await Task.yield() }
+        return api.createReceiptCalls.last
+    }
+
+    /// The item's own capture instant, not "now": a `26/07/19` card-slip
+    /// date only resolves against the day the photograph was taken.
+    func testTheDrainParsesAgainstTheItemsCaptureInstant() async {
+        let request = await drain(recognized: RecognizedText(lines: [
+            RecognizedLine(text: "food", verticalCenter: 0.05, height: 0.02),
+            RecognizedLine(text: "DateTime: 26/07/19 10:41:03", verticalCenter: 0.50, height: 0.02),
+            RecognizedLine(text: "TOTAL 24.18", verticalCenter: 0.80, height: 0.02),
+        ]))
+        XCTAssertEqual(request?.purchasedAt, "2026-07-19")
+        XCTAssertEqual(request?.ocrSuggestions.purchasedAt, "2026-07-19")
+    }
+
+    func testTheDrainUsesThePersonsOwnVendorNames() async {
+        let request = await drain(
+            recognized: RecognizedText(lines: [
+                RecognizedLine(text: "In Store 392", verticalCenter: 0.05, height: 0.02),
+                RecognizedLine(text: "TOTAL 24.18", verticalCenter: 0.60, height: 0.02),
+                RecognizedLine(text: "www.jimmythegreek.com", verticalCenter: 0.95, height: 0.02),
+            ]),
+            knownVendors: ["Jimmy The Greek"]
+        )
+        XCTAssertEqual(request?.vendor, "Jimmy The Greek")
+        XCTAssertEqual(request?.ocrSuggestions.vendor, "Jimmy The Greek")
+    }
+
+    /// Every receipt this app creates was photographed; the web client is
+    /// the only source that can send anything else.
+    func testTheCreateRequestDeclaresVisionAsTheOcrSource() async {
+        let request = await drain(recognized: RecognizedText(lines: [
+            RecognizedLine(text: "TOTAL 24.18", verticalCenter: 0.80, height: 0.02),
+        ]))
+        XCTAssertEqual(request?.ocrSource, "vision")
+    }
+
+    /// The two fields the parser learned to read on 2026-09-01 ride to the
+    /// server on a pending create like every other suggestion.
+    func testFeesAndPaymentMethodTravelWithTheCreate() async {
+        let request = await drain(recognized: RecognizedText(lines: [
+            RecognizedLine(text: "Subtotal 49.94", verticalCenter: 0.50, height: 0.02),
+            RecognizedLine(text: "12% Service charge 6.59", verticalCenter: 0.55, height: 0.02),
+            RecognizedLine(text: "TOTAL 63.20", verticalCenter: 0.60, height: 0.02),
+            RecognizedLine(text: "ACCT: MASTERCARD", verticalCenter: 0.80, height: 0.02),
+        ]))
+        XCTAssertEqual(request?.otherFeesCents, 659)
+        XCTAssertEqual(request?.paymentMethod, "MASTERCARD")
+        XCTAssertEqual(request?.ocrSuggestions.otherFeesCents, 659)
+        XCTAssertEqual(request?.ocrSuggestions.paymentMethod, "MASTERCARD")
     }
 }

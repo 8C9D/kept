@@ -49,8 +49,31 @@ final class CaptureFlowModel: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
 
+    /// How long the capture-time second opinion is given before it is
+    /// abandoned silently (2026-09-01). The model answers in a median 5
+    /// seconds and the median dwell on the confirm screen is 47, so twelve
+    /// is generous for the answer and short enough that a dead network
+    /// costs a task that nobody is waiting on.
+    static let secondOpinionTimeout: TimeInterval = 12
+
+    /// The server's LLM reading the same OCR text - injected as a plain
+    /// async function so this model still holds no `KeptAPI` of its own and
+    /// stays testable with no server (spec §10.2). Nil in every path that
+    /// has no network to offer.
+    typealias RemoteParse = @Sendable (_ ocrRawText: String, _ capturedAt: Date) async throws -> ReceiptSuggestions
+
     private let outbox: any OutboxEnqueuing
     private let recognizer: any ReceiptTextRecognizer
+    /// The person's own past vendor names, read at parse time rather than
+    /// captured at construction, so a fetch that lands while the capture
+    /// screen is up is already in effect for the next scan. Read, never
+    /// fetched: this screen is the offline path.
+    private let knownVendors: @MainActor () -> [String]
+    private let remoteParse: RemoteParse?
+    /// Injectable only so the timeout path itself is testable in
+    /// milliseconds rather than twelve seconds; production always uses
+    /// `secondOpinionTimeout`.
+    private let secondOpinionTimeout: TimeInterval
     private let now: @Sendable () -> Date
 
     /// Batch pages not yet saved; the head is the one being worked on.
@@ -74,10 +97,16 @@ final class CaptureFlowModel: ObservableObject {
     init(
         outbox: any OutboxEnqueuing,
         recognizer: any ReceiptTextRecognizer,
+        knownVendors: @escaping @MainActor () -> [String] = { [] },
+        remoteParse: RemoteParse? = nil,
+        secondOpinionTimeout: TimeInterval = CaptureFlowModel.secondOpinionTimeout,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.outbox = outbox
         self.recognizer = recognizer
+        self.knownVendors = knownVendors
+        self.remoteParse = remoteParse
+        self.secondOpinionTimeout = secondOpinionTimeout
         self.now = now
     }
 
@@ -110,12 +139,17 @@ final class CaptureFlowModel: ObservableObject {
         defer { isProcessing = false }
 
         phase = .reading
+        let capturedAt = now()
         var suggestions = ReceiptSuggestions()
         var rawText: String?
         var ocrFailureNote: String?
         do {
             let recognized = try await recognizer.recognizeText(in: page)
-            suggestions = ReceiptParser.parse(lines: recognized.lines)
+            suggestions = ReceiptParser.parse(
+                lines: recognized.lines,
+                capturedAt: capturedAt,
+                knownVendors: knownVendors()
+            )
             rawText = recognized.rawText.isEmpty ? nil : recognized.rawText
         } catch {
             // Recognition failing must not block capture: the paper is in
@@ -128,7 +162,7 @@ final class CaptureFlowModel: ObservableObject {
             imageData: page,
             suggestions: suggestions,
             ocrRawText: rawText,
-            capturedAt: now(),
+            capturedAt: capturedAt,
             ocrFailureNote: ocrFailureNote
         )
         singleDraft = draft
@@ -144,6 +178,53 @@ final class CaptureFlowModel: ObservableObject {
             )
         }
         phase = .confirming(confirmModel)
+
+        if let rawText {
+            requestSecondOpinion(rawText: rawText, capturedAt: capturedAt, for: confirmModel)
+        }
+    }
+
+    /// The server's LLM reading the same text, applied to the confirm
+    /// screen when and if it answers (2026-09-01).
+    ///
+    /// Fire and forget, in every direction that matters: the screen is
+    /// already up before this starts, it is never awaited, a failure or a
+    /// timeout does nothing and says nothing, and there is no log line -
+    /// this is the offline screen, and the network is a bonus laid on top
+    /// of it. `ConfirmSuggestionSet(parse:)` runs the same
+    /// arithmetic-sanity rule over the server's answer that the on-device
+    /// one goes through, because a set of amounts that cannot be true is
+    /// not made truer by which parser produced it.
+    private func requestSecondOpinion(rawText: String, capturedAt: Date, for model: ConfirmReceiptModel) {
+        guard let remoteParse else { return }
+        let timeout = secondOpinionTimeout
+        Task { [weak model] in
+            guard
+                let suggestions = await Self.parseWithinTimeout(remoteParse, rawText, capturedAt, timeout),
+                let model
+            else { return }
+            model.applyServerSuggestions(ConfirmSuggestionSet(parse: suggestions))
+        }
+    }
+
+    /// The request, or nil - a thrown error and a timeout are the same
+    /// outcome here, because the caller does the same thing with both.
+    private static func parseWithinTimeout(
+        _ parse: @escaping RemoteParse,
+        _ rawText: String,
+        _ capturedAt: Date,
+        _ timeout: TimeInterval
+    ) async -> ReceiptSuggestions? {
+        await withTaskGroup(of: ReceiptSuggestions?.self) { group in
+            group.addTask { try? await parse(rawText, capturedAt) }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
     }
 
     /// "Later" on the capture-time confirm screen: the receipt still gets

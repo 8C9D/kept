@@ -157,7 +157,7 @@ enum ReceiptArithmetic {
     /// false positive it states honestly still applies here: a genuinely
     /// correct 13% receipt whose basket is roughly 38% zero-rated also
     /// lands near 8% and will be flagged. That is exactly why this is an
-    /// advisory amber prompt-to-look (§10A.1) - never a block, never an
+    /// advisory prompt-to-look (§10A.1) - never a block, never an
     /// auto-correction - the same treatment `showsHstDisagreementNote` and
     /// `showsArithmeticWarning` already give their own signals.
     ///
@@ -187,6 +187,77 @@ enum ReceiptArithmetic {
             ? .looksLikeHalfSplit
             : .plausible
     }
+
+    // MARK: - Suggested-amount sanity (2026-09-01)
+
+    /// Independent rounding between a merchant's tax line and its total is
+    /// worth a cent, and two receipts in the 2026-09-01 diagnosis were off
+    /// by one in opposite directions, so two cents is where "off by
+    /// rounding" stops and "read the wrong line" starts. Mirrors
+    /// `SUGGESTED_AMOUNT_TOLERANCE_CENTS` (suggestedAmounts.ts) verbatim.
+    private static let suggestedAmountToleranceCents = 2
+    /// The widest HST-to-subtotal ratio any Canadian receipt can print, in
+    /// basis points - `MAX_PLAUSIBLE_HST_RATE_BPS`, mirrored verbatim.
+    private static let maxPlausibleHstRateBps = 1600
+
+    /// Faithful mirror of the server's `validateSuggestedAmounts`
+    /// (server/src/domain/suggestedAmounts.ts) - read that function's own
+    /// doc comment for the full reasoning; only the checking logic is
+    /// restated here.
+    ///
+    /// the owner's rule: the total must be at least the subtotal plus HST plus
+    /// tip plus other fees. A total below the sum of its own parts is not a
+    /// receipt anyone printed, it is a misread label - the $218.94 Costco
+    /// purchase stored as $8.50 off a `TOTAL DISCOUNT(S)` line, with the
+    /// subtotal and HST from the same slip both correct.
+    ///
+    /// ⚠ This withholds a SUGGESTION and never blocks a save. A person who
+    /// reads the paper and types what it says must always be able to save
+    /// it (constraint 2 cuts both ways); what this governs is what the
+    /// confirm screen PREFILLS, where being wrong costs one blank field
+    /// instead of a wrong tax record. `showsArithmeticWarning` is the
+    /// separate, softer signal on values a human has actually typed.
+    static func validateSuggestedAmounts(
+        subtotalCents: Int?,
+        hstCents: Int?,
+        tipCents: Int?,
+        otherFeesCents: Int?,
+        totalCents: Int?
+    ) -> Set<WithheldAmountField> {
+        guard let subtotalCents, let totalCents else { return [] }
+
+        let components = subtotalCents + (hstCents ?? 0) + (tipCents ?? 0) + (otherFeesCents ?? 0)
+        if totalCents >= components - suggestedAmountToleranceCents {
+            return []
+        }
+
+        // Which number is the liar? If the HST is a plausible fraction of
+        // the subtotal the two corroborate each other and the total is the
+        // outlier alone; if there is no HST there is nothing to corroborate
+        // with, but no reason to doubt the subtotal either. Only when the
+        // HST is present AND is not a plausible rate on that subtotal are
+        // two of the three already inconsistent, and both go.
+        return hstCorroboratesSubtotal(subtotalCents: subtotalCents, hstCents: hstCents)
+            ? [.totalCents]
+            : [.totalCents, .subtotalCents]
+    }
+
+    private static func hstCorroboratesSubtotal(subtotalCents: Int, hstCents: Int?) -> Bool {
+        guard let hstCents else { return true }
+        guard subtotalCents > 0 else { return false }
+        // Integer cross-multiplication, never division - the same technique
+        // `checkHstRatePlausibility` uses, for the same exactness reason.
+        let scaledHst = hstCents * 10_000
+        return scaledHst >= 0 && scaledHst <= maxPlausibleHstRateBps * subtotalCents
+    }
+}
+
+/// Which suggested amounts a `validateSuggestedAmounts` verdict withholds -
+/// mirrors `WithheldAmountField` (suggestedAmounts.ts). Only these two are
+/// ever withheld: HST, tip and other fees are never the number this rule
+/// can prove wrong.
+enum WithheldAmountField: Hashable, CaseIterable {
+    case totalCents, subtotalCents
 }
 
 /// Mirrors `HstRatePlausibility` (arithmetic.ts) one for one - see

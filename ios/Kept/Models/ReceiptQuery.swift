@@ -39,7 +39,25 @@ struct ReceiptQuery: Equatable {
             case .total:
                 return order == .desc ? "Largest first" : "Smallest first"
             case .vendor:
-                return order == .desc ? "Z to A" : "A to Z"
+                return order == .desc ? "Z → A" : "A → Z"
+            }
+        }
+
+        /// Which end of this key a person means when they pick it, before
+        /// touching the order control at all. Every key the list opened
+        /// with is a "biggest first" question - the newest receipts, the
+        /// largest amounts - so `.desc` was the only default and picking a
+        /// sort left the order alone. Vendor is not that kind of question:
+        /// an alphabetical list read from Z is nobody's request, and
+        /// inheriting the date sort's "newest first" is what produced one
+        /// (2026-09-01, the owner's own use). Changing the sort therefore
+        /// carries this order with it; the person can still flip it
+        /// afterwards, and the flip is remembered until the sort changes
+        /// again.
+        var naturalOrder: Order {
+            switch self {
+            case .purchasedAt, .capturedAt, .total: return .desc
+            case .vendor: return .asc
             }
         }
     }

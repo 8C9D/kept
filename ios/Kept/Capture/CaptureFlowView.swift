@@ -29,6 +29,7 @@ struct CaptureFlowView: View {
     private let onFinished: (_ didChangeAnything: Bool) -> Void
 
     init(
+        api: any KeptAPI,
         outbox: OutboxController,
         options: ReceiptOptionsStore,
         eventLogger: EventLogger,
@@ -36,7 +37,19 @@ struct CaptureFlowView: View {
     ) {
         _captureModel = StateObject(wrappedValue: CaptureFlowModel(
             outbox: outbox,
-            recognizer: VisionReceiptTextRecognizer()
+            recognizer: VisionReceiptTextRecognizer(),
+            // The vendor heuristic's known-vendor pass reads the person's
+            // own past names out of the same cached options this screen
+            // already offers as pickable values (2026-09-01) - cached, so
+            // still no network on the capture path.
+            knownVendors: { [weak options] in options?.options.vendors ?? [] },
+            // The server's second opinion (2026-09-01). Everything about
+            // the screen still works with this returning nothing, forever:
+            // see CaptureFlowModel.requestSecondOpinion.
+            remoteParse: { ocrRawText, capturedAt in
+                let result = try await api.parseReceiptText(ocrRawText: ocrRawText, capturedAt: capturedAt)
+                return result.suggestions.asReceiptSuggestions
+            }
         ))
         self.options = options
         self.eventLogger = eventLogger

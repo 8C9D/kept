@@ -142,6 +142,14 @@ final class OutboxController: ObservableObject {
     private static let baseRetryDelay: TimeInterval = 2
     private static let maxRetryDelay: TimeInterval = 300
 
+    /// The person's own past vendor names, for the vendor heuristic's
+    /// known-vendor pass (2026-09-01, `ReceiptParser.parse`). Read from
+    /// whatever `ReceiptOptionsStore` last cached - never fetched: the
+    /// drain must work with no network, which is the whole point of it.
+    /// Defaulted to the on-disk cache so every existing construction site
+    /// (and every test) keeps working.
+    private let knownVendors: @MainActor () -> [String]
+
     init(
         store: OutboxStore,
         api: any KeptAPI,
@@ -149,6 +157,7 @@ final class OutboxController: ObservableObject {
         tokenStore: SessionTokenStore,
         connectivity: ConnectivityMonitor,
         backgroundContinuation: BackgroundContinuation,
+        knownVendors: @escaping @MainActor () -> [String] = { ReceiptOptionsStore.cachedVendors(in: .standard) },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.store = store
@@ -157,6 +166,7 @@ final class OutboxController: ObservableObject {
         self.tokenStore = tokenStore
         self.connectivity = connectivity
         self.backgroundContinuation = backgroundContinuation
+        self.knownVendors = knownVendors
         self.now = now
     }
 
@@ -554,7 +564,15 @@ final class OutboxController: ObservableObject {
         let image = try await store.imageData(itemId: item.id)
         do {
             let recognized = try await recognizer.recognizeText(in: image)
-            let suggestions = ReceiptParser.parse(lines: recognized.lines)
+            // The item's own capture instant, not "now": a batch scanned
+            // offline on Friday can drain on Monday, and the date heuristic
+            // scores every reading against when the photograph was taken
+            // (2026-09-01).
+            let suggestions = ReceiptParser.parse(
+                lines: recognized.lines,
+                capturedAt: item.capturedAt,
+                knownVendors: knownVendors()
+            )
             item.progress = .parsed(ParsedReceipt(
                 suggestions: suggestions,
                 ocrRawText: recognized.rawText.isEmpty ? nil : recognized.rawText
@@ -606,6 +624,10 @@ final class OutboxController: ObservableObject {
                 notes: confirmed.notes,
                 status: .confirmed,
                 ocrRawText: parsed.ocrRawText,
+                // Every receipt this app creates was photographed
+                // (2026-09-01): the web client is the only source that can
+                // send anything else.
+                ocrSource: "vision",
                 ocrSuggestions: OcrSuggestionsPayload(suggestions),
                 image: CreateReceiptRequest.Image(objectKey: objectKey, sha256: item.sha256)
             )
@@ -614,7 +636,8 @@ final class OutboxController: ObservableObject {
             // The parser's date when it found one; otherwise the capture
             // day - the day the person scanned it, not the day the upload
             // finally went through, which after an offline weekend can
-            // differ. The confirm screen presents either amber (§7.2).
+            // differ. The confirm screen presents either as a
+            // suggestion to be confirmed (§7.2).
             purchasedAt: suggestions.purchasedAt ?? ReceiptFormat.calendarDate(of: item.capturedAt),
             capturedAt: ReceiptFormat.timestamp(of: item.capturedAt),
             vendor: suggestions.vendor,
@@ -626,7 +649,10 @@ final class OutboxController: ObservableObject {
             // heuristic ever produces one - a pending row simply has none
             // until a human enters it on confirm.
             tipCents: suggestions.tipCents,
+            otherFeesCents: suggestions.otherFeesCents,
+            paymentMethod: suggestions.paymentMethod,
             ocrRawText: parsed.ocrRawText,
+            ocrSource: "vision",
             ocrSuggestions: OcrSuggestionsPayload(suggestions),
             image: CreateReceiptRequest.Image(objectKey: objectKey, sha256: item.sha256)
         )

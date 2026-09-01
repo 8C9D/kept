@@ -68,8 +68,8 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
         private var recognizer: UITapGestureRecognizer?
         /// One bar for the screen's life, held strongly: it has to be
         /// recognisable when SwiftUI puts its own empty host back, and
-        /// re-presenting a fresh toolbar on every keystroke would flicker.
-        private var doneBar: UIToolbar?
+        /// re-presenting a fresh bar on every keystroke would flicker.
+        private var doneBar: KeyboardDoneBar?
         /// Which field the bar is currently presented for; a responder
         /// change is the one moment UIKit re-queries on its own.
         private weak var barPresentedFor: UIView?
@@ -206,27 +206,20 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
             }
         }
 
-        private func makeDoneBar() -> UIToolbar {
+        private func makeDoneBar() -> KeyboardDoneBar {
             // An explicit height, never `sizeToFit`: a zero-height bar is
             // indistinguishable from no bar at all on the device, and that
             // is precisely the failure this replaces.
-            var height: CGFloat = 44
+            var height: CGFloat = KeyboardDoneBar.standardHeight
             #if DEBUG
             height = KeyboardExitVerification.barHeightOverride ?? height
             #endif
-            let bar = UIToolbar(
-                frame: CGRect(x: 0, y: 0, width: window?.bounds.width ?? 0, height: height)
+            return KeyboardDoneBar(
+                width: window?.bounds.width ?? 0,
+                height: height,
+                target: self,
+                action: #selector(dismissKeyboard)
             )
-            bar.accessibilityIdentifier = KeyboardExitIdentifiers.doneBar
-            let done = UIBarButtonItem(
-                title: "Done", style: .done, target: self, action: #selector(dismissKeyboard)
-            )
-            done.accessibilityIdentifier = KeyboardExitIdentifiers.doneButton
-            bar.items = [
-                UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
-                done,
-            ]
-            return bar
         }
 
         // MARK: - The tap
@@ -240,6 +233,99 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
             // field it is that field about to take focus for itself.
             !(touch.view?.isInsideTextInput ?? false)
         }
+    }
+}
+
+/// The bar itself: a plain view we lay out, not a `UIToolbar`.
+///
+/// **Why it stopped being a toolbar (2026-09-01).** UIKit reserved the 44
+/// points correctly and always had - measured on iOS 26.3, the band sat at
+/// y 522-566 with the keyboard's own top edge at 566.5, flush. What iOS 26
+/// does not do is *paint* a toolbar that is serving as an
+/// `inputAccessoryView`: a `UIToolbarAppearance` with
+/// `configureWithOpaqueBackground()` and an explicit `backgroundColor`
+/// leaves not one pixel of that colour on screen (checked by sampling the
+/// band in a simulator screenshot). All that renders is the bar button
+/// item, drawn as a tinted capsule anchored to the band's *bottom* edge -
+/// so its bottom landed at 565.7 with the keys starting at 566.5, glow
+/// spilling onto the pad, and the form's own content showing through the
+/// transparent band above it. From the thumb's point of view that is a
+/// Done button sitting on the number pad, which is what it was reported as.
+///
+/// A view we own has neither problem: the background is ours to draw, so
+/// the band reads as a bar rather than as a hole onto the form, and the
+/// button is inset inside it, so it cannot touch the keys. Everything the
+/// 2026-08-09 decision established is unchanged - the bar is still hung on
+/// the first responder rather than requested from SwiftUI's toolbar
+/// system, still self-healing, still explicitly sized and never
+/// `sizeToFit`.
+final class KeyboardDoneBar: UIView {
+    /// The band UIKit reserves above the keyboard. 44 is the standard
+    /// accessory height and the number the device pass was run against.
+    static let standardHeight: CGFloat = 44
+    /// How far the button is held off the bar's edges. The bottom inset is
+    /// the whole point: it is the clearance between the button and the
+    /// first row of keys.
+    private static let buttonInset: CGFloat = 4
+    private static let trailingInset: CGFloat = 16
+
+    private let height: CGFloat
+
+    /// UIKit measures an `inputAccessoryView` through Auto Layout when it
+    /// can, and through the frame when it cannot; stating the same number
+    /// both ways is what stops the two paths from disagreeing. A
+    /// disagreement here is not cosmetic - it is how this bar shipped 430
+    /// points wide and 0 tall once already.
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: UIView.noIntrinsicMetric, height: height)
+    }
+
+    init(width: CGFloat, height: CGFloat, target: Any, action: Selector) {
+        self.height = height
+        super.init(frame: CGRect(x: 0, y: 0, width: width, height: height))
+        // The keyboard's width is what this has to match, and it is not
+        // always the window's - a hardware keyboard or a resized scene
+        // changes it without rebuilding the bar.
+        autoresizingMask = .flexibleWidth
+        accessibilityIdentifier = KeyboardExitIdentifiers.doneBar
+
+        // Chrome, not app content: the same material family the system
+        // puts behind its own keyboard accessories, so it tracks light and
+        // dark without a palette of its own and reads as part of the
+        // keyboard rather than as part of the form.
+        let background = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+        background.frame = bounds
+        background.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        background.isUserInteractionEnabled = false
+        addSubview(background)
+
+        var configuration = UIButton.Configuration.borderedProminent()
+        configuration.title = "Done"
+        configuration.cornerStyle = .capsule
+        let button = UIButton(configuration: configuration)
+        button.accessibilityIdentifier = KeyboardExitIdentifiers.doneButton
+        button.addTarget(target, action: action, for: .touchUpInside)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(button)
+        NSLayoutConstraint.activate([
+            button.trailingAnchor.constraint(
+                equalTo: trailingAnchor, constant: -Self.trailingInset
+            ),
+            button.centerYAnchor.constraint(equalTo: centerYAnchor),
+            // An explicit height rather than top/bottom insets, so the
+            // DEBUG negative control - which builds this bar zero points
+            // tall - collapses the button with it instead of demanding a
+            // negative height and having Auto Layout break one of the two
+            // constraints for it.
+            button.heightAnchor.constraint(
+                equalToConstant: max(0, height - 2 * Self.buttonInset)
+            ),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("KeyboardDoneBar is built in code only")
     }
 }
 

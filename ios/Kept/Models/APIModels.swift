@@ -18,14 +18,37 @@ enum ReceiptStatus: String, Codable {
 /// One field of the §7.3 merge the server computes over both parse paths
 /// and serves on every receipt response. The API also states per-field
 /// provenance (`source`) and this client deliberately does not decode it:
-/// amber already means "a human has not looked", and a source badge would
-/// ask the user to adjudicate parser internals. Provenance stays in the
-/// API for diagnostics.
+/// a source badge would ask the user to adjudicate parser internals, and
+/// the confirm screen already asks them only to read the paper. Provenance
+/// stays in the API for diagnostics.
 struct MergedSuggestion<Value: Decodable & Hashable>: Decodable, Hashable {
     /// Nil is "neither ruled parser produced a value" - for the money
     /// fields, "the heuristic found nothing" (no LLM fallthrough, §7.3) -
     /// and renders as a stated absence, never a fabricated value.
     let value: Value?
+    /// The server's arithmetic-sanity verdict withheld this amount
+    /// (2026-09-01, `validateSuggestedAmounts`): the set it belonged to was
+    /// impossible - a total below the sum of its own parts - so `value` is
+    /// nil BECAUSE it was suppressed, not because nothing was read. Absent
+    /// on any response older than that change, hence the default: an
+    /// undeclared flag means "not withheld", which is what every earlier
+    /// response meant.
+    let withheld: Bool
+
+    init(value: Value?, withheld: Bool = false) {
+        self.value = value
+        self.withheld = withheld
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        value = try container.decodeIfPresent(Value.self, forKey: .value)
+        withheld = try container.decodeIfPresent(Bool.self, forKey: .withheld) ?? false
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case value, withheld
+    }
 }
 
 /// The date's merge entry carries the one per-field flag: both parsers
@@ -49,12 +72,34 @@ struct MergedDateSuggestion: Decodable, Hashable {
 struct MergedAmountSuggestion: Decodable, Hashable {
     let value: Int?
     let disagreement: Bool
+    /// Withheld by the server's arithmetic-sanity check - see
+    /// `MergedSuggestion.withheld`. HST is never withheld by that rule
+    /// today; the flag is decoded here so the two amount shapes stay
+    /// interchangeable to the confirm screen.
+    let withheld: Bool
+
+    init(value: Int?, disagreement: Bool, withheld: Bool = false) {
+        self.value = value
+        self.disagreement = disagreement
+        self.withheld = withheld
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        value = try container.decodeIfPresent(Int.self, forKey: .value)
+        disagreement = try container.decodeIfPresent(Bool.self, forKey: .disagreement) ?? false
+        withheld = try container.decodeIfPresent(Bool.self, forKey: .withheld) ?? false
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case value, disagreement, withheld
+    }
 }
 
 /// The two parse records merged under §7.3's field-level rule, computed by
 /// the server's domain layer. This client renders it and decides nothing
-/// (spec §4.1) - which fields prefill, which start amber, and the date
-/// note all read straight off this shape.
+/// (spec §4.1) - which fields prefill, which start unreviewed, and the
+/// date note all read straight off this shape.
 ///
 /// The wire still carries a `vendorTaxNumber` entry: the server keeps it
 /// as a served absence so the shipped 1.0 (1) build, which decodes that
@@ -73,12 +118,35 @@ struct MergedSuggestions: Decodable, Hashable {
     /// (§7.3's amended rule extends to this field, 2026-08-28).
     let tipCents: MergedSuggestion<Int>
 
-    /// Deliberately no `otherFeesCents` here (2026-08-28 product
-    /// feedback): "other fees" is a residual with no consistent printed
-    /// label - delivery, service charges, deposits, a foreign receipt's
-    /// non-HST tax - so no heuristic can match it and no accuracy
-    /// measurement could score a guess against it. It is a human-entered
-    /// field with no suggestion to be amber about.
+    /// Added to the merge 2026-09-01, both Optional so a response from
+    /// before that change - or a fixture written against it - still
+    /// decodes. `otherFeesCents` reversed the 2026-08-28 "deliberately no
+    /// suggestion" ruling: reading 130 real receipts showed the fee labels
+    /// ARE consistent (see `ReceiptSuggestions.otherFeesCents`).
+    /// `paymentMethod` is printed on roughly four slips in five and was
+    /// stored on none of them, because nothing offered it.
+    let otherFeesCents: MergedSuggestion<Int>?
+    let paymentMethod: MergedSuggestion<String>?
+
+    init(
+        vendor: MergedSuggestion<String>,
+        purchasedAt: MergedDateSuggestion,
+        totalCents: MergedSuggestion<Int>,
+        hstCents: MergedAmountSuggestion,
+        subtotalCents: MergedSuggestion<Int>,
+        tipCents: MergedSuggestion<Int>,
+        otherFeesCents: MergedSuggestion<Int>? = nil,
+        paymentMethod: MergedSuggestion<String>? = nil
+    ) {
+        self.vendor = vendor
+        self.purchasedAt = purchasedAt
+        self.totalCents = totalCents
+        self.hstCents = hstCents
+        self.subtotalCents = subtotalCents
+        self.tipCents = tipCents
+        self.otherFeesCents = otherFeesCents
+        self.paymentMethod = paymentMethod
+    }
 }
 
 /// One receipt as the list and detail routes project it.
@@ -114,8 +182,142 @@ struct Receipt: Decodable, Equatable, Hashable, Identifiable {
     /// Nil when neither parser ever saw the receipt - a different fact
     /// from "both ran and found nothing" (a full set of null values).
     let suggestions: MergedSuggestions?
+    /// Which fields a human has actually looked at (2026-09-01, server
+    /// migration 0009). Optional here rather than `[String]`: a response
+    /// from before that migration carries no such key, and an undeclared
+    /// key would fail the whole decode. Nothing in this build reads it yet
+    /// - it is decoded so the contract is honoured on both sides.
+    let reviewedFields: [String]?
+    /// How the text on this receipt was read - `"vision"` for a camera
+    /// capture from this app, `"pdf-text"` for the web client's PDF layer
+    /// (2026-09-01).
+    let ocrSource: String?
     let createdAt: Date
     let updatedAt: Date
+
+    /// Explicit rather than synthesized so the two fields added 2026-09-01
+    /// can default, and every existing construction site (the test
+    /// fixtures) keeps compiling unchanged. Decodable is still synthesized:
+    /// both new properties are Optional, so a response without them
+    /// decodes.
+    init(
+        id: UUID,
+        purchasedAt: String,
+        capturedAt: Date,
+        vendor: String?,
+        subtotalCents: Int?,
+        hstCents: Int?,
+        tipCents: Int?,
+        otherFeesCents: Int?,
+        totalCents: Int?,
+        currency: String,
+        category: String?,
+        paymentMethod: String?,
+        notes: String?,
+        status: ReceiptStatus,
+        suggestions: MergedSuggestions?,
+        createdAt: Date,
+        updatedAt: Date,
+        reviewedFields: [String]? = nil,
+        ocrSource: String? = nil
+    ) {
+        self.id = id
+        self.purchasedAt = purchasedAt
+        self.capturedAt = capturedAt
+        self.vendor = vendor
+        self.subtotalCents = subtotalCents
+        self.hstCents = hstCents
+        self.tipCents = tipCents
+        self.otherFeesCents = otherFeesCents
+        self.totalCents = totalCents
+        self.currency = currency
+        self.category = category
+        self.paymentMethod = paymentMethod
+        self.notes = notes
+        self.status = status
+        self.suggestions = suggestions
+        self.reviewedFields = reviewedFields
+        self.ocrSource = ocrSource
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+/// POST /api/receipts/parse (2026-09-01) - a second opinion on OCR text
+/// from the server's LLM, with no write of any kind.
+///
+/// Why the capture screen calls it at all, when the whole single-capture
+/// flow is deliberately offline: 51 of the 54 confirmations in production
+/// happened on the capture-time confirm screen, which has only ever shown
+/// the on-device heuristic's answer - and the LLM was right about the
+/// vendor 63% of the time against the heuristic's 39%, and had the right
+/// amount 57 times out of the 73 where the heuristic had none. Measured
+/// dwell on that screen is 47 seconds; the model answers in 5. The network
+/// is a bonus laid on top of a screen that still works with none.
+struct ServerParseResult: Decodable, Equatable {
+    let suggestions: ServerParsedSuggestions
+    /// Which model answered, and which prompt - recorded by the server for
+    /// the §7.3 accuracy measurement; this client does not render either.
+    let model: String
+    let promptVersion: Int
+}
+
+/// The parse route's suggestion shape. Every field optional, exactly like
+/// the on-device `ReceiptSuggestions`: a model that did not find something
+/// says so rather than inventing it.
+struct ServerParsedSuggestions: Decodable, Equatable {
+    let vendor: String?
+    let purchasedAt: String?
+    let totalCents: Int?
+    let hstCents: Int?
+    let subtotalCents: Int?
+    let tipCents: Int?
+    let otherFeesCents: Int?
+    let paymentMethod: String?
+    /// Served for the record; this client has had no tax-number field
+    /// since the 2026-08-26 field reduction and does not render it.
+    let vendorTaxNumber: String?
+
+    /// The same shape the on-device parser produces, so the confirm screen
+    /// has exactly one suggestion type to render whichever parser answered
+    /// (`ConfirmSuggestionSet(parse:)` takes it from here).
+    var asReceiptSuggestions: ReceiptSuggestions {
+        ReceiptSuggestions(
+            totalCents: totalCents,
+            hstCents: hstCents,
+            subtotalCents: subtotalCents,
+            tipCents: tipCents,
+            otherFeesCents: otherFeesCents,
+            paymentMethod: paymentMethod,
+            purchasedAt: purchasedAt,
+            vendor: vendor
+        )
+    }
+}
+
+/// The two ways POST /api/receipts/parse can legitimately say "not now",
+/// typed so callers can tell them from a bug (2026-09-01).
+///
+/// Both are silent on the capture screen: the second opinion is an
+/// enhancement, and a person confirming a receipt in a shop must never be
+/// shown a network apology for something they did not ask for.
+enum ServerParseError: Error, Equatable {
+    /// 503 `parse_unavailable` - the server has no model key configured.
+    case unavailable
+    /// 502 `parse_failed` - the model itself failed or answered
+    /// unusably.
+    case failed
+}
+
+extension ServerParseError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .unavailable:
+            return "The server cannot read receipts right now."
+        case .failed:
+            return "The server could not read this receipt."
+        }
+    }
 }
 
 /// One page of GET /api/receipts. `nextCursor` is opaque; handing it back

@@ -53,6 +53,14 @@ protocol KeptAPI: Sendable {
         vendor: String?,
         excludeId: UUID?
     ) async throws -> [Receipt]
+    /// POST /api/receipts/parse (2026-09-01) - the server's LLM reading the
+    /// same OCR text the on-device heuristic just read, as a second opinion
+    /// on the capture-time confirm screen. Writes nothing: no receipt
+    /// exists yet. Throws `ServerParseError` for the two "not now" answers
+    /// (503 `parse_unavailable`, 502 `parse_failed`), which callers swallow
+    /// - see `ServerParseResult`'s own doc comment for why this is a bonus
+    /// laid on an offline screen and never a dependency of it.
+    func parseReceiptText(ocrRawText: String, capturedAt: Date) async throws -> ServerParseResult
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget
     func uploadImage(to target: UploadTarget, data: Data, contentType: ImageUploadContentType) async throws
     func createReceipt(_ request: CreateReceiptRequest) async throws -> Receipt
@@ -61,23 +69,22 @@ protocol KeptAPI: Sendable {
     /// from every list, count and export from that moment on, bytes kept
     /// for CRA's six-year retention. Not the account-deletion hard delete.
     func deleteReceipt(id: UUID) async throws
-    /// PATCH /api/receipts/:id {status: "confirmed"} ALONE - proposal #9's
-    /// swipe-to-confirm on the Home list (2026-08-28): accepts whatever the
-    /// row already has stored as final, with no field review, mirroring the
-    /// web client's bulk-confirm exactly (`confirmPatch`, web/src/
-    /// bulkEdit.ts - "status alone. Never bundles a total or any other
-    /// field"; ratified in `docs/DECISIONS.md` 2026-08-28 for proposal #5).
-    /// This is why it is its own method and not a call to `confirmReceipt`
-    /// with a synthesized `ConfirmReceiptRequest`: that request type always
-    /// encodes every field EXPLICITLY, nulls included, on purpose (its own
-    /// doc comment - the confirm FORM always sends the whole reviewed
-    /// form), so reusing it here would silently clear any field the row's
-    /// own row does not carry a value for. Legitimately refused with 400
-    /// when the receipt has no total (the CHECK constraint the server
-    /// enforces) - callers gate the affordance on `Receipt.totalCents`
-    /// (the raw field), not `displayTotalCents`, so this is offered only
-    /// where it can succeed (HomeView's own comment on why the two differ).
-    func quickConfirmReceipt(id: UUID) async throws -> Receipt
+    /// PATCH /api/receipts/:id for proposal #9's swipe-to-confirm on the
+    /// Home list - carrying **the values the row was showing** since
+    /// 2026-09-01 (`QuickConfirmRequest`, whose own doc comment carries the
+    /// bug this fixes: the row rendered the served merge while the swipe
+    /// saved the stored column, so a row reading `JIMMY THE GREEK` saved
+    /// `In Store 392`).
+    ///
+    /// Still its own method rather than a `ConfirmReceiptRequest`: that
+    /// request encodes every field explicitly, nulls included, because the
+    /// confirm FORM always sends the whole reviewed form - reusing it here
+    /// would clear whatever the row does not render. Sending the displayed
+    /// total in the same PATCH is also what satisfies the server's
+    /// no-confirmed-receipt-without-a-total check, which is why the
+    /// affordance can now be offered wherever a total is VISIBLE rather
+    /// than only where the raw column holds one.
+    func quickConfirmReceipt(id: UUID, _ request: QuickConfirmRequest) async throws -> Receipt
     /// POST /api/receipts/:id/restore (proposal #9, 2026-08-28) - undo a
     /// soft delete. Can legitimately fail with 409 `restore_conflict` when
     /// the freed image slot collided with a different receipt's live image
@@ -209,6 +216,33 @@ extension APIClient: KeptAPI {
         return response.receipts
     }
 
+    /// The route is a literal path registered above `/:id`, same shadowing
+    /// reason as `/options` and `/summary`. `capturedAt` rides along so the
+    /// model can reject a date after the photograph the same way the
+    /// on-device date scorer does - the server owns that rule for its own
+    /// parser, and sending the instant costs one field.
+    ///
+    /// The two "not now" statuses are re-thrown as `ServerParseError`
+    /// rather than left as `APIError.requestFailed`, so a caller that must
+    /// stay silent about them (the capture screen) can say so in its own
+    /// types instead of matching on string codes.
+    func parseReceiptText(ocrRawText: String, capturedAt: Date) async throws -> ServerParseResult {
+        struct Body: Encodable {
+            let ocrRawText: String
+            let capturedAt: String
+        }
+        do {
+            return try await post(
+                "/api/receipts/parse",
+                body: Body(ocrRawText: ocrRawText, capturedAt: ReceiptFormat.timestamp(of: capturedAt))
+            )
+        } catch APIError.requestFailed(let code, _, _) where code == "parse_unavailable" {
+            throw ServerParseError.unavailable
+        } catch APIError.requestFailed(let code, _, _) where code == "parse_failed" {
+            throw ServerParseError.failed
+        }
+    }
+
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget {
         struct Body: Encodable {
             let contentType: ImageUploadContentType
@@ -228,16 +262,8 @@ extension APIClient: KeptAPI {
         try await patch("/api/receipts/\(id.uuidString.lowercased())", body: request)
     }
 
-    /// The one-key body proposal #9's swipe-to-confirm sends - `status`
-    /// alone, never the vendor/total/etc. keys `ConfirmReceiptRequest`
-    /// always carries explicitly (see this method's own protocol doc
-    /// comment for why the two must not be conflated).
-    private struct QuickConfirmBody: Encodable {
-        let status = "confirmed"
-    }
-
-    func quickConfirmReceipt(id: UUID) async throws -> Receipt {
-        try await patch("/api/receipts/\(id.uuidString.lowercased())", body: QuickConfirmBody())
+    func quickConfirmReceipt(id: UUID, _ request: QuickConfirmRequest) async throws -> Receipt {
+        try await patch("/api/receipts/\(id.uuidString.lowercased())", body: request)
     }
 
     /// POST /api/receipts/:id/restore - no body; the server has everything

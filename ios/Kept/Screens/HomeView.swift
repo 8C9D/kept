@@ -198,7 +198,7 @@ struct HomeView: View {
             }
             #endif
             .fullScreenCover(isPresented: $showCaptureFlow) {
-                CaptureFlowView(outbox: outbox, options: options, eventLogger: eventLogger) { didChangeAnything in
+                CaptureFlowView(api: api, outbox: outbox, options: options, eventLogger: eventLogger) { didChangeAnything in
                     showCaptureFlow = false
                     if didChangeAnything {
                         Task { await model.loadFirstPage() }
@@ -684,9 +684,9 @@ struct HomeView: View {
     /// you sure" step in front of it.
     ///
     /// **Swipe to confirm** (leading): offered ONLY when
-    /// `receipt.canQuickConfirm` - see that extension's own comment for
-    /// why it reads the raw `totalCents`, not `displayTotalCents`. Not
-    /// gated behind a dialog either, on the identical reasoning: the row
+    /// `receipt.canQuickConfirm` (ReceiptDisplay.swift) - a total the row
+    /// is actually showing, which is also the total the swipe now saves.
+    /// Not gated behind a dialog either, on the identical reasoning: the row
     /// already shows the vendor, date and total the person is confirming,
     /// the same amount of "looking" the web client's bulk-confirm button
     /// asks for before its own un-dialogued Confirm (web/src/views/
@@ -735,28 +735,9 @@ struct HomeView: View {
 
 // MARK: - Rows
 
-/// Proposal #9's swipe-to-confirm gate: whether `receipt` can be
-/// quick-confirmed without failing.
-///
-/// ⚠ Deliberately reads `totalCents` (the RAW stored field), never
-/// `displayTotalCents`. The server's `PATCH {status: "confirmed"}` check
-/// (routes/receipts.ts) reads `existing.totalCents` - the row's own
-/// stored value, written once at capture time by the on-device parse
-/// (`POST /api/receipts`'s create handler) - and NEVER the served §7.3
-/// merge. `displayTotalCents` can show a total the merge found even when
-/// the raw column is still nil: the merge's amount comes from the
-/// SERVER's own heuristic re-parse of the stored OCR text
-/// (`heuristicOnly(ocr?.totalCents ...)`, server/src/domain/
-/// mergedSuggestions.ts), a computation independent of the on-device parse
-/// that wrote the raw column, and the two can disagree. Gating on
-/// `displayTotalCents` would offer a swipe action that looks available on
-/// a row showing a total, then fails after the tap - exactly what the
-/// brief says not to do ("do not offer it where it cannot succeed").
-private extension Receipt {
-    var canQuickConfirm: Bool {
-        status == .pending && totalCents != nil
-    }
-}
+// Proposal #9's swipe-to-confirm gate lives on ReceiptDisplay.swift, next
+// to the display rule it now reads (2026-09-01): the swipe saves what the
+// row shows, so the gate asks whether the row is showing a total.
 
 /// One receipt in the list: vendor and date on the left, amount on the
 /// right, an amber badge when no human has confirmed the numbers yet.

@@ -103,6 +103,41 @@ final class ConfirmQueueModelTests: XCTestCase {
         XCTAssertEqual(queue.handledCount, 2) // set-asides were dealt with too
     }
 
+    /// Deleting from inside the queue moves it on exactly as a save does
+    /// (2026-09-01): the receipt was dealt with, so it counts, and the
+    /// next pending one is loaded. Without this the queue would sit on a
+    /// row the server no longer calls pending.
+    func testDeletingTheCurrentReceiptCountsAsHandledAndLoadsTheNext() async {
+        let first = Fixtures.receipt(status: .pending)
+        let second = Fixtures.receipt(status: .pending)
+        stubPendingList([first, second], pendingCount: 2)
+
+        await queue.loadNext()
+        // The server has tombstoned the first row, so the next page no
+        // longer carries it - which is what makes this different from a
+        // set-aside, where the row stays pending and the queue itself has
+        // to remember to skip it.
+        stubPendingList([second], pendingCount: 1)
+        await queue.advanceAfterDelete()
+
+        XCTAssertEqual(queue.handledCount, 1)
+        guard case .confirming(let model) = queue.phase else {
+            return XCTFail("Expected confirming, got \(queue.phase)")
+        }
+        XCTAssertEqual(model.receiptId, second.id)
+
+        stubPendingList([], pendingCount: 0)
+        await queue.advanceAfterDelete()
+        XCTAssertEqual(queue.handledCount, 2)
+        guard case .done(let setAsideCount) = queue.phase else {
+            return XCTFail("Expected done, got \(queue.phase)")
+        }
+        // Nothing was set aside: a deleted receipt is finished with, not
+        // deferred, so the done screen must not claim anything is still
+        // pending.
+        XCTAssertEqual(setAsideCount, 0)
+    }
+
     func testAFailedFetchStatesItselfAndRetries() async {
         struct Boom: LocalizedError {
             var errorDescription: String? { "no network" }

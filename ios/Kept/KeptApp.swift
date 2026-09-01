@@ -51,15 +51,22 @@ final class AppEnvironment: ObservableObject {
             reauthorization: AppleIDReauthorization(),
             eventLogger: eventLogger
         )
+        // Built before the outbox so the drain's vendor heuristic can read
+        // the live list rather than only the disk cache (2026-09-01).
+        let receiptOptions = ReceiptOptionsStore(api: api, defaults: .standard)
         let outbox = OutboxController(
             store: FileOutboxStore(),
             api: api,
             recognizer: VisionReceiptTextRecognizer(),
             tokenStore: tokenStore,
             connectivity: NetworkPathConnectivityMonitor(),
-            backgroundContinuation: AppBackgroundContinuation()
+            backgroundContinuation: AppBackgroundContinuation(),
+            // Weak, and read at parse time: the store outlives nothing here,
+            // but a closure holding it strongly would tie the queue's
+            // lifetime to a suggestions cache. An empty list is a fine
+            // answer - the geometric heuristic decides alone.
+            knownVendors: { [weak receiptOptions] in receiptOptions?.options.vendors ?? [] }
         )
-        let receiptOptions = ReceiptOptionsStore(api: api, defaults: .standard)
 
         // Wired after construction because the pieces reference each other:
         // the client reports rejected sessions to the controller it was

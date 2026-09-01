@@ -3,40 +3,52 @@ import SwiftUI
 /// The §7.2/§10A.1 disagreement note: two independent parsers read the
 /// same text differently, on a field where that is free signal (date:
 /// decides the fiscal year; HST: the input tax credit, added 2026-08-28).
-/// One implementation so the treatment - amber, inside the field, never
-/// red, a prompt to look rather than a rule - cannot drift between the
-/// fields that raise it. Originally written inline for the date row only;
+/// One implementation so the treatment - inside the field, never red, a
+/// prompt to look rather than a rule - cannot drift between the fields
+/// that raise it. Originally written inline for the date row only;
 /// factored out here when HST gained the same flag rather than duplicating
 /// the Label.
+///
+/// Secondary, not orange (2026-09-01): the whole screen used to shout in
+/// amber, and a note that shouts alongside a row that no longer does is
+/// the loudest thing left rather than the quiet aside it is meant to be.
+/// The triangle still carries the "look at this" job; the colour was only
+/// ever repeating what the icon already says.
 struct DisagreementNote: View {
     let message: String
 
     var body: some View {
         Label(message, systemImage: "exclamationmark.triangle")
             .font(.footnote)
-            .foregroundStyle(.orange)
+            .foregroundStyle(.secondary)
     }
 }
 
-/// One editable row for every confirmable field, so amber behaviour can
-/// never diverge between fields: tinted while unreviewed, cleared by
-/// focus (wired in ConfirmReceiptView), absent values stated as "Not
-/// found" placeholder text rather than a bare blank (spec §10A.1).
+/// One editable row for every confirmable field, so the treatment can
+/// never diverge between fields: absent values stated as "Not found"
+/// placeholder text rather than a bare blank (spec §10A.1).
 ///
 /// Money fields are the same row with a numeric keyboard and an inline
 /// "not a valid amount" nudge - previously a second, nearly identical
 /// struct, merged on the wave-4 reviewer's duplication finding.
+///
+/// The amber row tint this used to carry is gone (2026-09-01, the owner's
+/// own use): on a form where nearly every row is prefilled, "unreviewed"
+/// was most of the screen, and a page that is mostly highlighted
+/// highlights nothing. §10A.1's rule that a suggestion is never saved
+/// without a human confirming it is unchanged and still enforced where it
+/// actually lives - the Save button, which is the confirmation. The
+/// model's `unreviewedFields` bookkeeping is untouched: the date and HST
+/// notes, the rate hint and the save-time accept/override telemetry all
+/// still key off it.
 struct SuggestedFieldRow: View {
     let label: String
     @Binding var text: String
     /// Every row is focusable, including ones carrying no suggestion:
-    /// focus is what the keyboard toolbar and the tint both read, and a
-    /// money field with no focus value is a decimal pad the Done button
-    /// cannot close. Whether the tint moves is decided by the field's
-    /// `suggestion`, not by whether it can take focus.
+    /// focus is what the keyboard bar reads, and a money field with no
+    /// focus value is a decimal pad the Done button cannot close.
     let field: ConfirmReceiptModel.EditableField
     var focus: FocusState<ConfirmReceiptModel.EditableField?>.Binding
-    let isUnreviewed: Bool
     /// Set for money fields; drives the keyboard, the digit styling, and
     /// the inline invalid-amount nudge.
     var moneyInput: MoneyInput?
@@ -76,7 +88,6 @@ struct SuggestedFieldRow: View {
                 }
             }
         }
-        .listRowBackground(isUnreviewed ? Color.suggestionAmber : nil)
     }
 }
 
@@ -91,13 +102,10 @@ struct SuggestedFieldRow: View {
 /// landed or failed - the menu is absent and the row is the plain
 /// free-text field it has always been. Nothing here waits on the network.
 ///
-/// Vendor is the one caller that also passes `isUnreviewed` and a
-/// "Not found" placeholder: unlike category and payment method, vendor
-/// already carries an OCR/LLM suggestion (§7.3) before it ever gained a
-/// menu, and it must not lose that amber treatment to gain this one. The
-/// amber is threaded in here, composed with the reusable-value menu,
-/// rather than duplicating this row as a near-identical second struct the
-/// way SuggestedFieldRow's own history (wave 4) warns against.
+/// Vendor is the one caller that also passes a "Not found" placeholder:
+/// unlike category and payment method, vendor carries an OCR/LLM
+/// suggestion (§7.3), so an empty vendor field is a parser that found
+/// nothing rather than a field nobody has filled in yet.
 struct ReusableValueFieldRow: View {
     let label: String
     @Binding var text: String
@@ -110,11 +118,6 @@ struct ReusableValueFieldRow: View {
     /// payment method, which are never suggested and so have nothing to
     /// be "found" in the first place.
     var placeholder: String = "None"
-    /// Amber-until-touched, exactly like SuggestedFieldRow's fields.
-    /// Defaults false: category and payment method never pass this, so
-    /// they never tint - the same absence-of-a-suggestion rule that keeps
-    /// other fees from tinting on SuggestedFieldRow.
-    var isUnreviewed: Bool = false
     /// Called when a past value is picked from the menu - `option_reused`
     /// (behavioural telemetry, 2026-08-28). Nil by default so a caller
     /// that has no EventLogger in hand (there is none today, but the row
@@ -124,8 +127,19 @@ struct ReusableValueFieldRow: View {
     var body: some View {
         LabeledContent(label) {
             HStack(spacing: 8) {
+                // Leading, not trailing (2026-09-01). A trailing-aligned
+                // SwiftUI TextField does not render a space that is
+                // currently the last character: typing "Food Basics"
+                // showed "Food" until the "B" arrived, so the space read
+                // as a keystroke the app had dropped. The character was
+                // always in the string - `value` read back "Food " and two
+                // screenshots taken either side of the space were
+                // byte-identical - which is what makes it a layout bug and
+                // not an input one. The money rows keep their trailing
+                // alignment: digits line up on the decimal point there,
+                // and no amount ends in a space.
                 TextField(placeholder, text: $text)
-                    .multilineTextAlignment(.trailing)
+                    .multilineTextAlignment(.leading)
                     .focused(focus, equals: field)
                     .accessibilityIdentifier("field.\(label)")
                 if !pastValues.isEmpty {
@@ -145,6 +159,5 @@ struct ReusableValueFieldRow: View {
                 }
             }
         }
-        .listRowBackground(isUnreviewed ? Color.suggestionAmber : nil)
     }
 }
