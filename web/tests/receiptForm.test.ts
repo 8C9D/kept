@@ -6,6 +6,7 @@ import {
   arithmeticMismatch,
   checkAmountFloor,
   hstSuggestionChip,
+  HST_RATE_CURRENCY,
   isComponentAmountField,
   patchChangesNothing,
   patchForConfirm,
@@ -1374,7 +1375,7 @@ describe("applyComponentEdit - total tracks its components while consistent", ()
 describe("hstSuggestionChip - the offer for a blank HST box", () => {
   it("offers the difference when a total is on the receipt", () => {
     // Flow A's second half: OCR total $14.35, subtotal typed as $12.70.
-    expect(hstSuggestionChip(draft({ subtotal: "12.70", total: "14.35" }))).toEqual({
+    expect(hstSuggestionChip(draft({ subtotal: "12.70", total: "14.35" }), "CAD")).toEqual({
       field: "hst",
       cents: 165,
       kind: "hst-from-total",
@@ -1385,13 +1386,13 @@ describe("hstSuggestionChip - the offer for a blank HST box", () => {
   it("subtracts tip and other fees from that difference", () => {
     expect(
       hstSuggestionChip(
-        draft({ subtotal: "100.00", tip: "20.00", otherFees: "5.00", total: "138.00" }),
+        draft({ subtotal: "100.00", tip: "20.00", otherFees: "5.00", total: "138.00" }), "CAD"
       )?.cents,
     ).toBe(1300);
   });
 
   it("falls back to the default rate when there is no total to subtract from", () => {
-    expect(hstSuggestionChip(draft({ subtotal: "12.70" }))).toEqual({
+    expect(hstSuggestionChip(draft({ subtotal: "12.70" }), "CAD")).toEqual({
       field: "hst",
       cents: 165,
       kind: "hst-at-default-rate",
@@ -1404,36 +1405,36 @@ describe("hstSuggestionChip - the offer for a blank HST box", () => {
     // total below it is evidence another box is wrong. Neither is an HST
     // amount anyone could act on, so the honest offer is the rate.
     expect(
-      hstSuggestionChip(draft({ subtotal: "12.70", total: "12.70" }))?.kind,
+      hstSuggestionChip(draft({ subtotal: "12.70", total: "12.70" }), "CAD")?.kind,
     ).toBe("hst-at-default-rate");
     expect(
-      hstSuggestionChip(draft({ subtotal: "12.70", total: "10.00" }))?.kind,
+      hstSuggestionChip(draft({ subtotal: "12.70", total: "10.00" }), "CAD")?.kind,
     ).toBe("hst-at-default-rate");
   });
 
   it("offers nothing once HST has a value - including a deliberate zero", () => {
-    expect(hstSuggestionChip(draft({ subtotal: "12.70", hst: "1.65" }))).toBeNull();
-    expect(hstSuggestionChip(draft({ subtotal: "12.70", hst: "0" }))).toBeNull();
+    expect(hstSuggestionChip(draft({ subtotal: "12.70", hst: "1.65" }), "CAD")).toBeNull();
+    expect(hstSuggestionChip(draft({ subtotal: "12.70", hst: "0" }), "CAD")).toBeNull();
   });
 
   it("offers nothing without a subtotal to work from", () => {
-    expect(hstSuggestionChip(draft({ total: "14.35" }))).toBeNull();
+    expect(hstSuggestionChip(draft({ total: "14.35" }), "CAD")).toBeNull();
   });
 
   it("offers nothing on a zero or negative subtotal", () => {
-    expect(hstSuggestionChip(draft({ subtotal: "0" }))).toBeNull();
-    expect(hstSuggestionChip(draft({ subtotal: "-12.70" }))).toBeNull();
+    expect(hstSuggestionChip(draft({ subtotal: "0" }), "CAD")).toBeNull();
+    expect(hstSuggestionChip(draft({ subtotal: "-12.70" }), "CAD")).toBeNull();
   });
 
   it("stays silent while a box is mid-keystroke unparseable", () => {
-    expect(hstSuggestionChip(draft({ subtotal: "12.7O" }))).toBeNull();
+    expect(hstSuggestionChip(draft({ subtotal: "12.7O" }), "CAD")).toBeNull();
   });
 
   it("moves the total too when applied, through the tracking rule", () => {
     // The chip's own promise: "HST at 13% of subtotal" on a blank-total
     // draft means $12.70 becomes $12.70 + $1.65.
     const start = draft({ subtotal: "12.70" });
-    const chip = hstSuggestionChip(start);
+    const chip = hstSuggestionChip(start, "CAD");
     const next = applyComponentEdit(start, "hst", "$1.65");
     expect(chip?.cents).toBe(165);
     expect(next.total).toBe("$14.35");
@@ -1957,5 +1958,86 @@ describe("the detail screen's redraw after a save-for-later (2026-09-01)", () =>
     };
     expect(draftForDisplay(confirmed)).toEqual(draftFromReceipt(confirmed));
     expect(draftForDisplay(confirmed).total).toBe("$14.35");
+  });
+});
+
+describe("hstSuggestionChip - the default-rate offer is CAD-only (2026-09-01)", () => {
+  /**
+   * Production started holding USD receipts alongside CAD. Ontario's 13% is
+   * a fact about a Canadian sale; beside a USD total, a chip reading "HST at
+   * 13% of subtotal" is not a weaker guess but an answer to a different
+   * country's question - and a suggestion on this form may be many things,
+   * never simply wrong.
+   *
+   * Only the rate offer is gated. `hst-from-total` applies no rate and
+   * assumes no jurisdiction: it subtracts the numbers already on screen from
+   * each other, which is arithmetic and true in every currency.
+   */
+  const noTotal = draft({ subtotal: "12.70" });
+  const withTotal = draft({ subtotal: "12.70", total: "14.35" });
+
+  it("offers the rate on a CAD receipt", () => {
+    expect(hstSuggestionChip(noTotal, "CAD")).toEqual({
+      field: "hst",
+      cents: 165,
+      kind: "hst-at-default-rate",
+      formula: "HST at 13% of subtotal",
+    });
+  });
+
+  it("offers nothing at all on a USD receipt with no total to subtract from", () => {
+    // Not a different chip, and not a rate with a caveat attached - nothing.
+    // The person types what the paper says, which is what they would have
+    // had to do anyway.
+    expect(hstSuggestionChip(noTotal, "USD")).toBeNull();
+  });
+
+  it("still offers the from-total difference on a USD receipt", () => {
+    expect(hstSuggestionChip(withTotal, "USD")).toEqual({
+      field: "hst",
+      cents: 165,
+      kind: "hst-from-total",
+      formula: "HST = total − subtotal − tip − other fees",
+    });
+  });
+
+  it("gives a USD receipt the identical from-total offer a CAD one gets", () => {
+    // The sharpest statement of "currency gates one branch and not the
+    // other": same draft, two currencies, same chip.
+    expect(hstSuggestionChip(withTotal, "USD")).toEqual(
+      hstSuggestionChip(withTotal, "CAD"),
+    );
+  });
+
+  it("does not fall back to the rate when a USD receipt's difference is unusable", () => {
+    // A total that equals its subtotal says nothing about tax, so the
+    // from-total branch declines - and on a USD receipt there is nothing
+    // behind it to fall through to. The CAD control shows the fallback that
+    // is being withheld.
+    const flat = draft({ subtotal: "12.70", total: "12.70" });
+    expect(hstSuggestionChip(flat, "USD")).toBeNull();
+    expect(hstSuggestionChip(flat, "CAD")?.kind).toBe("hst-at-default-rate");
+  });
+
+  it("gates on 'is it CAD', not on 'is it USD'", () => {
+    // A third currency must be treated like USD, not like CAD: the rate
+    // belongs to one jurisdiction, and everything else is outside it.
+    expect(hstSuggestionChip(noTotal, "EUR")).toBeNull();
+    expect(hstSuggestionChip(noTotal, "GBP")).toBeNull();
+  });
+
+  it("names the currency it gates on rather than spelling it at the call site", () => {
+    expect(HST_RATE_CURRENCY).toBe("CAD");
+    expect(hstSuggestionChip(noTotal, HST_RATE_CURRENCY)?.kind).toBe(
+      "hst-at-default-rate",
+    );
+  });
+
+  it("leaves the rate mirror itself currency-blind", () => {
+    // `suggestDefaultRateHst` mirrors a server function that takes a rate in
+    // basis points precisely so no one rate is baked into the arithmetic.
+    // The jurisdiction question is the chip's, not that function's, and it
+    // stays that way.
+    expect(suggestDefaultRateHst(1270)).toEqual({ hstCents: 165, totalCents: 1435 });
   });
 });

@@ -740,6 +740,23 @@ export function reconciliationSuggestions(
 export const DEFAULT_HST_RATE_BPS = 1300;
 
 /**
+ * The one currency the rate above can be a fact about (2026-09-01, when
+ * production started holding USD receipts alongside CAD). `receipt.currency`
+ * is the server's three-letter code, validated `/^[A-Z]{3}$/` on every write
+ * (server/src/http/schemas.ts) and defaulted to CAD on the column itself, so
+ * this compares exactly rather than case-folding: there is no lowercase
+ * "cad" for it to miss.
+ *
+ * Currency is the sharpest signal this client has about jurisdiction, and it
+ * is still not a precise one - a CAD receipt can be printed in any province,
+ * which is the whole reason `DEFAULT_HST_RATE_BPS` is documented as a
+ * default rather than a fact. What it rules out cleanly is the case that is
+ * not a matter of degree at all: a US receipt, where the Ontario rate is not
+ * a worse guess but an answer to a different question.
+ */
+export const HST_RATE_CURRENCY = "CAD";
+
+/**
  * The live mirror of the server's `suggestDefaultRateHst`
  * (`domain/arithmetic.ts`, 2026-09-01): what HST and total a subtotal
  * WOULD carry at the default rate. For the receipt that prints a subtotal
@@ -956,14 +973,34 @@ export interface AmountChip extends DerivedAmount {
  *   makes for a negative tip.
  * - Otherwise, the default rate (`hst-at-default-rate`), which is a guess
  *   about the world rather than about the receipt and says so in its own
- *   label.
+ *   label - and which is therefore the only one of the two that `currency`
+ *   can disqualify. See below.
+ *
+ * ⚠ **`currency` gates the default-rate offer only** (2026-09-01, when
+ * production started holding USD receipts alongside CAD). Ontario's 13% is
+ * a fact about a Canadian sale; on a US receipt it is not a weaker guess,
+ * it is about a different country's tax system, and a chip reading "HST at
+ * 13% of subtotal" beside a USD total is simply wrong - the one thing a
+ * suggestion on this form may never be. Offering nothing is the honest
+ * answer: the person types what the paper says, which is what they would
+ * have had to do anyway.
+ *
+ * The `hst-from-total` branch stays currency-agnostic, and deliberately.
+ * It applies no rate and assumes no jurisdiction - it subtracts the numbers
+ * already on screen from each other and says so in its formula. "Total
+ * minus subtotal minus tip minus fees" is arithmetic, true in every
+ * currency, and a USD receipt whose tax line the parsers missed deserves it
+ * exactly as much as a CAD one does.
  *
  * Never auto-applied. Applying it also moves the total, through
  * `applyComponentEdit` above and only when that rule allows - which is why
  * the second offer is safe to make on a receipt whose total is already
  * consistent with its subtotal: it is what "add 13% to this" means.
  */
-export function hstSuggestionChip(draft: ReceiptDraft): AmountChip | null {
+export function hstSuggestionChip(
+  draft: ReceiptDraft,
+  currency: string,
+): AmountChip | null {
   const parsed = parseAmounts(draft);
   if (parsed === null || parsed.hst !== null || parsed.subtotal === null) {
     return null;
@@ -977,6 +1014,15 @@ export function hstSuggestionChip(draft: ReceiptDraft): AmountChip | null {
         ? null
         : { ...offer, kind: "hst-from-total", formula: "HST = total − subtotal − tip − other fees" };
     }
+  }
+  if (currency !== HST_RATE_CURRENCY) {
+    // A non-CAD receipt gets the arithmetic offer above if it qualifies and
+    // nothing at all otherwise - never a rate from another country's tax
+    // system. Checked here rather than inside `suggestDefaultRateHst`,
+    // which is the mirror of a server function that takes a rate in basis
+    // points and has no business knowing about currencies (its `rateBps`
+    // parameter is exactly so no one rate is baked into the arithmetic).
+    return null;
   }
   const suggested = suggestDefaultRateHst(parsed.subtotal);
   if (suggested === null) {
@@ -1665,7 +1711,7 @@ export function ReceiptFieldsForm({
   // better-worded of the two (it names the default-rate case the fill
   // cannot reach at all). Where both apply, the chip wins and the fill is
   // suppressed for HST alone; every other field's fill is untouched.
-  const hstChip = hstSuggestionChip(draft);
+  const hstChip = hstSuggestionChip(draft, receipt.currency);
 
   /** Applies a derived-amount fill (the "Fill" button in `AmountDeriveNote`
    * below) - never wired to `text()`/`onFieldEdited`/`touched`, because
