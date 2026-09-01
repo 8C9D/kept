@@ -9,7 +9,8 @@ import {
   ReceiptFieldsForm,
   draftFromPending,
   logFieldEditTelemetry,
-  patchFromDraft,
+  patchForConfirm,
+  patchForSaveForLater,
   type ReceiptDraft,
   type SuggestibleField,
 } from "./ReceiptForm.js";
@@ -51,6 +52,11 @@ export function ConfirmQueue({
   // read out at Confirm alongside `editsRef` so those two sources are
   // scored accepted/overridden the same save-time way (2026-08-28 ruling).
   const clientAppliedRef = useRef<Set<SuggestibleField>>(new Set());
+  // Which fields this session has REVIEWED - typed in, or chosen from an
+  // amount chip (2026-09-01, ReceiptForm's `onFieldReviewed`). Read out at
+  // Confirm and at Save for later, where `reviewedFieldsForSave` unions it
+  // with whatever the receipt already carried.
+  const reviewedRef = useRef<Set<keyof ReceiptDraft>>(new Set());
 
   const loadNext = useCallback(
     async (skip: string[]) => {
@@ -73,6 +79,7 @@ export function ConfirmQueue({
         setDraft(draftFromPending(detail));
         editsRef.current = [];
         clientAppliedRef.current = new Set();
+        reviewedRef.current = new Set();
         logEvent({ action: "confirm_opened", receiptId: detail.id });
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught));
@@ -92,7 +99,7 @@ export function ConfirmQueue({
     setError(null);
     let patch;
     try {
-      patch = patchFromDraft(current, draft);
+      patch = patchForConfirm(current, draft, reviewedRef.current);
     } catch (caught) {
       if (caught instanceof DraftError) {
         setError(caught.message);
@@ -101,14 +108,55 @@ export function ConfirmQueue({
       throw caught;
     }
     try {
-      const confirmed = await api.updateReceipt(current.id, {
-        ...patch,
-        status: "confirmed",
-      });
+      const confirmed = await api.updateReceipt(current.id, patch);
       options.noteSaved(confirmed);
       logEvent({ action: "confirm_saved", receiptId: current.id });
       logFieldEditTelemetry(current, editsRef.current, clientAppliedRef.current);
       await loadNext(skippedIds);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  /**
+   * "Save for later" (2026-09-01): keep what is on screen, stay pending,
+   * move on. The PATCH carries no `status`, so the receipt keeps its place
+   * in the queue and in the pending count - and carries `reviewedFields`,
+   * so the boxes just filled stop being re-suggested next time it opens.
+   *
+   * It then advances like Skip does, and adds this receipt to `skippedIds`
+   * for the same reason Skip does: the receipt is STILL PENDING, so
+   * `loadNext` would hand back the very same one and the save would look
+   * like it did nothing. Leaving the queue and re-entering it brings the
+   * half-finished receipt back, now prefilled with what was typed.
+   */
+  async function saveForLater() {
+    if (current === null || draft === null) {
+      return;
+    }
+    setError(null);
+    let patch;
+    try {
+      patch = patchForSaveForLater(current, draft, reviewedRef.current);
+    } catch (caught) {
+      if (caught instanceof DraftError) {
+        setError(caught.message);
+        return;
+      }
+      throw caught;
+    }
+    try {
+      const saved = await api.updateReceipt(current.id, patch);
+      options.noteSaved(saved);
+      // The same word iOS's confirm screen uses for its "Later"
+      // (ConfirmReceiptView.logDeferralIfConfirming): a pending receipt
+      // left unconfirmed on purpose. That this one also saved its fields
+      // does not change what was deferred.
+      logEvent({ action: "confirm_deferred", receiptId: current.id });
+      logFieldEditTelemetry(current, editsRef.current, clientAppliedRef.current);
+      const skip = [...skippedIds, current.id];
+      setSkippedIds(skip);
+      await loadNext(skip);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -180,6 +228,7 @@ export function ConfirmQueue({
             api={api}
             onOpenReceipt={onOpenReceipt}
             onFieldEdited={(field) => editsRef.current.push(field)}
+            onFieldReviewed={(field) => reviewedRef.current.add(field)}
             onSuggestionApplied={(field) => clientAppliedRef.current.add(field)}
           />
           {error !== null && <p className="error">{error}</p>}
@@ -187,6 +236,10 @@ export function ConfirmQueue({
             <button className="primary" onClick={() => void confirm()}>
               Confirm
             </button>
+            {/* Between Confirm and Skip in both position and meaning:
+                Skip loses what is typed, Save for later keeps it, and
+                neither confirms anything. */}
+            <button onClick={() => void saveForLater()}>Save for later</button>
             <button onClick={skip}>Skip for now</button>
           </div>
         </div>

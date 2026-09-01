@@ -5,6 +5,7 @@ import {
   sha256Hex,
   supportedContentType,
   uploadOne,
+  type PdfTextExtractor,
 } from "../src/upload.js";
 
 /**
@@ -13,6 +14,13 @@ import {
  * NOT inherit the iOS outbox's 409-as-saved), an unsupported type never
  * starts an upload, and the create carries the digest of what was actually
  * PUT.
+ *
+ * 2026-09-01 adds the PDF text layer. The extractor is INJECTED in every
+ * test below rather than left to default: the real one dynamically imports
+ * pdf.js, which needs a browser worker, and a suite that quietly exercised
+ * it would be testing the library instead of this file's rules - which
+ * are: text and source travel together or not at all, an empty text layer
+ * sends neither, and an unreadable PDF still produces a receipt.
  */
 
 const PDF_BYTES = new TextEncoder().encode("%PDF-1.4 fake").buffer as ArrayBuffer;
@@ -62,6 +70,13 @@ describe("isoDateToday", () => {
   });
 });
 
+/** A PDF that carries no text layer - the scanned-receipt case. */
+const noTextLayer: PdfTextExtractor = async () => ({
+  text: "",
+  lines: 0,
+  truncated: false,
+});
+
 describe("uploadOne", () => {
   const file = {
     name: "receipt.pdf",
@@ -77,8 +92,13 @@ describe("uploadOne", () => {
         fakeApi({ seenBodies }),
         file,
         new Date(2026, 7, 21, 12, 0, 0),
+        noTextLayer,
       );
-      expect(outcome).toEqual({ state: "created", receiptId: "receipt-1" });
+      expect(outcome).toEqual({
+        state: "created",
+        receiptId: "receipt-1",
+        pdfText: { state: "no-text-layer" },
+      });
       const body = seenBodies[0] as {
         purchasedAt: string;
         capturedAt: string;
@@ -86,13 +106,98 @@ describe("uploadOne", () => {
       };
       expect(body.purchasedAt).toBe("2026-08-21");
       expect(body.image.sha256).toBe(await sha256Hex(PDF_BYTES));
-      // Nothing is asked before the drop any more: the create carries the
-      // dates and the image, and no business-or-personal choice exists.
+      // Nothing is asked before the drop: the create carries the dates and
+      // the image, and - for a PDF with no text layer - nothing else. No
+      // `ocrRawText`, and above all no `ocrSource` claiming a parse that
+      // never happened.
       expect(Object.keys(body).sort()).toEqual([
         "capturedAt",
         "image",
         "purchasedAt",
       ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("sends the extracted text and its source together for a PDF with a text layer", async () => {
+    const seenBodies: unknown[] = [];
+    const restore = stubFetch(200);
+    try {
+      const outcome = await uploadOne(
+        fakeApi({ seenBodies }),
+        file,
+        new Date(2026, 7, 21, 12, 0, 0),
+        async () => ({
+          text: "FOOD BASICS\nTOTAL 14.35",
+          lines: 2,
+          truncated: false,
+        }),
+      );
+      expect(outcome).toEqual({
+        state: "created",
+        receiptId: "receipt-1",
+        pdfText: { state: "extracted", lines: 2, truncated: false },
+      });
+      const body = seenBodies[0] as {
+        ocrRawText: string;
+        ocrSource: string;
+      };
+      expect(body.ocrRawText).toBe("FOOD BASICS\nTOTAL 14.35");
+      expect(body.ocrSource).toBe("pdf-text");
+    } finally {
+      restore();
+    }
+  });
+
+  it("creates the receipt anyway when the PDF cannot be read, and says why", async () => {
+    const seenBodies: unknown[] = [];
+    const restore = stubFetch(200);
+    try {
+      const outcome = await uploadOne(
+        fakeApi({ seenBodies }),
+        file,
+        new Date(2026, 7, 21, 12, 0, 0),
+        async () => {
+          throw new Error("Invalid PDF structure");
+        },
+      );
+      // The bytes are in storage and the receipt exists; what was lost is
+      // the head start, and the reason is reported rather than swallowed.
+      expect(outcome).toEqual({
+        state: "created",
+        receiptId: "receipt-1",
+        pdfText: { state: "unreadable", detail: "Invalid PDF structure" },
+      });
+      expect(Object.keys(seenBodies[0] as object).sort()).toEqual([
+        "capturedAt",
+        "image",
+        "purchasedAt",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("never runs the extractor for an image - this client does no OCR", async () => {
+    const restore = stubFetch(200);
+    let called = false;
+    try {
+      const outcome = await uploadOne(
+        fakeApi({}),
+        { name: "receipt.jpg", type: "image/jpeg", bytes: async () => PDF_BYTES },
+        new Date(),
+        async () => {
+          called = true;
+          return { text: "", lines: 0, truncated: false };
+        },
+      );
+      expect(called).toBe(false);
+      expect(outcome).toEqual({
+        state: "created",
+        receiptId: "receipt-1",
+        pdfText: null,
+      });
     } finally {
       restore();
     }
@@ -113,6 +218,7 @@ describe("uploadOne", () => {
         }),
         file,
         new Date(),
+        noTextLayer,
       );
       expect(outcome).toEqual({ state: "duplicate" });
     } finally {
@@ -125,6 +231,7 @@ describe("uploadOne", () => {
       fakeApi({}),
       { name: "receipt.heic", type: "image/heic", bytes: async () => PDF_BYTES },
       new Date(),
+      noTextLayer,
     );
     expect(outcome.state).toBe("unsupported");
   });
@@ -132,7 +239,7 @@ describe("uploadOne", () => {
   it("reports a storage refusal as a failure naming the status", async () => {
     const restore = stubFetch(403);
     try {
-      const outcome = await uploadOne(fakeApi({}), file, new Date());
+      const outcome = await uploadOne(fakeApi({}), file, new Date(), noTextLayer);
       expect(outcome).toEqual({
         state: "failed",
         detail: "storage answered 403 to the upload",

@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   DraftError,
+  amountFloorNote,
+  applyComponentEdit,
   arithmeticMismatch,
+  checkAmountFloor,
+  hstSuggestionChip,
+  isComponentAmountField,
+  patchChangesNothing,
+  patchForConfirm,
+  patchForSaveForLater,
+  reviewedFieldsForSave,
+  suggestDefaultRateHst,
   checkHstRatePlausibility,
   dateDisagreementNote,
   deriveMissingAmount,
@@ -36,6 +46,8 @@ function receipt(overrides: Partial<Receipt> = {}): Receipt {
     notes: null,
     status: "pending",
     suggestions: null,
+    reviewedFields: [],
+    ocrSource: null,
     createdAt: "2026-08-21T12:00:00.000Z",
     updatedAt: "2026-08-21T12:00:00.000Z",
     ...overrides,
@@ -311,10 +323,81 @@ describe("deriveMissingAmount - the live mirror of the server's function of the 
     ).toBeNull();
   });
 
-  it("derives nothing when two or more fields are blank - more than one unknown", () => {
+  it("derives nothing when two or more fields are GENUINELY unknown", () => {
+    // Subtotal and HST both blank: two real unknowns and one equation.
+    // (Before the 2026-09-01 widening this test read "two or more fields
+    // are blank" and used a blank other-fees line as one of the two - that
+    // is no longer an unknown, and the case below is what the sentence
+    // always meant.)
     expect(
-      deriveMissingAmount(draft({ hst: "13.00", tip: "20.00", total: "138.00" })),
+      deriveMissingAmount(draft({ tip: "20.00", total: "138.00" })),
     ).toBeNull();
+    expect(
+      deriveMissingAmount(draft({ subtotal: "100.00", tip: "20.00" })),
+    ).toBeNull();
+  });
+
+  describe("the 2026-09-01 widening - a blank tip or fee reads as no such line", () => {
+    it("derives HST from a subtotal and a total alone - the contract's own example", () => {
+      // {subtotal 1270, total 1435} -> HST 165. The commonest receipt
+      // shape there is, and the one that derived nothing until this date.
+      const result = deriveMissingAmount(
+        draft({ subtotal: "12.70", total: "14.35" }),
+      );
+      expect(result).toEqual({
+        field: "hst",
+        cents: 165,
+        formula: "HST = total − subtotal − tip − other fees",
+      });
+    });
+
+    it("derives the total from a subtotal and an HST alone", () => {
+      // {subtotal 1270, hst 165} -> total 1435.
+      expect(
+        deriveMissingAmount(draft({ subtotal: "12.70", hst: "1.65" }))?.cents,
+      ).toBe(1435);
+    });
+
+    it("derives the subtotal from a total and an HST alone", () => {
+      expect(
+        deriveMissingAmount(draft({ hst: "1.65", total: "14.35" }))?.cents,
+      ).toBe(1270);
+    });
+
+    it("still needs the other four to solve FOR a tip", () => {
+      // Tip blank AND other fees blank, with a $25 shortfall on the table:
+      // the pre-2026-09-01 rule stands for these two fields, because
+      // "the tip is whatever balances these numbers" invents a gratuity.
+      expect(
+        deriveMissingAmount(
+          draft({ subtotal: "100.00", hst: "13.00", total: "138.00" }),
+        ),
+      ).toBeNull();
+      // With other fees filled in, tip is the one blank and is derivable
+      // exactly as it always was.
+      expect(
+        deriveMissingAmount(
+          draft({
+            subtotal: "100.00",
+            hst: "13.00",
+            otherFees: "0.00",
+            total: "138.00",
+          }),
+        ),
+      ).toEqual({
+        field: "tip",
+        cents: 2500,
+        formula: "Tip = total − subtotal − HST − other fees",
+      });
+    });
+
+    it("still refuses a negative tip under the widened rule", () => {
+      expect(
+        deriveMissingAmount(
+          draft({ subtotal: "100.00", hst: "13.00", otherFees: "5.00", total: "100.00" }),
+        ),
+      ).toBeNull();
+    });
   });
 
   it("refuses a negative tip - the server's own named refusal", () => {
@@ -895,5 +978,430 @@ describe("summarizeFieldEdits - client-applied sources folded into the save-time
     // must behave exactly as it did before this change when it is omitted.
     const row = receipt({ suggestions: null });
     expect(summarizeFieldEdits(row, ["vendor"]).suggestionOutcomes).toEqual([]);
+  });
+});
+
+/* ────────────────────────────────────────────────────────────────────────
+   2026-09-01: reviewed fields and "save for later", and the amount rules
+   that came with them. Everything below is pure - the React component
+   these feed is not under test here, the decisions it renders are.
+   ──────────────────────────────────────────────────────────────────────── */
+
+describe("reviewedFieldsForSave - what a save reports as looked at", () => {
+  it("unions the receipt's stored set with this session's touched fields", () => {
+    const row = receipt({ reviewedFields: ["vendor", "totalCents"] });
+    expect(
+      reviewedFieldsForSave(row, new Set(["hst", "category"])),
+    ).toEqual(["vendor", "hstCents", "totalCents", "category"]);
+  });
+
+  it("never drops a field reviewed on an earlier visit", () => {
+    // The PATCH replaces the stored set outright, so sending only today's
+    // touches would silently un-review last week's - handing the parser
+    // back a field it had already lost.
+    const row = receipt({ reviewedFields: ["vendor", "notes"] });
+    expect(reviewedFieldsForSave(row, new Set(["hst"]))).toEqual([
+      "vendor",
+      "hstCents",
+      "notes",
+    ]);
+  });
+
+  it("translates every draft key to the server's own field name", () => {
+    const row = receipt();
+    expect(
+      reviewedFieldsForSave(
+        row,
+        new Set([
+          "total",
+          "purchasedAt",
+          "vendor",
+          "hst",
+          "subtotal",
+          "tip",
+          "otherFees",
+          "category",
+          "paymentMethod",
+          "notes",
+        ]),
+      ),
+    ).toEqual([
+      "purchasedAt",
+      "vendor",
+      "subtotalCents",
+      "hstCents",
+      "tipCents",
+      "otherFeesCents",
+      "totalCents",
+      "category",
+      "paymentMethod",
+      "notes",
+    ]);
+  });
+
+  it("orders by the vocabulary, not by the order fields were touched", () => {
+    // A request body that varied with click order is one no test can pin.
+    const row = receipt();
+    expect(reviewedFieldsForSave(row, new Set(["notes", "vendor"]))).toEqual([
+      "vendor",
+      "notes",
+    ]);
+  });
+
+  it("is empty when nothing has ever been reviewed", () => {
+    expect(reviewedFieldsForSave(receipt(), new Set())).toEqual([]);
+  });
+});
+
+describe("the two patch shapes - save for later versus confirm", () => {
+  const row = receipt({ vendor: "Basics", totalCents: 1435 });
+  const edited = draft({
+    total: "$14.35",
+    vendor: "Food Basics",
+    purchasedAt: "2026-08-21",
+  });
+
+  it("save for later carries the edits and the reviewed set, and NO status", () => {
+    const patch = patchForSaveForLater(row, edited, new Set(["vendor"]));
+    expect(patch).toEqual({
+      vendor: "Food Basics",
+      reviewedFields: ["vendor"],
+    });
+    // The absence is the whole feature: a PATCH without `status` leaves
+    // the receipt pending, in the queue, out of every export.
+    expect("status" in patch).toBe(false);
+  });
+
+  it("confirm is the same patch plus status - exactly one key apart", () => {
+    const later = patchForSaveForLater(row, edited, new Set(["vendor"]));
+    const confirmed = patchForConfirm(row, edited, new Set(["vendor"]));
+    expect(confirmed).toEqual({ ...later, status: "confirmed" });
+  });
+
+  it("names the field when money does not parse, from either builder", () => {
+    const bad = draft({ total: "twelve dollars" });
+    expect(() => patchForSaveForLater(row, bad, new Set())).toThrow(DraftError);
+    expect(() => patchForConfirm(row, bad, new Set())).toThrow(/total/);
+  });
+});
+
+describe("patchChangesNothing - what the detail screen calls a no-op", () => {
+  it("is true when only the already-stored reviewed set would be re-sent", () => {
+    const row = receipt({ reviewedFields: ["vendor"] });
+    expect(
+      patchChangesNothing(row, { reviewedFields: ["vendor"] }),
+    ).toBe(true);
+  });
+
+  it("is false when the reviewed set grew - marking a field reviewed is a change", () => {
+    const row = receipt({ reviewedFields: ["vendor"] });
+    expect(
+      patchChangesNothing(row, { reviewedFields: ["vendor", "hstCents"] }),
+    ).toBe(false);
+  });
+
+  it("is false whenever any field is in the patch", () => {
+    const row = receipt({ reviewedFields: ["vendor"] });
+    expect(
+      patchChangesNothing(row, { vendor: "Staples", reviewedFields: ["vendor"] }),
+    ).toBe(false);
+    expect(patchChangesNothing(row, { status: "confirmed" })).toBe(false);
+  });
+
+  it("ignores the order the set arrives in", () => {
+    const row = receipt({ reviewedFields: ["vendor", "hstCents"] });
+    expect(
+      patchChangesNothing(row, { reviewedFields: ["hstCents", "vendor"] }),
+    ).toBe(true);
+  });
+});
+
+describe("draftFromPending - a reviewed field is the human's, not the parser's", () => {
+  const withSuggestions = (reviewedFields: Receipt["reviewedFields"]) =>
+    receipt({
+      reviewedFields,
+      vendor: "Food Basics",
+      totalCents: 1435,
+      suggestions: {
+        vendor: { value: "F00D BASlCS", source: "heuristic" },
+        purchasedAt: { value: "2026-08-19", source: "both", disagreement: false },
+        totalCents: { value: 9999, source: "heuristic" },
+        hstCents: { value: null, source: null, disagreement: false },
+        subtotalCents: { value: null, source: null },
+        tipCents: { value: null, source: null },
+      },
+    });
+
+  it("prefills a reviewed field from the row even when a suggestion is served", () => {
+    // The server normally stops serving these at all; this is the belt to
+    // that braces, and it is what keeps a value typed last Tuesday from
+    // being overwritten by an OCR guess today.
+    const d = draftFromPending(withSuggestions(["vendor", "totalCents"]));
+    expect(d.vendor).toBe("Food Basics");
+    expect(d.total).toBe("$14.35");
+  });
+
+  it("still prefers the suggestion for every field nobody has reviewed", () => {
+    const d = draftFromPending(withSuggestions(["vendor"]));
+    expect(d.vendor).toBe("Food Basics");
+    expect(d.total).toBe("$99.99");
+    expect(d.purchasedAt).toBe("2026-08-19");
+  });
+
+  it("never marks a reviewed field as carrying a suggestion at save time", () => {
+    // `summarizeFieldEdits` reads the same amber-source set the tint does,
+    // so a reviewed field producing no accepted/overridden outcome is the
+    // testable half of "a reviewed field is never amber".
+    const { suggestionOutcomes } = summarizeFieldEdits(
+      withSuggestions(["vendor", "totalCents"]),
+      [],
+    );
+    expect(suggestionOutcomes.map((outcome) => outcome.field).sort()).toEqual([
+      "purchasedAt",
+    ]);
+  });
+});
+
+describe("suggestDefaultRateHst - the mirror of the server function of the same name", () => {
+  it("computes 13% of a subtotal and the total it implies", () => {
+    expect(suggestDefaultRateHst(1270)).toEqual({ hstCents: 165, totalCents: 1435 });
+  });
+
+  it("rounds half UP, in integers, never through a float", () => {
+    // 50c at 13% is exactly 6.5c. Half-up is 7; banker's rounding - which
+    // is what a naive float path can produce - would say 6.
+    expect(suggestDefaultRateHst(50)).toEqual({ hstCents: 7, totalCents: 57 });
+    // 46c at 13% is 5.98c -> 6c, ordinary rounding up from a non-half.
+    expect(suggestDefaultRateHst(46)?.hstCents).toBe(6);
+    // 30c at 13% is 3.9c -> 4c.
+    expect(suggestDefaultRateHst(30)?.hstCents).toBe(4);
+  });
+
+  it("takes the rate as basis points, so no other rate is hard-coded", () => {
+    // A GST-only province at 5%: $10.00 -> 50c.
+    expect(suggestDefaultRateHst(1000, 500)).toEqual({
+      hstCents: 50,
+      totalCents: 1050,
+    });
+  });
+
+  it("offers nothing for a zero or negative subtotal", () => {
+    // No rate applies to nothing, and a refund's negative subtotal is not
+    // a receipt anyone wants a suggested tax on.
+    expect(suggestDefaultRateHst(0)).toBeNull();
+    expect(suggestDefaultRateHst(-1270)).toBeNull();
+  });
+
+  it("stays in safe-integer arithmetic at the top of the storable range", () => {
+    const result = suggestDefaultRateHst(2_147_483_647);
+    expect(Number.isSafeInteger(result?.hstCents ?? NaN)).toBe(true);
+  });
+});
+
+describe("checkAmountFloor - a total below the charges that make it up", () => {
+  const amounts = (overrides: Partial<Parameters<typeof checkAmountFloor>[0]>) => ({
+    subtotalCents: null,
+    hstCents: null,
+    tipCents: null,
+    otherFeesCents: null,
+    totalCents: null,
+    ...overrides,
+  });
+
+  it("has nothing to compare without a subtotal or without a total", () => {
+    expect(checkAmountFloor(amounts({ totalCents: 1435 }))).toBe("not-applicable");
+    expect(checkAmountFloor(amounts({ subtotalCents: 1270 }))).toBe("not-applicable");
+  });
+
+  it("is satisfied when the total matches or exceeds its components", () => {
+    expect(
+      checkAmountFloor(amounts({ subtotalCents: 1270, hstCents: 165, totalCents: 1435 })),
+    ).toBe("ok");
+    // Above the sum is an ordinary receipt with a line this form has no
+    // box for - the arithmetic warning's business, not this one's.
+    expect(
+      checkAmountFloor(amounts({ subtotalCents: 1270, totalCents: 1500 })),
+    ).toBe("ok");
+  });
+
+  it("flags a total below the sum of subtotal, HST, tip and fees", () => {
+    expect(
+      checkAmountFloor(
+        amounts({ subtotalCents: 1270, hstCents: 165, totalCents: 1300 }),
+      ),
+    ).toBe("total-below-components");
+    expect(
+      checkAmountFloor(
+        amounts({ subtotalCents: 1270, tipCents: 300, totalCents: 1400 }),
+      ),
+    ).toBe("total-below-components");
+  });
+
+  it("counts a blank HST, tip or fee as zero, as every other check here does", () => {
+    expect(
+      checkAmountFloor(amounts({ subtotalCents: 1270, totalCents: 1270 })),
+    ).toBe("ok");
+  });
+});
+
+describe("amountFloorNote - the floor check over the live draft", () => {
+  it("fires when the typed total is below the typed components", () => {
+    expect(
+      amountFloorNote(draft({ subtotal: "12.70", hst: "1.65", total: "13.00" })),
+    ).toBe(true);
+  });
+
+  it("stays silent on a consistent receipt", () => {
+    expect(
+      amountFloorNote(draft({ subtotal: "12.70", hst: "1.65", total: "14.35" })),
+    ).toBe(false);
+  });
+
+  it("stays silent on a mid-keystroke unparseable box rather than guessing", () => {
+    expect(
+      amountFloorNote(draft({ subtotal: "12.", hst: "1.65", total: "13.00" })),
+    ).toBe(false);
+  });
+});
+
+describe("applyComponentEdit - total tracks its components while consistent", () => {
+  it("Flow A: leaves a total that came off the paper alone", () => {
+    // OCR found the total and nothing else; typing a subtotal must not
+    // overwrite the one figure the parsers get right most often.
+    const next = applyComponentEdit(draft({ total: "$14.35" }), "subtotal", "12.70");
+    expect(next.subtotal).toBe("12.70");
+    expect(next.total).toBe("$14.35");
+  });
+
+  it("Flow B: fills a blank total from the components, then keeps it in step", () => {
+    const first = applyComponentEdit(draft(), "subtotal", "12.70");
+    expect(first.total).toBe("$12.70");
+    const second = applyComponentEdit(first, "hst", "1.65");
+    expect(second.total).toBe("$14.35");
+  });
+
+  it("Flow C: follows a corrected component while the total still agreed", () => {
+    const next = applyComponentEdit(
+      draft({ subtotal: "12.70", hst: "1.65", total: "14.35" }),
+      "hst",
+      "1.60",
+    );
+    expect(next.total).toBe("$14.30");
+  });
+
+  it("stops tracking the moment the total says something the components do not", () => {
+    // $20.00 against components of $14.35: the total is the person's own
+    // number now, and no keystroke elsewhere may quietly overwrite it.
+    const next = applyComponentEdit(
+      draft({ subtotal: "12.70", hst: "1.65", total: "20.00" }),
+      "hst",
+      "1.60",
+    );
+    expect(next.total).toBe("20.00");
+  });
+
+  it("leaves the total alone while the subtotal is blank - nothing to sum", () => {
+    expect(applyComponentEdit(draft(), "hst", "1.65").total).toBe("");
+    expect(
+      applyComponentEdit(
+        draft({ subtotal: "12.70", hst: "1.65", total: "14.35" }),
+        "subtotal",
+        "",
+      ).total,
+    ).toBe("14.35");
+  });
+
+  it("leaves the total alone while a box is mid-keystroke unparseable", () => {
+    expect(
+      applyComponentEdit(draft({ subtotal: "12.70", total: "12.70" }), "hst", "1.")
+        .total,
+    ).toBe("12.70");
+  });
+
+  it("tracks tip and other fees too, not just subtotal and HST", () => {
+    const tipped = applyComponentEdit(
+      draft({ subtotal: "100.00", hst: "13.00", total: "113.00" }),
+      "tip",
+      "20.00",
+    );
+    expect(tipped.total).toBe("$133.00");
+    expect(applyComponentEdit(tipped, "otherFees", "5.00").total).toBe("$138.00");
+  });
+
+  it("never treats the total itself as a component", () => {
+    // Editing the total changes nothing else, in either direction - the
+    // total is the anchor, so it is not routed through this function at all.
+    expect(isComponentAmountField("total")).toBe(false);
+    expect(isComponentAmountField("subtotal")).toBe(true);
+    expect(isComponentAmountField("vendor")).toBe(false);
+  });
+});
+
+describe("hstSuggestionChip - the offer for a blank HST box", () => {
+  it("offers the difference when a total is on the receipt", () => {
+    // Flow A's second half: OCR total $14.35, subtotal typed as $12.70.
+    expect(hstSuggestionChip(draft({ subtotal: "12.70", total: "14.35" }))).toEqual({
+      field: "hst",
+      cents: 165,
+      kind: "hst-from-total",
+      formula: "HST = total − subtotal − tip − other fees",
+    });
+  });
+
+  it("subtracts tip and other fees from that difference", () => {
+    expect(
+      hstSuggestionChip(
+        draft({ subtotal: "100.00", tip: "20.00", otherFees: "5.00", total: "138.00" }),
+      )?.cents,
+    ).toBe(1300);
+  });
+
+  it("falls back to the default rate when there is no total to subtract from", () => {
+    expect(hstSuggestionChip(draft({ subtotal: "12.70" }))).toEqual({
+      field: "hst",
+      cents: 165,
+      kind: "hst-at-default-rate",
+      formula: "HST at 13% of subtotal",
+    });
+  });
+
+  it("falls back to the default rate when the difference is zero or negative", () => {
+    // A total that already equals its subtotal says nothing about tax; a
+    // total below it is evidence another box is wrong. Neither is an HST
+    // amount anyone could act on, so the honest offer is the rate.
+    expect(
+      hstSuggestionChip(draft({ subtotal: "12.70", total: "12.70" }))?.kind,
+    ).toBe("hst-at-default-rate");
+    expect(
+      hstSuggestionChip(draft({ subtotal: "12.70", total: "10.00" }))?.kind,
+    ).toBe("hst-at-default-rate");
+  });
+
+  it("offers nothing once HST has a value - including a deliberate zero", () => {
+    expect(hstSuggestionChip(draft({ subtotal: "12.70", hst: "1.65" }))).toBeNull();
+    expect(hstSuggestionChip(draft({ subtotal: "12.70", hst: "0" }))).toBeNull();
+  });
+
+  it("offers nothing without a subtotal to work from", () => {
+    expect(hstSuggestionChip(draft({ total: "14.35" }))).toBeNull();
+  });
+
+  it("offers nothing on a zero or negative subtotal", () => {
+    expect(hstSuggestionChip(draft({ subtotal: "0" }))).toBeNull();
+    expect(hstSuggestionChip(draft({ subtotal: "-12.70" }))).toBeNull();
+  });
+
+  it("stays silent while a box is mid-keystroke unparseable", () => {
+    expect(hstSuggestionChip(draft({ subtotal: "12.7O" }))).toBeNull();
+  });
+
+  it("moves the total too when applied, through the tracking rule", () => {
+    // The chip's own promise: "HST at 13% of subtotal" on a blank-total
+    // draft means $12.70 becomes $12.70 + $1.65.
+    const start = draft({ subtotal: "12.70" });
+    const chip = hstSuggestionChip(start);
+    const next = applyComponentEdit(start, "hst", "$1.65");
+    expect(chip?.cents).toBe(165);
+    expect(next.total).toBe("$14.35");
   });
 });

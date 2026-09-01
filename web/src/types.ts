@@ -61,6 +61,51 @@ export interface MergedSuggestions {
 
 export type ReceiptStatus = "pending" | "confirmed";
 
+/**
+ * Which extractor produced a receipt's `ocrRawText` (2026-09-01).
+ * `vision` is the iOS client's on-device text recognizer; `pdf-text` is
+ * this client reading an emailed PDF's own text layer (`pdfText.ts`).
+ * Null means no text was ever supplied - a web upload of a photograph, or
+ * a scanned PDF with nothing to read.
+ *
+ * It matters to the server, not just as provenance: a `pdf-text` receipt's
+ * text has no OCR noise in it, so the merge may serve the LLM's money
+ * amounts where a `vision` receipt's would be withheld for want of a
+ * heuristic. This client renders what it is served either way (§7.1) - it
+ * does not branch on this field - but it does have to SEND it, because
+ * nothing downstream can infer it.
+ */
+export type OcrSource = "vision" | "pdf-text";
+
+/**
+ * The fields a person has reviewed on a still-pending receipt (2026-09-01,
+ * the "save for later" contract). Names are the server's own column-shaped
+ * field names, not this client's draft keys - `ReceiptForm.tsx` owns the
+ * one mapping between the two.
+ *
+ * What it buys: a pending receipt can now be half-finished on purpose. The
+ * fields in this set are the human's, so the server stops serving a
+ * `suggestions.<field>` for them and this client stops tinting them amber -
+ * a receipt whose vendor and total were typed last Tuesday no longer
+ * re-offers the parser's guesses for them next time it is opened. It is a
+ * record of what was LOOKED at, never a confirmation: constraint 2 still
+ * requires `status = 'confirmed'` before a receipt can leave the queue or
+ * enter an export.
+ */
+export const REVIEWED_FIELDS = [
+  "purchasedAt",
+  "vendor",
+  "subtotalCents",
+  "hstCents",
+  "tipCents",
+  "otherFeesCents",
+  "totalCents",
+  "category",
+  "paymentMethod",
+  "notes",
+] as const;
+export type ReviewedField = (typeof REVIEWED_FIELDS)[number];
+
 export interface Receipt {
   id: string;
   purchasedAt: string;
@@ -88,6 +133,15 @@ export interface Receipt {
   notes: string | null;
   status: ReceiptStatus;
   suggestions: MergedSuggestions | null;
+  /**
+   * The fields a human has already looked at on this receipt (2026-09-01).
+   * Served on every receipt, empty for one nobody has reviewed a field of;
+   * on a pending receipt the server ALSO omits `suggestions.<field>` for
+   * each name in here, so the two agree by construction rather than by this
+   * client remembering to prefer one over the other.
+   */
+  reviewedFields: ReviewedField[];
+  ocrSource: OcrSource | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -186,7 +240,28 @@ export interface ReceiptPatch {
   paymentMethod?: string | null;
   notes?: string | null;
   status?: ReceiptStatus;
+  /**
+   * Replaces the stored set outright - not a union the server computes
+   * (2026-09-01 contract). The sender is the screen that knows what was
+   * looked at, so it sends the whole set every time:
+   * `reviewedFieldsForSave` (ReceiptForm.tsx) is the one place that builds
+   * it, from the receipt's existing set unioned with this editing
+   * session's touched fields.
+   *
+   * A PATCH carrying this and NO `status` is the "save for later" write -
+   * the receipt stays pending and keeps its place in the queue.
+   */
+  reviewedFields?: ReviewedField[];
 }
+
+/**
+ * The three reusable-value lists, as the manage-values routes name them in
+ * their path (2026-09-01): `PATCH /api/receipts/options/:field` and
+ * `DELETE /api/receipts/options/:field`. Singular, unlike the plural keys
+ * of `ReceiptOptions` below, because the path names one field of a receipt
+ * rather than one list.
+ */
+export type OptionField = "vendor" | "category" | "paymentMethod";
 
 /** GET /api/receipts sort keys; the server defaults to purchasedAt/desc. */
 export type ReceiptSort = "purchasedAt" | "capturedAt" | "total" | "vendor";
@@ -271,10 +346,13 @@ export interface ReceiptSummary {
  * same reasoning as everywhere else in this file: an action or field name
  * outside this list should fail to compile here, long before src/events.ts
  * could send it and have the server's own `z.enum` refuse it as a strict
- * 400. This client (2026-08-28) uses a subset of the full vocabulary - the
- * rest (capture_*, image_*, confirm_deferred, account_deleted) names
- * actions this client cannot honestly produce (no camera, no native
- * re-auth) or was not asked to instrument yet.
+ * 400. This client uses a subset of the full vocabulary - the rest
+ * (capture_*, image_*, account_deleted) names actions it cannot honestly
+ * produce (no camera, no native re-auth) or was not asked to instrument
+ * yet. `confirm_deferred` joined that subset on 2026-09-01 with "save for
+ * later", which is exactly what iOS's confirm screen means by it
+ * (ConfirmReceiptView.logDeferralIfConfirming): a pending receipt left
+ * unconfirmed on purpose.
  */
 export const EVENT_ACTIONS = [
   "capture_started",

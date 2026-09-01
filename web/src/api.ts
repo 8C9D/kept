@@ -1,6 +1,8 @@
 import type {
   ExportJob,
   ListFilters,
+  OcrSource,
+  OptionField,
   Profile,
   ReceiptDetail,
   ReceiptImageWrite,
@@ -10,6 +12,7 @@ import type {
   ReceiptPatch,
   ReceiptSummary,
   Receipt,
+  ReviewedField,
   SignInResponse,
 } from "./types.js";
 
@@ -45,6 +48,26 @@ export interface CreateReceiptRequest {
   purchasedAt: string;
   capturedAt: string;
   image: { objectKey: string; sha256: string };
+  /**
+   * The extracted text the server's parsers work from - the iOS client has
+   * always sent its Vision transcript here, and from 2026-09-01 this client
+   * sends an emailed PDF's own text layer (`pdfText.ts`). Capped at the
+   * server's own `z.string().max(100_000)` before it is sent, by
+   * `OCR_RAW_TEXT_MAX_CHARS`.
+   */
+  ocrRawText?: string;
+  /** Which extractor produced `ocrRawText`; the two always travel
+   * together (`uploadOne`). */
+  ocrSource?: OcrSource;
+  /**
+   * Accepted by the route (2026-09-01 contract) and deliberately never sent
+   * by this client: a receipt being CREATED has had no field reviewed by
+   * anyone - the file was dropped seconds ago and nobody has looked at a
+   * box yet. Typed here so the contract is written down in one place, and
+   * so a future create path that genuinely does carry reviewed fields (a
+   * capture-and-confirm-in-one-screen flow) does not have to rediscover it.
+   */
+  reviewedFields?: ReviewedField[];
 }
 
 export type ExportRequest =
@@ -130,6 +153,52 @@ export class KeptApi {
   /** The user's own past categories and payment methods, for reuse. */
   receiptOptions(): Promise<ReceiptOptions> {
     return this.request<ReceiptOptions>("GET", "/api/receipts/options");
+  }
+
+  /**
+   * PATCH /api/receipts/options/:field (2026-09-01) - rename one of the
+   * person's own reusable values everywhere it appears: the offered list
+   * AND every receipt of theirs carrying exactly `from`. `receiptsUpdated`
+   * is how many rows changed, which is the number the manage-values screen
+   * shows back - a rename that says "12 receipts updated" is a different
+   * event from one that says "0", and the person deserves to know which
+   * one they just caused.
+   *
+   * Exact match, never normalized: the same 2026-08-26 free-text ruling
+   * that governs the filters and `introducesNewValue`. "meals " and
+   * "meals" are two values, and renaming one leaves the other alone.
+   *
+   * 404 when `from` is not one of the user's own values - the server will
+   * not invent a rename over a value the person never used.
+   */
+  renameReceiptOption(
+    field: OptionField,
+    from: string,
+    to: string,
+  ): Promise<{ receiptsUpdated: number }> {
+    return this.request<{ receiptsUpdated: number }>(
+      "PATCH",
+      `/api/receipts/options/${field}`,
+      { from, to },
+    );
+  }
+
+  /**
+   * DELETE /api/receipts/options/:field?value= (2026-09-01) - drops the
+   * value from the offered list ONLY.
+   *
+   * ⚠ Receipts keep their text. This is not a bulk clear and must never be
+   * described as one: `category` is free text the person wrote on their own
+   * records (engineering rule: never an enum, never a taxonomy), so the
+   * list is a convenience over those records and deleting from it retracts
+   * the suggestion, not the data. The confirmation this client shows says
+   * exactly that.
+   */
+  async deleteReceiptOption(field: OptionField, value: string): Promise<void> {
+    await this.request<void>(
+      "DELETE",
+      `/api/receipts/options/${field}?value=${encodeURIComponent(value)}`,
+    );
   }
 
   /**

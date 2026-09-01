@@ -19,6 +19,8 @@ import {
   draftForDisplay,
   draftFromReceipt,
   logFieldEditTelemetry,
+  patchChangesNothing,
+  patchForSaveForLater,
   patchFromDraft,
   type ReceiptDraft,
   type SuggestibleField,
@@ -67,6 +69,11 @@ export function ReceiptDetailView({
   // server's own OCR suggestions use (2026-08-28 ruling - see
   // ReceiptForm.tsx's `summarizeFieldEdits`).
   const clientAppliedRef = useRef<Set<SuggestibleField>>(new Set());
+  // Which fields this session has REVIEWED - typed in, or chosen from an
+  // amount chip (2026-09-01, ReceiptForm's `onFieldReviewed`). Only a
+  // PENDING receipt's save carries these: a confirmed receipt is served no
+  // suggestions to review away from in the first place.
+  const reviewedRef = useRef<Set<keyof ReceiptDraft>>(new Set());
   // Which image write is in flight, if any - "add" for the add-a-page
   // control, or the page number being replaced. Not a plain boolean: the
   // per-page Replace button needs to know whether IT is the one running,
@@ -93,6 +100,7 @@ export function ReceiptDetailView({
           setDraft(draftForDisplay(loaded));
           editsRef.current = [];
           clientAppliedRef.current = new Set();
+          reviewedRef.current = new Set();
           logEvent({ action: "receipt_viewed", receiptId: loaded.id });
         }
       } catch (caught) {
@@ -117,15 +125,33 @@ export function ReceiptDetailView({
     );
   }
 
+  /**
+   * One PATCH of what changed.
+   *
+   * On a PENDING receipt this is the "save for later" write (2026-09-01):
+   * no `status`, so the receipt stays pending and keeps its place in the
+   * queue, plus the `reviewedFields` this session established. That is what
+   * the button says in that case, because a screen whose Save leaves a
+   * receipt pending should not call itself Save and let the person assume
+   * otherwise - this screen has never had a Confirm, and the queue is still
+   * where a receipt gets confirmed.
+   *
+   * On a CONFIRMED receipt it is an ordinary edit, exactly as before: the
+   * reviewed set is not sent, because nothing is served suggestions to
+   * review away from once a receipt is confirmed.
+   */
   async function save() {
     if (receipt === null || draft === null) {
       return;
     }
+    const pending = receipt.status === "pending";
     setError(null);
     setNotice(null);
     let patch;
     try {
-      patch = patchFromDraft(receipt, draft);
+      patch = pending
+        ? patchForSaveForLater(receipt, draft, reviewedRef.current)
+        : patchFromDraft(receipt, draft);
     } catch (caught) {
       if (caught instanceof DraftError) {
         setError(caught.message);
@@ -133,7 +159,10 @@ export function ReceiptDetailView({
       }
       throw caught;
     }
-    if (Object.keys(patch).length === 0) {
+    // `patchChangesNothing` rather than an empty-key test: a save-for-later
+    // always carries a `reviewedFields` key, and re-sending the set the
+    // receipt already has is the case that genuinely changes nothing.
+    if (patchChangesNothing(receipt, patch)) {
       setNotice("Nothing changed.");
       return;
     }
@@ -141,10 +170,17 @@ export function ReceiptDetailView({
       const updated = await api.updateReceipt(receipt.id, patch);
       setReceipt({ ...receipt, ...updated });
       setDraft(draftFromReceipt({ ...receipt, ...updated }));
-      setNotice("Saved.");
+      setNotice(pending ? "Saved. Still pending - confirm it in the queue." : "Saved.");
       options.noteSaved(updated);
       onChanged();
-      logEvent({ action: "receipt_edited", receiptId: receipt.id });
+      // The same distinction iOS's confirm screen draws
+      // (`logDeferralIfConfirming`): a pending receipt left unconfirmed on
+      // purpose is a deferral, an already-confirmed one being corrected is
+      // an edit.
+      logEvent({
+        action: pending ? "confirm_deferred" : "receipt_edited",
+        receiptId: receipt.id,
+      });
       logFieldEditTelemetry(receipt, editsRef.current, clientAppliedRef.current);
       // Reset after a successful save only - a failed one leaves the
       // person still mid-edit, and the next successful save should still
@@ -152,6 +188,7 @@ export function ReceiptDetailView({
       // failure.
       editsRef.current = [];
       clientAppliedRef.current = new Set();
+      reviewedRef.current = new Set();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -300,13 +337,14 @@ export function ReceiptDetailView({
             api={api}
             onOpenReceipt={onOpenReceipt}
             onFieldEdited={(field) => editsRef.current.push(field)}
+            onFieldReviewed={(field) => reviewedRef.current.add(field)}
             onSuggestionApplied={(field) => clientAppliedRef.current.add(field)}
           />
           {error !== null && <p className="error">{error}</p>}
           {notice !== null && <p className="muted">{notice}</p>}
           <div className="detail-actions">
             <button className="primary" onClick={() => void save()}>
-              Save
+              {receipt.status === "pending" ? "Save for later" : "Save"}
             </button>
             {!confirmingDelete ? (
               <button className="danger" onClick={() => setConfirmingDelete(true)}>

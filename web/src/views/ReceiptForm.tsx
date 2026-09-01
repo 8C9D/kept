@@ -14,7 +14,13 @@ import {
   ReceiptOptionsDatalists,
   VENDOR_LIST_ID,
 } from "../options.js";
-import type { Receipt, ReceiptOptions, ReceiptPatch } from "../types.js";
+import {
+  REVIEWED_FIELDS,
+  type Receipt,
+  type ReceiptOptions,
+  type ReceiptPatch,
+  type ReviewedField,
+} from "../types.js";
 
 /**
  * The one field grid both the detail view and the confirm queue render.
@@ -59,22 +65,68 @@ export function draftFromReceipt(receipt: Receipt): ReceiptDraft {
 }
 
 /**
+ * The one mapping between this form's draft keys and the server's field
+ * names (`ReviewedField`, types.ts). Both directions are total - ten keys,
+ * ten names - and they live here, next to the draft they translate, so no
+ * screen has to spell `hstCents` for a box labelled HST. 2026-09-01, with
+ * `reviewedFields`.
+ */
+const DRAFT_KEY_BY_REVIEWED_FIELD: Record<ReviewedField, keyof ReceiptDraft> = {
+  purchasedAt: "purchasedAt",
+  vendor: "vendor",
+  subtotalCents: "subtotal",
+  hstCents: "hst",
+  tipCents: "tip",
+  otherFeesCents: "otherFees",
+  totalCents: "total",
+  category: "category",
+  paymentMethod: "paymentMethod",
+  notes: "notes",
+};
+
+const REVIEWED_FIELD_BY_DRAFT_KEY: Record<keyof ReceiptDraft, ReviewedField> = {
+  purchasedAt: "purchasedAt",
+  vendor: "vendor",
+  subtotal: "subtotalCents",
+  hst: "hstCents",
+  tip: "tipCents",
+  otherFees: "otherFeesCents",
+  total: "totalCents",
+  category: "category",
+  paymentMethod: "paymentMethod",
+  notes: "notes",
+};
+
+/**
  * The §7.3 display rule for a pending receipt, as the iOS client renders
  * it (ReceiptDisplay, Aug 8): the served merge's suggestion over the row
  * copy, the row filling only fields no suggestion covers. Confirmed
  * receipts never come here - they render the row, the human's values.
  *
- * `otherFees` is deliberately absent below: there is no `otherFeesCents`
- * key in `MergedSuggestions` (§7.3 - "other fees" is a residual with no
- * consistent printed label, so no heuristic can match it), so the spread
- * from `draftFromReceipt` stands untouched and the field is always the
- * row's own value. That is what lets `suggestedFields` below tell "no
- * suggestion" apart from "field name" without special-casing.
+ * `otherFees` is deliberately absent from the merge below: there is no
+ * `otherFeesCents` key in `MergedSuggestions` (§7.3 - "other fees" is a
+ * residual with no consistent printed label, so no heuristic can match
+ * it), so the spread from `draftFromReceipt` stands untouched and the
+ * field is always the row's own value. That is what lets `suggestedFields`
+ * below tell "no suggestion" apart from "field name" without
+ * special-casing.
+ *
+ * ⚠ 2026-09-01: a field in `receipt.reviewedFields` is the HUMAN's, and the
+ * row wins outright for it - a "save for later" wrote those values, and
+ * re-offering the parser's guess over a value someone typed last Tuesday
+ * is exactly the defect the reviewed set exists to prevent. Belt and
+ * braces: the server also stops serving `suggestions.<field>` for every
+ * reviewed field, so this loop is normally re-stating an absence rather
+ * than overriding a present suggestion. It is written anyway because the
+ * two rules must agree even if one end changes - and because a client that
+ * relies on the server having remembered is a client that shows the wrong
+ * value the day it has not.
  */
 export function draftFromPending(receipt: Receipt): ReceiptDraft {
+  const row = draftFromReceipt(receipt);
   const s = receipt.suggestions;
-  return {
-    ...draftFromReceipt(receipt),
+  const merged: ReceiptDraft = {
+    ...row,
     purchasedAt: s?.purchasedAt.value ?? receipt.purchasedAt,
     vendor: s?.vendor.value ?? receipt.vendor ?? "",
     subtotal: formatCents(s?.subtotalCents.value ?? receipt.subtotalCents),
@@ -82,6 +134,11 @@ export function draftFromPending(receipt: Receipt): ReceiptDraft {
     total: formatCents(s?.totalCents.value ?? receipt.totalCents),
     tip: formatCents(s?.tipCents.value ?? receipt.tipCents),
   };
+  for (const field of receipt.reviewedFields) {
+    const key = DRAFT_KEY_BY_REVIEWED_FIELD[field];
+    merged[key] = row[key];
+  }
+  return merged;
 }
 
 /**
@@ -176,6 +233,99 @@ function assignMoney(
   if (next !== current) {
     patch[key] = next;
   }
+}
+
+/**
+ * What a save reports as reviewed (2026-09-01): the receipt's existing
+ * reviewed set unioned with every field this editing session touched.
+ *
+ * A union, never a replacement, even though the PATCH replaces the stored
+ * set outright - the person who opened this receipt today did not un-review
+ * what they looked at last week, and a client that sent only today's
+ * touches would silently un-review the rest and hand the parser back a
+ * field it had already lost. `touched` is the form's own set, the same one
+ * §10A.1's amber rule reads: touching a field is what "I have looked at
+ * this" means everywhere else in this form, so it is what it means here.
+ *
+ * Ordered by `REVIEWED_FIELDS` rather than by insertion, so the same set
+ * always serializes the same way - a request body that varies with click
+ * order is one no test can pin.
+ */
+export function reviewedFieldsForSave(
+  receipt: Receipt,
+  touched: ReadonlySet<keyof ReceiptDraft>,
+): ReviewedField[] {
+  const reviewed = new Set<ReviewedField>(receipt.reviewedFields);
+  for (const key of touched) {
+    reviewed.add(REVIEWED_FIELD_BY_DRAFT_KEY[key]);
+  }
+  return REVIEWED_FIELDS.filter((field) => reviewed.has(field));
+}
+
+/**
+ * The "save for later" write (2026-09-01): the edited fields and the
+ * reviewed set, and deliberately NO `status`. The receipt stays pending,
+ * keeps its place in the queue and in the list's pending count, and the
+ * fields just written stop being re-suggested. It is the write for a
+ * receipt someone got halfway through - the vendor and total are on the
+ * screen, the category needs a decision they cannot make now - and until
+ * this existed the only two ways out of that form were "confirm a receipt
+ * you are not sure about" and "lose what you typed".
+ *
+ * ⚠ Not a confirmation and never a substitute for one. Constraint 2 and
+ * the export rule are untouched: nothing with `status = 'pending'` may
+ * appear in an export, and this write leaves it pending on purpose.
+ */
+export function patchForSaveForLater(
+  receipt: Receipt,
+  draft: ReceiptDraft,
+  touched: ReadonlySet<keyof ReceiptDraft>,
+): ReceiptPatch {
+  return {
+    ...patchFromDraft(receipt, draft),
+    reviewedFields: reviewedFieldsForSave(receipt, touched),
+  };
+}
+
+/**
+ * The confirm write: the same patch plus `status: 'confirmed'`. The
+ * reviewed set rides along harmlessly - a confirmed receipt is served no
+ * suggestions at all, so nothing consumes it - and it is sent anyway so
+ * that the two writes differ in exactly one key, `status`, which is the
+ * only thing that should ever distinguish them.
+ */
+export function patchForConfirm(
+  receipt: Receipt,
+  draft: ReceiptDraft,
+  touched: ReadonlySet<keyof ReceiptDraft>,
+): ReceiptPatch {
+  return {
+    ...patchForSaveForLater(receipt, draft, touched),
+    status: "confirmed",
+  };
+}
+
+/**
+ * Whether a save-for-later patch would change nothing at all - no field
+ * differs and the reviewed set is the one already stored. The detail
+ * screen's "Nothing changed." notice reads this rather than
+ * `Object.keys(patch).length === 0`, which stopped being the right test the
+ * moment every save-for-later carries a `reviewedFields` key: marking a
+ * field reviewed IS a change worth sending, and re-sending the identical
+ * set is not.
+ */
+export function patchChangesNothing(
+  receipt: Receipt,
+  patch: ReceiptPatch,
+): boolean {
+  if (Object.keys(patch).some((key) => key !== "reviewedFields")) {
+    return false;
+  }
+  const next = patch.reviewedFields ?? [];
+  return (
+    next.length === receipt.reviewedFields.length &&
+    next.every((field) => receipt.reviewedFields.includes(field))
+  );
 }
 
 /** A sentinel distinct from every value `parseMoneyInput` can return. */
@@ -278,6 +428,26 @@ const NEVER_NEGATIVE_AMOUNT_FIELDS: ReadonlySet<DerivableAmountField> = new Set(
   "otherFees",
 ]);
 
+/**
+ * Mirrors the server's `OMISSION_IS_ZERO_FIELDS` (2026-09-01 widening of
+ * `deriveMissingAmount`, same file as the rest of this mirror). A blank tip
+ * or other-fees box is not an unknown: `arithmeticMismatch` above has
+ * always read it as "no such line on this receipt", contributing zero, and
+ * the derivation reading it as anything else meant the two disagreed about
+ * the same equation - the commonest receipt shape of all (a subtotal and a
+ * total, no tip, no fees, HST missing) had three blanks and derived
+ * nothing, so proposal #1's fill was almost unreachable in practice.
+ *
+ * Solving FOR a tip or other-fees amount still needs the other four
+ * present. That asymmetry is the point: "the tip line is blank, so there
+ * was no tip" is a reading anyone would make of the paper, while "the tip
+ * is whatever makes these four numbers balance" invents a gratuity out of a
+ * rounding difference - the same reasoning as the negative-tip refusal
+ * above.
+ */
+const OMISSION_IS_ZERO_AMOUNT_FIELDS: ReadonlySet<DerivableAmountField> =
+  new Set(["tip", "otherFees"]);
+
 function formulaFor(field: DerivableAmountField): string {
   switch (field) {
     case "subtotal":
@@ -351,9 +521,12 @@ function parseAmounts(draft: ReceiptDraft): ParsedAmounts | null {
 
 /**
  * The live mirror of the server's `deriveMissingAmount`. Returns null in
- * every case the server would: not exactly one of the five fields blank, a
+ * every case the server would: more than one genuinely unknown field, a
  * mid-keystroke unparseable box, a negative tip or other-fees result, or a
  * result outside the storable cents range.
+ *
+ * The "genuinely unknown" split below is the server's own, field for field
+ * (2026-09-01) - see `OMISSION_IS_ZERO_AMOUNT_FIELDS` above.
  */
 export function deriveMissingAmount(draft: ReceiptDraft): DerivedAmount | null {
   const parsed = parseAmounts(draft);
@@ -361,17 +534,26 @@ export function deriveMissingAmount(draft: ReceiptDraft): DerivedAmount | null {
     return null;
   }
   const missing = DERIVABLE_AMOUNT_FIELDS.filter((field) => parsed[field] === null);
-  if (missing.length !== 1) {
-    return null;
-  }
-  const field = missing[0];
+  const unknown = missing.filter(
+    (field) => !OMISSION_IS_ZERO_AMOUNT_FIELDS.has(field),
+  );
+  const field =
+    unknown.length === 1
+      ? unknown[0]
+      : // No hard unknown left: the only solvable shape remaining is a
+        // single blank tip or other-fees box with all four of its
+        // neighbours filled, which is the pre-2026-09-01 rule unchanged
+        // for those two fields.
+        unknown.length === 0 && missing.length === 1
+        ? missing[0]
+        : undefined;
   if (field === undefined) {
-    // Guaranteed by the length check above; narrows the type for TS.
     return null;
   }
-  // Every field but the missing one is non-null here, so summing with
-  // `?? 0` adds every KNOWN component and adds nothing for the field being
-  // solved for - exactly the server function's own comment on this line.
+  // Every field but the one being solved for either has a value or is a
+  // blank tip/other-fees box reading as zero, so summing with `?? 0` adds
+  // every KNOWN component and adds nothing for the field being solved for -
+  // exactly the server function's own comment on this line.
   const knownComponentSum =
     (parsed.subtotal ?? 0) + (parsed.hst ?? 0) + (parsed.tip ?? 0) + (parsed.otherFees ?? 0);
   const value =
@@ -432,6 +614,268 @@ export function reconciliationSuggestions(
     return null;
   }
   return { tip, otherFees };
+}
+
+/**
+ * Ontario's combined HST, in basis points - the only rate this client ever
+ * suggests, and a DEFAULT rather than a fact: nothing in this system knows
+ * which province a receipt was printed in (`checkHstRatePlausibility`'s own
+ * comment makes the same point from the other direction). Overridable per
+ * call so the number is never hard-coded inside the arithmetic.
+ */
+export const DEFAULT_HST_RATE_BPS = 1300;
+
+/**
+ * The live mirror of the server's `suggestDefaultRateHst`
+ * (`domain/arithmetic.ts`, 2026-09-01): what HST and total a subtotal
+ * WOULD carry at the default rate. For the receipt that prints a subtotal
+ * and nothing else - a handwritten invoice, a PDF whose tax line the
+ * parsers could not find - where `deriveMissingAmount` has nothing to
+ * subtract from and stays silent.
+ *
+ * ⚠ A suggestion, exactly like every other function in this file, and a
+ * weaker one than the derivations above: those solve an equation the
+ * receipt's own numbers determine, while this one applies a rate the
+ * receipt may not have been charged. It reaches the person only as a chip
+ * that says "HST at 13%" in those words, never as a fill that happens
+ * quietly - constraint 2 with an extra reason to mean it.
+ *
+ * Round HALF UP in integer arithmetic, never a float: `(subtotal * rate +
+ * 5000) / 10000` floored is the same number a cash register computes, and
+ * `Math.round(subtotal * rate / 10000)` is not - the intermediate divide
+ * introduces exactly the binary-fraction error `money.ts` exists to keep
+ * out of this client. Null for a subtotal of zero or less: there is no
+ * rate to apply to nothing, and a refund's negative subtotal is not a
+ * receipt anyone wants a suggested tax on.
+ */
+export function suggestDefaultRateHst(
+  subtotalCents: number,
+  rateBps: number = DEFAULT_HST_RATE_BPS,
+): { hstCents: number; totalCents: number } | null {
+  if (subtotalCents <= 0) {
+    return null;
+  }
+  const hstCents = Math.floor((subtotalCents * rateBps + 5_000) / 10_000);
+  return { hstCents, totalCents: subtotalCents + hstCents };
+}
+
+/**
+ * The live mirror of the server's `checkAmountFloor` (2026-09-01): a total
+ * that is LESS than the parts it is made of.
+ *
+ * Distinct from `arithmeticMismatch` above, which fires on any inequality
+ * in either direction. A total that exceeds its components has an ordinary
+ * explanation - a line this form has no box for, a fee nobody typed - and
+ * says "there is something else on this paper". A total BELOW its
+ * components has no such reading: subtotal, HST, tip and fees are all
+ * charges, and no arrangement of them can add up to more than what was
+ * paid. One of the numbers on screen is wrong, and that is a sharper thing
+ * to say than "worth a look".
+ *
+ * Still never a block (nothing in this file ever is): plenty of receipts
+ * are genuinely odd, and the person confirming is the authority.
+ */
+export type AmountFloorCheck =
+  | "not-applicable"
+  | "ok"
+  | "total-below-components";
+
+export function checkAmountFloor(input: {
+  subtotalCents: number | null;
+  hstCents: number | null;
+  tipCents: number | null;
+  otherFeesCents: number | null;
+  totalCents: number | null;
+}): AmountFloorCheck {
+  // No subtotal or no total - there is nothing to compare, the same first
+  // check `checkReceiptArithmetic` makes.
+  if (input.subtotalCents === null || input.totalCents === null) {
+    return "not-applicable";
+  }
+  const components =
+    input.subtotalCents +
+    (input.hstCents ?? 0) +
+    (input.tipCents ?? 0) +
+    (input.otherFeesCents ?? 0);
+  return input.totalCents < components ? "total-below-components" : "ok";
+}
+
+/** The floor check over the live draft, with the same "an unparseable box
+ * silences it rather than guessing" rule as every other check here. */
+export function amountFloorNote(draft: ReceiptDraft): boolean {
+  const parsed = parseAmounts(draft);
+  if (parsed === null) {
+    return false;
+  }
+  return (
+    checkAmountFloor({
+      subtotalCents: parsed.subtotal,
+      hstCents: parsed.hst,
+      tipCents: parsed.tip,
+      otherFeesCents: parsed.otherFees,
+      totalCents: parsed.total,
+    }) === "total-below-components"
+  );
+}
+
+/**
+ * The four boxes that ADD UP to the total, as opposed to the total itself.
+ * Named because the tracking rule below treats them as one group and the
+ * total as the thing they move.
+ */
+export type ComponentAmountField = "subtotal" | "hst" | "tip" | "otherFees";
+
+const COMPONENT_AMOUNT_FIELDS: ReadonlySet<keyof ReceiptDraft> = new Set([
+  "subtotal",
+  "hst",
+  "tip",
+  "otherFees",
+]);
+
+export function isComponentAmountField(
+  key: keyof ReceiptDraft,
+): key is ComponentAmountField {
+  return COMPONENT_AMOUNT_FIELDS.has(key);
+}
+
+/**
+ * `subtotal + HST + tip + other fees` over the draft, or null when there is
+ * no honest sum to state: a blank subtotal (nothing to add to - the same
+ * "nothing to reconcile against" rule `arithmeticMismatch` follows) or any
+ * mid-keystroke unparseable box. A blank HST, tip or other-fees box
+ * contributes zero, exactly as it does everywhere else in this file.
+ */
+function componentSum(draft: ReceiptDraft): number | null {
+  const parsed = parseAmounts(draft);
+  if (parsed === null || parsed.subtotal === null) {
+    return null;
+  }
+  return (
+    parsed.subtotal +
+    (parsed.hst ?? 0) +
+    (parsed.tip ?? 0) +
+    (parsed.otherFees ?? 0)
+  );
+}
+
+/**
+ * **Total tracks its components while consistent** (2026-09-01), the live
+ * rule that turns four boxes into one running bill.
+ *
+ * Editing subtotal, HST, tip or other fees recomputes the total - but ONLY
+ * when the total is blank or still equals what the components said before
+ * this edit. The moment the total says something the components do not, it
+ * is the person's own number (or the parser's read of the printed total,
+ * which is the one figure OCR gets right most often), and no keystroke
+ * elsewhere may quietly overwrite it. Editing the total itself never
+ * changes any other field, in either direction: the total is the anchor.
+ *
+ * The three flows this is built from, all of them from a real form:
+ *
+ * - **A.** OCR found the total ($14.35) and nothing else. Typing a subtotal
+ *   of $12.70 leaves the total alone - it came off the paper - and the HST
+ *   chip below then offers the $1.65 difference.
+ * - **B.** A blank form (a photograph the parsers got nothing from). Typing
+ *   subtotal $12.70 makes the total $12.70; typing HST $1.65 makes it
+ *   $14.35. The total is never typed at all.
+ * - **C.** $12.70 / $1.65 / $14.35, all consistent, and the HST is
+ *   corrected to $1.60. The total follows to $14.30, because leaving
+ *   $14.35 would create a mismatch the person did not ask for and would
+ *   then have to fix by hand.
+ *
+ * Returns the whole next draft rather than just a total, so the caller
+ * cannot apply half of it.
+ */
+export function applyComponentEdit(
+  draft: ReceiptDraft,
+  field: ComponentAmountField,
+  value: string,
+): ReceiptDraft {
+  const edited = { ...draft, [field]: value };
+  const newSum = componentSum(edited);
+  if (newSum === null) {
+    // Nothing to track to - a blank subtotal or a box mid-keystroke.
+    return edited;
+  }
+  const total = tryParseMoney(draft.total);
+  const oldSum = componentSum(draft);
+  const tracks =
+    total === null ||
+    (total !== INVALID_MONEY && oldSum !== null && total === oldSum);
+  if (!tracks) {
+    return edited;
+  }
+  if (finalizeDerivedAmount("total", newSum) === null) {
+    // Outside the storable range - the same refusal every other suggestion
+    // in this file makes, rather than writing a number the server would
+    // 400 on.
+    return edited;
+  }
+  return { ...edited, total: formatCents(newSum) };
+}
+
+/**
+ * A one-tap amount offer with its arithmetic stated (2026-09-01). Extends
+ * `DerivedAmount` rather than duplicating it, so the same note component
+ * renders both and an applied chip lands in exactly the same state an
+ * applied fill does.
+ */
+export type AmountChipKind = "hst-from-total" | "hst-at-default-rate";
+
+export interface AmountChip extends DerivedAmount {
+  kind: AmountChipKind;
+}
+
+/**
+ * The HST offer, when HST is blank and a subtotal is present - the shape
+ * every receipt whose tax line the parsers missed arrives in.
+ *
+ * Two offers, never both, because they answer the same question from
+ * different evidence and showing a pair would make the person adjudicate
+ * between two numbers this form invented:
+ *
+ * - The receipt states a total: the difference is the tax, and that
+ *   difference is a fact about the numbers on screen
+ *   (`hst-from-total`). Offered only when it is POSITIVE - a zero or
+ *   negative difference is evidence one of the other boxes is wrong, not an
+ *   HST amount anyone could act on, the same refusal `finalizeDerivedAmount`
+ *   makes for a negative tip.
+ * - Otherwise, the default rate (`hst-at-default-rate`), which is a guess
+ *   about the world rather than about the receipt and says so in its own
+ *   label.
+ *
+ * Never auto-applied. Applying it also moves the total, through
+ * `applyComponentEdit` above and only when that rule allows - which is why
+ * the second offer is safe to make on a receipt whose total is already
+ * consistent with its subtotal: it is what "add 13% to this" means.
+ */
+export function hstSuggestionChip(draft: ReceiptDraft): AmountChip | null {
+  const parsed = parseAmounts(draft);
+  if (parsed === null || parsed.hst !== null || parsed.subtotal === null) {
+    return null;
+  }
+  if (parsed.total !== null) {
+    const remainder =
+      parsed.total - parsed.subtotal - (parsed.tip ?? 0) - (parsed.otherFees ?? 0);
+    if (remainder > 0) {
+      const offer = finalizeDerivedAmount("hst", remainder);
+      return offer === null
+        ? null
+        : { ...offer, kind: "hst-from-total", formula: "HST = total − subtotal − tip − other fees" };
+    }
+  }
+  const suggested = suggestDefaultRateHst(parsed.subtotal);
+  if (suggested === null) {
+    return null;
+  }
+  const offer = finalizeDerivedAmount("hst", suggested.hstCents);
+  return offer === null
+    ? null
+    : {
+        ...offer,
+        kind: "hst-at-default-rate",
+        formula: `HST at ${DEFAULT_HST_RATE_BPS / 100}% of subtotal`,
+      };
 }
 
 /**
@@ -512,6 +956,26 @@ export type SuggestibleField =
   | "category"
   | "paymentMethod";
 
+const SUGGESTIBLE_FIELDS: ReadonlySet<keyof ReceiptDraft> = new Set<
+  SuggestibleField
+>([
+  "vendor",
+  "purchasedAt",
+  "subtotal",
+  "hst",
+  "total",
+  "tip",
+  "otherFees",
+  "category",
+  "paymentMethod",
+]);
+
+function isSuggestibleField(
+  key: keyof ReceiptDraft,
+): key is SuggestibleField {
+  return SUGGESTIBLE_FIELDS.has(key);
+}
+
 /**
  * §10A.1's amber rule, ported from iOS's confirm screen to this form:
  * "exactly the suggested fields start amber" - a field only marks if the
@@ -519,6 +983,13 @@ export type SuggestibleField =
  * receipt (a confirmed one "renders the row, the human's values" per
  * `draftFromReceipt`'s own comment, and constraint 2's amber marks
  * *unconfirmed* suggestions, never a value a human already confirmed).
+ *
+ * 2026-09-01: a reviewed field never marks either, for the same reason a
+ * confirmed receipt's fields do not - a human looked at it and wrote what
+ * it says. This is the display half of the same rule `draftFromPending`
+ * enforces on the value half, and it is likewise belt-and-braces: the
+ * server stops SERVING a suggestion for a reviewed field, so the loop below
+ * usually has nothing to remove.
  */
 function suggestedFields(receipt: Receipt): ReadonlySet<SuggestibleField> {
   const fields = new Set<SuggestibleField>();
@@ -532,6 +1003,12 @@ function suggestedFields(receipt: Receipt): ReadonlySet<SuggestibleField> {
   if (s.hstCents.value !== null) fields.add("hst");
   if (s.totalCents.value !== null) fields.add("total");
   if (s.tipCents.value !== null) fields.add("tip");
+  for (const reviewed of receipt.reviewedFields) {
+    const key = DRAFT_KEY_BY_REVIEWED_FIELD[reviewed];
+    if (isSuggestibleField(key)) {
+      fields.delete(key);
+    }
+  }
   return fields;
 }
 
@@ -802,6 +1279,7 @@ export function ReceiptFieldsForm({
   onOpenReceipt,
   disabled,
   onFieldEdited,
+  onFieldReviewed,
   onSuggestionApplied,
 }: {
   /** For its id (to reset "touched" on a new receipt), status and
@@ -831,6 +1309,21 @@ export function ReceiptFieldsForm({
    * lets the screen that owns Save decide what to do with the sequence.
    */
   onFieldEdited?: (field: keyof ReceiptDraft) => void;
+  /**
+   * Fired the moment a field becomes REVIEWED - the person typed in it, or
+   * chose one of the amount chips below (2026-09-01). The screen that owns
+   * Save/Confirm accumulates these and hands the set to
+   * `reviewedFieldsForSave`, which is what the PATCH's `reviewedFields`
+   * carries.
+   *
+   * Separate from `onFieldEdited` above even though typing fires both, and
+   * deliberately so: `onFieldEdited` is telemetry and counts every
+   * keystroke, while this one answers "has a human looked at this field",
+   * which a chip answers too without being an edit. Folding them together
+   * would either inflate `field_edited` counts with taps that are not
+   * edits, or leave a chipped field unreviewed.
+   */
+  onFieldReviewed?: (field: keyof ReceiptDraft) => void;
   /**
    * Fired once, the moment a field first receives a CLIENT-applied
    * suggestion - a derived-amount fill (proposal #1) or a vendor default
@@ -920,15 +1413,49 @@ export function ReceiptFieldsForm({
       ? "suggested"
       : undefined;
 
+  const markTouched = (key: keyof ReceiptDraft) =>
+    setTouched((t) => (t.has(key) ? t : new Set(t).add(key)));
+
+  /**
+   * One component-amount edit, with the total-tracking rule applied
+   * (2026-09-01, `applyComponentEdit`). Shared by typing and by an amount
+   * chip, so the two cannot drift.
+   *
+   * When the rule rewrites the total, the total is marked touched: the
+   * number in that box is no longer the parser's suggestion, so leaving it
+   * amber would claim an unreviewed OCR read for a value this form
+   * computed. Marked touched but NOT reported through `onFieldReviewed` -
+   * nobody has looked at the total, it just followed - so it stays out of
+   * the reviewed set the save sends.
+   */
+  const editComponentAmount = (key: ComponentAmountField, value: string) => {
+    if (applyComponentEdit(draft, key, value).total !== draft.total) {
+      markTouched("total");
+    }
+    setDraft((d) => applyComponentEdit(d, key, value));
+  };
+
   const text =
     (key: keyof ReceiptDraft) =>
     (event: { target: { value: string } }) => {
-      setTouched((t) => (t.has(key) ? t : new Set(t).add(key)));
+      const value = event.target.value;
+      markTouched(key);
       onFieldEdited?.(key);
-      setDraft((d) => ({ ...d, [key]: event.target.value }));
+      onFieldReviewed?.(key);
+      if (isComponentAmountField(key)) {
+        editComponentAmount(key, value);
+        return;
+      }
+      setDraft((d) => ({ ...d, [key]: value }));
     };
 
   const mismatch = arithmeticMismatch(draft);
+  // 2026-09-01: the sharper half of the same inequality, rendered instead
+  // of the generic note rather than beside it - "the total is less than
+  // its parts" is strictly more specific than "these do not add up", and
+  // two warnings about one arithmetic fact is how a form teaches people to
+  // stop reading its warnings.
+  const belowFloor = amountFloorNote(draft);
   // §10A.1's disagreement notes live here, not in the two screens that
   // embed this form, so they get the arithmetic warning's exact treatment
   // ("inside the field") wherever a pending receipt's fields render -
@@ -944,6 +1471,12 @@ export function ReceiptFieldsForm({
   // field.
   const derived = deriveMissingAmount(draft);
   const reconciliation = derived === null ? reconciliationSuggestions(draft) : null;
+  // Proposal #1's HST fill and the 2026-09-01 chip answer the same
+  // question - what goes in the blank HST box - and the chip is the
+  // better-worded of the two (it names the default-rate case the fill
+  // cannot reach at all). Where both apply, the chip wins and the fill is
+  // suppressed for HST alone; every other field's fill is untouched.
+  const hstChip = hstSuggestionChip(draft);
 
   /** Applies a derived-amount fill (the "Fill" button in `AmountDeriveNote`
    * below) - never wired to `text()`/`onFieldEdited`/`touched`, because
@@ -963,6 +1496,40 @@ export function ReceiptFieldsForm({
   function applyDerivedAmount(offer: DerivedAmount) {
     const key = offer.field;
     setDraft((d) => ({ ...d, [key]: formatCents(offer.cents) }));
+    setClientApplied((current) => (current.has(key) ? current : new Set(current).add(key)));
+    onSuggestionApplied?.(key);
+  }
+
+  /**
+   * An amount chip (2026-09-01), which differs from the fill above in two
+   * deliberate ways.
+   *
+   * It marks the field TOUCHED and reports it reviewed. A fill offers the
+   * one value the other four boxes determine, and proposal #1's own risk
+   * mitigation is that it lands amber and stays amber until a person looks
+   * at it. A chip states a rule and its result - "HST at 13% of subtotal =
+   * $1.65" - and the person picked it over typing anything else; that
+   * choice is the looking. Leaving it amber would mean the tint no longer
+   * distinguishes "nobody has read this" from "somebody chose this".
+   *
+   * It routes through `editComponentAmount`, so applying it moves the
+   * total the same way typing the number would - the chip's own doc
+   * comment above is the whole reason that is safe.
+   *
+   * It still reports through `onSuggestionApplied`, so the save-time
+   * accepted/overridden summary scores it beside every other suggestion
+   * source (2026-08-28's ruling, unchanged).
+   */
+  function applyAmountChip(chip: AmountChip) {
+    const key = chip.field;
+    if (!isComponentAmountField(key)) {
+      // Only component amounts have chips today; the type keeps this
+      // honest rather than assuming.
+      return;
+    }
+    markTouched(key);
+    onFieldReviewed?.(key);
+    editComponentAmount(key, formatCents(chip.cents));
     setClientApplied((current) => (current.has(key) ? current : new Set(current).add(key)));
     onSuggestionApplied?.(key);
   }
@@ -1013,11 +1580,19 @@ export function ReceiptFieldsForm({
           placeholder="Not found"
         />
       </label>
-      {mismatch && (
+      {belowFloor ? (
         <p className="warning">
-          Subtotal + HST + tip + other fees doesn't add up to total - worth a
-          look, not a blocker.
+          Total is less than subtotal + HST + tip + fees - the paid amount
+          cannot be smaller than the charges that make it up, so one of
+          these numbers is wrong.
         </p>
+      ) : (
+        mismatch && (
+          <p className="warning">
+            Subtotal + HST + tip + other fees doesn't add up to total - worth a
+            look, not a blocker.
+          </p>
+        )
       )}
       {/* Only reachable when `mismatch` above is not: total is blank exactly
           when arithmeticMismatch has nothing to reconcile against, so the
@@ -1081,8 +1656,9 @@ export function ReceiptFieldsForm({
           for a combined 13% before confirming.
         </p>
       )}
+      <AmountChipNote chip={hstChip} onApply={applyAmountChip} />
       <AmountDeriveNote
-        offer={derived?.field === "hst" ? derived : null}
+        offer={derived?.field === "hst" && hstChip === null ? derived : null}
         onApply={applyDerivedAmount}
       />
       <label className={amber("subtotal")}>
@@ -1201,6 +1777,34 @@ function AmountDeriveNote({
       {offer.formula} = {formatCents(offer.cents)}
       <button type="button" className="link" onClick={() => onApply(offer)}>
         Fill
+      </button>
+    </p>
+  );
+}
+
+/**
+ * An amount chip (2026-09-01): the same amber family and the same
+ * "state the arithmetic, never just a button" rule as `AmountDeriveNote`
+ * above, with a verb on the control that says what taking it does. One
+ * chip at a time by construction (`hstSuggestionChip` returns at most
+ * one) - a row of competing numbers this form invented would make the
+ * person adjudicate between them instead of reading the receipt.
+ */
+function AmountChipNote({
+  chip,
+  onApply,
+}: {
+  chip: AmountChip | null;
+  onApply: (chip: AmountChip) => void;
+}) {
+  if (chip === null) {
+    return null;
+  }
+  return (
+    <p className="warning derive-note">
+      {chip.formula} = {formatCents(chip.cents)}
+      <button type="button" className="link" onClick={() => onApply(chip)}>
+        Use this
       </button>
     </p>
   );

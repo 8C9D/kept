@@ -5,6 +5,7 @@ import { useReceiptOptions } from "./options.js";
 import { clearToken, storeToken, storedToken } from "./session.js";
 import { ConfirmQueue } from "./views/ConfirmQueue.js";
 import { ExportView } from "./views/ExportView.js";
+import { ManageValuesView } from "./views/ManageValues.js";
 import { ReceiptDetailView } from "./views/ReceiptDetail.js";
 import { ReceiptsTable } from "./views/ReceiptsTable.js";
 import { SignIn } from "./views/SignIn.js";
@@ -21,7 +22,11 @@ export type View =
   | { name: "detail"; id: string }
   | { name: "confirm" }
   | { name: "export" }
-  | { name: "upload" };
+  | { name: "upload" }
+  /** The three reusable-value lists, renameable and removable
+   * (2026-09-01). Six views now; still no router - there are still no deep
+   * links to keep. */
+  | { name: "values" };
 
 export function App() {
   const [token, setToken] = useState<string | null>(storedToken);
@@ -139,6 +144,12 @@ export function App() {
           >
             Export
           </button>
+          <button
+            className={view.name === "values" ? "active" : ""}
+            onClick={() => setView({ name: "values" })}
+          >
+            Values
+          </button>
         </nav>
         <div className="topbar-actions">
           <button className="signout" onClick={signOut}>
@@ -203,6 +214,12 @@ export function App() {
         {view.name === "export" && <ExportView api={api} />}
         {view.name === "upload" && (
           <UploadView api={api} onChanged={changed} />
+        )}
+        {view.name === "values" && (
+          // `changed` is not wired here on purpose: a rename rewrites
+          // receipts, but this screen never shows them, and the table
+          // re-fetches whenever it is opened.
+          <ManageValuesView api={api} options={options} />
         )}
       </main>
     </div>

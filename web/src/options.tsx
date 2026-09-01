@@ -58,6 +58,14 @@ export interface ReceiptOptionsHandle {
   values: ReceiptOptions;
   /** Report a saved receipt: re-fetches only if it used a new value. */
   noteSaved: (saved: SavedValues) => void;
+  /**
+   * Re-fetch unconditionally (2026-09-01, for the manage-values screen).
+   * `noteSaved` above is the cheap path for the common case - a save that
+   * introduced nothing new costs no request - but a rename or a delete
+   * changes the lists in ways no saved receipt describes, so that screen
+   * asks for the lists again outright rather than trying to predict them.
+   */
+  reload: () => void;
 }
 
 /**
@@ -100,7 +108,11 @@ export function useReceiptOptions(api: KeptApi | null): ReceiptOptionsHandle {
     [values, load],
   );
 
-  return { values, noteSaved };
+  const reload = useCallback(() => {
+    void load();
+  }, [load]);
+
+  return { values, noteSaved, reload };
 }
 
 /**

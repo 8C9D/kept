@@ -673,3 +673,38 @@ table.export-jobs tbody tr:hover td { background: var(--stripe); }
   text-decoration: none;
 }
 .download-link:hover { background: var(--accent-line); }
+
+/* Manage values (2026-09-01) - three plain lists, an inline editor, and
+   the same amber/danger families the rest of the app uses: the merge
+   warning is amber ("look at this before you press it"), and the remove
+   confirmation reuses `.delete-confirm` because it is the same shape of
+   decision the receipt and account deletes present. */
+.manage-values { max-width: 45rem; }
+.manage-values > .muted { margin-bottom: 1.2rem; }
+.value-notice { font-weight: 600; color: var(--accent-ink); }
+.value-list { margin-bottom: 1.6rem; }
+.value-list h3 {
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  padding-bottom: 0.3rem;
+  border-bottom: 2px solid var(--line-strong);
+  margin-bottom: 0;
+}
+.value-list ul { list-style: none; padding: 0; margin: 0; }
+.value-list li {
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 0.45rem 0.1rem;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-sm);
+}
+.value-name { flex: 1; min-width: 8rem; font-weight: 600; overflow-wrap: anywhere; }
+.rename-editor { display: flex; gap: 0.6rem; align-items: end; flex-wrap: wrap; flex: 1; }
+.rename-editor label { flex: 1; min-width: 12rem; }
+.rename-editor input { width: 100%; }
+.rename-editor .warning { flex-basis: 100%; margin: 0; }

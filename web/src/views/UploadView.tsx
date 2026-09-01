@@ -7,7 +7,15 @@ import { uploadOne, type UploadOutcome } from "../upload.js";
  * laptop, so the web client takes a multi-file drop and each file becomes
  * its own pending receipt - the same create path as capture, no camera
  * code. Nothing is asked before the drop: the receipts land pending and
- * every field is typed in the confirm queue, with the image beside it.
+ * every field is confirmed in the confirm queue, with the image beside it.
+ *
+ * 2026-09-01: a dropped PDF now has its text layer read in the browser
+ * first, so the receipts it creates arrive with suggestions rather than ten
+ * empty boxes (upload.ts). That is why the outcome line below says what
+ * happened to the text as well as to the receipt - "created" alone would
+ * leave "the parsers had nothing to work with" indistinguishable from
+ * "they did", which is the difference between a confirm that takes five
+ * seconds and one that takes a minute.
  */
 
 interface QueuedFile {
@@ -63,8 +71,11 @@ export function UploadView({
       <h2>Upload the backlog</h2>
       <p className="muted">
         Drop emailed PDFs or photos; each becomes a pending receipt to work
-        through in the confirm queue. The purchase date is set to today -
-        correct it when you confirm.
+        through in the confirm queue. A PDF with a text layer is read here
+        in the browser, so its vendor, date and amounts are usually
+        suggested for you by the time you get to it - they are still
+        suggestions, and nothing is saved until you confirm. The purchase
+        date is set to today - correct it when you confirm.
       </p>
 
       <div
@@ -141,7 +152,7 @@ function outcomeText(file: QueuedFile): string {
   }
   switch (outcome.state) {
     case "created":
-      return "pending receipt created";
+      return `pending receipt created${pdfTextText(outcome.pdfText)}`;
     case "duplicate":
       // Round 4 §2.2's forward constraint: a duplicate here is a fact to
       // show the person, never counted as saved.
@@ -150,5 +161,30 @@ function outcomeText(file: QueuedFile): string {
       return outcome.detail;
     case "failed":
       return `failed: ${outcome.detail}`;
+  }
+}
+
+/**
+ * The PDF half of a created file's outcome (2026-09-01). Every branch here
+ * describes a receipt that EXISTS - the difference is only what the confirm
+ * queue will have to work with - so none of them reads as a failure, and
+ * the two that leave the fields empty say so in the words a person can act
+ * on: type them.
+ */
+function pdfTextText(pdfText: Extract<UploadOutcome, { state: "created" }>["pdfText"]): string {
+  if (pdfText === null) {
+    // An image: this client runs no OCR of its own, so there was never
+    // text to have an outcome about.
+    return "";
+  }
+  switch (pdfText.state) {
+    case "extracted":
+      return ` - text extracted, ${pdfText.lines} ${
+        pdfText.lines === 1 ? "line" : "lines"
+      }${pdfText.truncated ? " (truncated at the size limit)" : ""}`;
+    case "no-text-layer":
+      return " - no text layer, type the fields";
+    case "unreadable":
+      return ` - couldn't read the PDF text (${pdfText.detail}), type the fields`;
   }
 }

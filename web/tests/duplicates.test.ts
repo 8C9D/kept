@@ -39,6 +39,8 @@ const MATCH: Receipt = {
   notes: null,
   status: "confirmed",
   suggestions: null,
+  reviewedFields: [],
+  ocrSource: null,
   createdAt: "2026-08-21T12:00:00.000Z",
   updatedAt: "2026-08-21T12:00:00.000Z",
 };
