@@ -20,6 +20,7 @@ import {
   type ReceiptOptions,
   type ReceiptPatch,
   type ReviewedField,
+  type WithholdableAmountSuggestion,
 } from "../types.js";
 
 /**
@@ -103,14 +104,6 @@ const REVIEWED_FIELD_BY_DRAFT_KEY: Record<keyof ReceiptDraft, ReviewedField> = {
  * copy, the row filling only fields no suggestion covers. Confirmed
  * receipts never come here - they render the row, the human's values.
  *
- * `otherFees` is deliberately absent from the merge below: there is no
- * `otherFeesCents` key in `MergedSuggestions` (§7.3 - "other fees" is a
- * residual with no consistent printed label, so no heuristic can match
- * it), so the spread from `draftFromReceipt` stands untouched and the
- * field is always the row's own value. That is what lets `suggestedFields`
- * below tell "no suggestion" apart from "field name" without
- * special-casing.
- *
  * ⚠ 2026-09-01: a field in `receipt.reviewedFields` is the HUMAN's, and the
  * row wins outright for it - a "save for later" wrote those values, and
  * re-offering the parser's guess over a value someone typed last Tuesday
@@ -121,6 +114,25 @@ const REVIEWED_FIELD_BY_DRAFT_KEY: Record<keyof ReceiptDraft, ReviewedField> = {
  * two rules must agree even if one end changes - and because a client that
  * relies on the server having remembered is a client that shows the wrong
  * value the day it has not.
+ *
+ * ⚠ 2026-09-01, later the same day - three additions, and two of them run
+ * the OPPOSITE way to the rule above:
+ *
+ * - A WITHHELD amount (`suggestions.totalCents.withheld`) lands blank, and
+ *   the row is not consulted for it. Everywhere else an absent suggestion
+ *   falls through to the row; here that would defeat the whole rule, since
+ *   a pending row's amounts are the same capture-time heuristic snapshot
+ *   the server just declined to serve - the $8.50 it withheld and the
+ *   $8.50 sitting in the row are one number, reached two ways. The server
+ *   deliberately does not send the raw value; this must not go and find it.
+ * - `paymentMethod` and `otherFees` prefill from the merge only when the
+ *   ROW HAS NONE, which is backwards from vendor and the amounts. Neither
+ *   field has ever had a capture-time heuristic write behind it, so a value
+ *   in the row is a human's, and the §7.1 reason the merge outranks a
+ *   pending row's copy ("the row is the parser's snapshot") simply does not
+ *   apply to these two. Precedence, stated once: row value, then served
+ *   suggestion, then vendor default - and the third falls out for free,
+ *   because `vendorDefaultFill` only ever fills a field that is empty.
  */
 export function draftFromPending(receipt: Receipt): ReceiptDraft {
   const row = draftFromReceipt(receipt);
@@ -129,16 +141,36 @@ export function draftFromPending(receipt: Receipt): ReceiptDraft {
     ...row,
     purchasedAt: s?.purchasedAt.value ?? receipt.purchasedAt,
     vendor: s?.vendor.value ?? receipt.vendor ?? "",
-    subtotal: formatCents(s?.subtotalCents.value ?? receipt.subtotalCents),
+    subtotal: withheldAmount(s?.subtotalCents)
+      ? ""
+      : formatCents(s?.subtotalCents.value ?? receipt.subtotalCents),
     hst: formatCents(s?.hstCents.value ?? receipt.hstCents),
-    total: formatCents(s?.totalCents.value ?? receipt.totalCents),
+    total: withheldAmount(s?.totalCents)
+      ? ""
+      : formatCents(s?.totalCents.value ?? receipt.totalCents),
     tip: formatCents(s?.tipCents.value ?? receipt.tipCents),
+    otherFees: formatCents(receipt.otherFeesCents ?? s?.otherFeesCents?.value ?? null),
+    paymentMethod: receipt.paymentMethod ?? s?.paymentMethod?.value ?? "",
   };
   for (const field of receipt.reviewedFields) {
     const key = DRAFT_KEY_BY_REVIEWED_FIELD[field];
     merged[key] = row[key];
   }
   return merged;
+}
+
+/**
+ * Whether the server declined to serve this amount because the set it
+ * belongs to is arithmetically impossible (2026-09-01,
+ * `domain/suggestedAmounts.ts`). One predicate, so the blanking rule above
+ * and the note below read the flag the same way - including the `=== true`,
+ * which is what makes an older response that carries no such key read as
+ * "not withheld" rather than as anything else.
+ */
+function withheldAmount(
+  suggestion: WithholdableAmountSuggestion | undefined,
+): boolean {
+  return suggestion?.withheld === true;
 }
 
 /**
@@ -155,10 +187,28 @@ export function draftFromPending(receipt: Receipt): ReceiptDraft {
  * promised a suggestion the form had thrown away - while the same receipt
  * reached through the confirm queue prefilled correctly.
  *
- * ⚠ This is the rule for *opening* a receipt, not for redrawing one after a
- * save. A save returns the human's own values, and re-deriving the merge
- * over them would visibly overwrite what they just typed with the parser's
- * guess; that path stays on `draftFromReceipt` deliberately.
+ * ⚠ 2026-09-01: this is now also the rule for redrawing after a save, which
+ * reverses what stood here since August. The old note read: "a save returns
+ * the human's own values, and re-deriving the merge over them would visibly
+ * overwrite what they just typed with the parser's guess; that path stays on
+ * `draftFromReceipt` deliberately." That was true when a save wrote the
+ * whole draft - the row then held everything, so the row WAS the full
+ * picture, and the merge could only spoil it.
+ *
+ * Both halves of that changed on 2026-09-01, in opposite directions:
+ *
+ * - A save-for-later writes only the REVIEWED fields (`patchForSaveForLater`),
+ *   so the row is no longer the full picture. Redrawing from it alone blanks
+ *   every box the merge had prefilled and nobody touched - the person clicks
+ *   Save and watches the suggested total vanish.
+ * - A reviewed field's row value now wins outright over any suggestion
+ *   (`draftFromPending`, and the server stops serving one for it at all), so
+ *   the overwrite the old note feared cannot happen: what they just typed is
+ *   exactly what is now protected.
+ *
+ * So the two rules that used to conflict now agree, and one function serves
+ * both moments. A confirmed receipt is unaffected either way - this returns
+ * `draftFromReceipt` for one.
  */
 export function draftForDisplay(receipt: Receipt): ReceiptDraft {
   return receipt.status === "pending"
@@ -263,14 +313,31 @@ export function reviewedFieldsForSave(
 }
 
 /**
- * The "save for later" write (2026-09-01): the edited fields and the
- * reviewed set, and deliberately NO `status`. The receipt stays pending,
- * keeps its place in the queue and in the list's pending count, and the
- * fields just written stop being re-suggested. It is the write for a
- * receipt someone got halfway through - the vendor and total are on the
+ * The "save for later" write (2026-09-01): the REVIEWED fields' values and
+ * the reviewed set, and deliberately NO `status`. The receipt stays
+ * pending, keeps its place in the queue and in the list's pending count,
+ * and the fields just written stop being re-suggested. It is the write for
+ * a receipt someone got halfway through - the vendor and total are on the
  * screen, the category needs a decision they cannot make now - and until
  * this existed the only two ways out of that form were "confirm a receipt
  * you are not sure about" and "lose what you typed".
+ *
+ * ⚠ **Only the reviewed fields' values**, which is what makes this a
+ * halfway save rather than a quiet full one (fixed later on 2026-09-01;
+ * it diffed the whole draft before). The form a person is looking at is
+ * PREFILLED from the merge, so a whole-draft diff wrote the parser's
+ * guesses into the row for every field they never touched - the suggested
+ * total, the suggested vendor - and those values then stopped being
+ * suggestions and started being the record. That is exactly what "no OCR
+ * value saves without a human confirming it" (constraint 2) forbids, and a
+ * save-for-later is by definition the moment nobody has confirmed them yet.
+ * An untouched field's row value is left alone: the field is still blank or
+ * still holds whatever it held, and the merge will offer the same
+ * suggestion again next time the receipt opens.
+ *
+ * `patchForConfirm` below deliberately keeps sending everything - a confirm
+ * IS the human accepting the whole form, which is the confirmation
+ * constraint 2 asks for.
  *
  * ⚠ Not a confirmation and never a substitute for one. Constraint 2 and
  * the export rule are untouched: nothing with `status = 'pending'` may
@@ -281,18 +348,49 @@ export function patchForSaveForLater(
   draft: ReceiptDraft,
   touched: ReadonlySet<keyof ReceiptDraft>,
 ): ReceiptPatch {
+  const reviewedFields = reviewedFieldsForSave(receipt, touched);
   return {
-    ...patchFromDraft(receipt, draft),
-    reviewedFields: reviewedFieldsForSave(receipt, touched),
+    ...limitPatchToFields(patchFromDraft(receipt, draft), new Set(reviewedFields)),
+    reviewedFields,
   };
 }
 
 /**
- * The confirm write: the same patch plus `status: 'confirmed'`. The
- * reviewed set rides along harmlessly - a confirmed receipt is served no
- * suggestions at all, so nothing consumes it - and it is sent anyway so
- * that the two writes differ in exactly one key, `status`, which is the
- * only thing that should ever distinguish them.
+ * The whole-draft diff narrowed to the fields a human has looked at.
+ *
+ * Written as "build everything, then drop what is not reviewed" rather than
+ * threading a filter through `patchFromDraft`'s nine assignments, for one
+ * reason worth the extra pass: the money parser still runs over every box,
+ * so a save-for-later with an unparseable amount in an UNREVIEWED field
+ * still throws `DraftError` and names it, instead of silently shipping a
+ * patch that omits the broken field. A form that quietly saves around
+ * something it could not read is the error-masking this repo hunts for.
+ *
+ * Every `ReviewedField` name is also a `ReceiptPatch` key of the same type -
+ * that is the whole point of the server naming them after its columns - so
+ * deleting by that name is total and needs no mapping table.
+ */
+function limitPatchToFields(
+  patch: ReceiptPatch,
+  fields: ReadonlySet<ReviewedField>,
+): ReceiptPatch {
+  const limited: ReceiptPatch = { ...patch };
+  for (const field of REVIEWED_FIELDS) {
+    if (!fields.has(field)) {
+      delete limited[field];
+    }
+  }
+  return limited;
+}
+
+/**
+ * The confirm write: the same patch plus `status: 'confirmed'`, and every
+ * field's value rather than only the reviewed ones. A confirm is the person
+ * accepting the whole form as it stands - that is what constraint 2's
+ * "a human confirming it" means - so what is on screen is what gets stored,
+ * suggested values included. The reviewed set rides along harmlessly (a
+ * confirmed receipt is served no suggestions at all, so nothing consumes
+ * it) and is sent anyway so the two writes differ in as little as possible.
  */
 export function patchForConfirm(
   receipt: Receipt,
@@ -300,7 +398,8 @@ export function patchForConfirm(
   touched: ReadonlySet<keyof ReceiptDraft>,
 ): ReceiptPatch {
   return {
-    ...patchForSaveForLater(receipt, draft, touched),
+    ...patchFromDraft(receipt, draft),
+    reviewedFields: reviewedFieldsForSave(receipt, touched),
     status: "confirmed",
   };
 }
@@ -313,6 +412,18 @@ export function patchForConfirm(
  * moment every save-for-later carries a `reviewedFields` key: marking a
  * field reviewed IS a change worth sending, and re-sending the identical
  * set is not.
+ *
+ * Since the save-for-later patch now carries values only for reviewed
+ * fields, "no key but `reviewedFields`" means the narrower and more useful
+ * thing it always should have: nothing a human looked at differs from the
+ * row - not merely that the draft happened to match the row everywhere,
+ * suggestions included.
+ *
+ * A patch with NO `reviewedFields` key at all is the confirmed-receipt edit
+ * (`patchFromDraft` alone, ReceiptDetail.tsx): an empty one changes
+ * nothing, and comparing an absent set against the receipt's stored one
+ * would have called it a change and sent `PATCH {}` on every no-op save of
+ * a receipt that had ever been half-filled.
  */
 export function patchChangesNothing(
   receipt: Receipt,
@@ -321,7 +432,10 @@ export function patchChangesNothing(
   if (Object.keys(patch).some((key) => key !== "reviewedFields")) {
     return false;
   }
-  const next = patch.reviewedFields ?? [];
+  const next = patch.reviewedFields;
+  if (next === undefined) {
+    return true;
+  }
   return (
     next.length === receipt.reviewedFields.length &&
     next.every((field) => receipt.reviewedFields.includes(field))
@@ -931,14 +1045,15 @@ export function vendorDefaultFill(
  * The draft fields that can ever carry an amber "unreviewed suggestion"
  * tint. Originally exactly the keys `MergedSuggestions` carries; widened
  * 2026-08-28 for proposals #1 and #2, which introduced two amber sources
- * that are NOT part of the server's OCR merge at all: `otherFees` can go
- * amber from a derived-amount fill even though no heuristic has ever
- * suggested it (the merge has no `otherFeesCents` key, per
- * `draftFromPending`'s own comment - that is still true, this is a
- * different source), and `category`/`paymentMethod` can go amber from a
- * vendor default. `suggestedFields` below still reads only the
- * server-sourced half of this set; `ReceiptFieldsForm`'s `amber()` helper
- * is what unions it with the client-sourced half (`clientApplied` state).
+ * that were not part of the server's OCR merge at all: `otherFees` can go
+ * amber from a derived-amount fill, and `category`/`paymentMethod` from a
+ * vendor default. Two of those three have since gained a served suggestion
+ * as well (2026-09-01: `otherFeesCents` and `paymentMethod` joined the
+ * merge), so they now have two independent amber sources; `category` still
+ * has only the vendor default, and the server still has no key for it.
+ * `suggestedFields` below reads the server-sourced half of this set;
+ * `ReceiptFieldsForm`'s `amber()` helper is what unions it with the
+ * client-sourced half (`clientApplied` state).
  *
  * Exported so a caller (ReceiptDetail.tsx, ConfirmQueue.tsx) can type the
  * accumulator it hands `summarizeFieldEdits`/`logFieldEditTelemetry` below
@@ -990,6 +1105,18 @@ function isSuggestibleField(
  * enforces on the value half, and it is likewise belt-and-braces: the
  * server stops SERVING a suggestion for a reviewed field, so the loop below
  * usually has nothing to remove.
+ *
+ * A WITHHELD amount marks nothing: `value` is null there, so it fails the
+ * same test an absent suggestion does. That is the right answer rather than
+ * a coincidence - amber means "a suggestion is sitting in this box,
+ * unreviewed", and a withheld amount left the box empty on purpose. The
+ * note is what explains it (`withheldAmountsNote`), not a tint.
+ *
+ * `paymentMethod` and `otherFees` mark only when the merge's value is what
+ * the box actually holds - that is, when the row had none. `draftFromPending`
+ * gives the row precedence for exactly these two fields, so testing the
+ * suggestion alone would tint a value that came from the row and promise an
+ * unreviewed OCR read for something a human typed.
  */
 function suggestedFields(receipt: Receipt): ReadonlySet<SuggestibleField> {
   const fields = new Set<SuggestibleField>();
@@ -1003,6 +1130,12 @@ function suggestedFields(receipt: Receipt): ReadonlySet<SuggestibleField> {
   if (s.hstCents.value !== null) fields.add("hst");
   if (s.totalCents.value !== null) fields.add("total");
   if (s.tipCents.value !== null) fields.add("tip");
+  if (s.otherFeesCents?.value != null && receipt.otherFeesCents === null) {
+    fields.add("otherFees");
+  }
+  if (s.paymentMethod?.value != null && receipt.paymentMethod === null) {
+    fields.add("paymentMethod");
+  }
   for (const reviewed of receipt.reviewedFields) {
     const key = DRAFT_KEY_BY_REVIEWED_FIELD[reviewed];
     if (isSuggestibleField(key)) {
@@ -1169,6 +1302,60 @@ export function hstRateHintNote(
     "hst",
     plausibility === "looks-like-half-split",
   );
+}
+
+/**
+ * The withheld-amounts note (2026-09-01): one secondary line explaining why
+ * an amount box that would normally arrive prefilled is empty.
+ *
+ * The server withholds a total (and sometimes the subtotal with it) when
+ * the set of amounts its parsers read is impossible - a total below the sum
+ * of its own parts, which is a misread label rather than a receipt anyone
+ * printed. It sends `withheld: true` and NOT the offending value, so this
+ * form has nothing to show and, without a sentence, no way to say why: an
+ * empty total on a receipt that plainly prints one reads as the app having
+ * lost it. Naming the reason is what turns that into an instruction.
+ *
+ * Returns the whole sentence rather than a flag, so the wording and the
+ * choice between "total", "subtotal" and both live in one testable place
+ * instead of being assembled in JSX.
+ *
+ * Deliberately NOT amber, unlike every other note on this form: amber means
+ * "an unreviewed suggestion is sitting in this box" (§10A.1), and the whole
+ * point here is that nothing was suggested. A tint would promise a value
+ * that is not there.
+ *
+ * Gated like the disagreement notes - pending only, and cleared per field
+ * by touching it (§10A.1: "touching a field clears the tint and the note
+ * together"). Once the total is typed from the paper, "the total was left
+ * blank" is no longer true, and a note that outlived its own subject is
+ * how a form teaches people to stop reading its notes. With both amounts
+ * withheld and one of them typed, the sentence narrows to the other.
+ *
+ * There is no `reviewedFields` check to match `suggestedFields`' one: a
+ * reviewed field has its suggestion suppressed BEFORE the arithmetic rule
+ * runs (server: `suppressReviewed`, then `withholdImpossibleAmounts`), so
+ * the value the rule would judge is already absent and it withholds
+ * nothing. Reviewed and withheld cannot both be true of one field.
+ */
+export function withheldAmountsNote(
+  receipt: Receipt,
+  touched: ReadonlySet<keyof ReceiptDraft>,
+): string | null {
+  const s = receipt.suggestions;
+  if (receipt.status !== "pending" || s === null) {
+    return null;
+  }
+  const total = withheldAmount(s.totalCents) && !touched.has("total");
+  const subtotal = withheldAmount(s.subtotalCents) && !touched.has("subtotal");
+  if (!total && !subtotal) {
+    return null;
+  }
+  const [fields, were, them] =
+    total && subtotal
+      ? ["the total and subtotal", "were", "them"]
+      : [total ? "the total" : "the subtotal", "was", "it"];
+  return `The amounts read from this receipt didn't add up, so ${fields} ${were} left blank - enter ${them} from the paper.`;
 }
 
 /**
@@ -1463,6 +1650,8 @@ export function ReceiptFieldsForm({
   const dateDisagreement = dateDisagreementNote(receipt, touched);
   const hstDisagreement = hstDisagreementNote(receipt, touched);
   const hstRateHint = hstRateHintNote(receipt, draft, touched);
+  // The one note on this form that is not amber - see its own comment.
+  const withheldNote = withheldAmountsNote(receipt, touched);
 
   // Proposal #1: at most one of these is ever non-null for a given draft -
   // `deriveMissingAmount` requires exactly one field blank,
@@ -1712,10 +1901,17 @@ export function ReceiptFieldsForm({
         offer={derived?.field === "otherFees" ? derived : (reconciliation?.otherFees ?? null)}
         onApply={applyDerivedAmount}
       />
+      {/* Under the amounts block rather than beside the total: it can be
+          about the total, the subtotal or both, and one line under the five
+          boxes says that without a note appearing twice. `.muted`, not
+          `.warning` - the one deliberately non-amber note on this form. */}
+      {withheldNote !== null && <p className="muted withheld-note">{withheldNote}</p>}
       {/* Free text with the person's own past values offered: a suggestion
-          list, never a closed set. Proposal #2's vendor default is the same
-          amber source as `otherFees` above - a client-applied suggestion
-          the OCR merge has no key for at all. */}
+          list, never a closed set. Category's only amber source is
+          proposal #2's vendor default - a client-applied suggestion the OCR
+          merge still has no key for. Payment method below has both that and
+          a served suggestion as of 2026-09-01, and `draftFromPending` is
+          where the precedence between them is settled. */}
       <label className={amber("category")}>
         Category
         <input

@@ -24,10 +24,16 @@ import {
   reconciliationSuggestions,
   summarizeFieldEdits,
   vendorDefaultFill,
+  withheldAmountsNote,
   type ReceiptDraft,
   type SuggestibleField,
 } from "../src/views/ReceiptForm.js";
-import type { Receipt, ReceiptOptions } from "../src/types.js";
+import type {
+  MergedSuggestions,
+  Receipt,
+  ReceiptOptions,
+  WithholdableAmountSuggestion,
+} from "../src/types.js";
 
 function receipt(overrides: Partial<Receipt> = {}): Receipt {
   return {
@@ -50,6 +56,26 @@ function receipt(overrides: Partial<Receipt> = {}): Receipt {
     ocrSource: null,
     createdAt: "2026-08-21T12:00:00.000Z",
     updatedAt: "2026-08-21T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/**
+ * A served merge with every field an absence (2026-09-01). Eight keys now,
+ * and spelling all eight out per case buries the one field each test below
+ * is actually about - the older blocks in this file still write theirs
+ * inline, which is also what proves the two new keys stayed optional.
+ */
+function merged(overrides: Partial<MergedSuggestions> = {}): MergedSuggestions {
+  return {
+    vendor: { value: null, source: null },
+    purchasedAt: { value: null, source: null, disagreement: false },
+    totalCents: { value: null, source: null },
+    hstCents: { value: null, source: null, disagreement: false },
+    subtotalCents: { value: null, source: null },
+    tipCents: { value: null, source: null },
+    otherFeesCents: { value: null, source: null },
+    paymentMethod: { value: null, source: null },
     ...overrides,
   };
 }
@@ -95,10 +121,12 @@ describe("draftFromPending - the §7.3 display rule, as iOS renders it", () => {
     expect(d.tip).toBe("$15.00");
   });
 
-  it("never suggests other fees - no such key exists in the merge", () => {
-    // §7.3: "other fees" is a residual with no consistent printed label,
-    // so no heuristic can match it - the merge has no otherFeesCents key
-    // at all, and draftFromPending never overrides the row's own value.
+  it("falls back to the row's own other fees when the merge carries no such key", () => {
+    // The pre-2026-09-01 shape, kept as a fixture on purpose: until that
+    // date the merge had no `otherFeesCents` key at all (no heuristic can
+    // match a residual with no consistent printed label), and a response
+    // built without one must still render the row's value rather than a
+    // blank - which is also what pins the key as optional in types.ts.
     const row = receipt({
       otherFeesCents: 800,
       suggestions: {
@@ -1072,10 +1100,16 @@ describe("the two patch shapes - save for later versus confirm", () => {
     expect("status" in patch).toBe(false);
   });
 
-  it("confirm is the same patch plus status - exactly one key apart", () => {
+  it("confirm carries everything save-for-later does, plus status", () => {
+    // The two stopped being "exactly one key apart" later on 2026-09-01,
+    // when save-for-later narrowed to the reviewed fields' values - see the
+    // `patchForSaveForLater - only the reviewed fields' values are written`
+    // block below for the case where they genuinely differ. Nothing
+    // untouched differs from the row in this fixture, so here they still
+    // land one key apart, and confirm remains a superset by construction.
     const later = patchForSaveForLater(row, edited, new Set(["vendor"]));
     const confirmed = patchForConfirm(row, edited, new Set(["vendor"]));
-    expect(confirmed).toEqual({ ...later, status: "confirmed" });
+    expect(confirmed).toMatchObject({ ...later, status: "confirmed" });
   });
 
   it("names the field when money does not parse, from either builder", () => {
@@ -1403,5 +1437,525 @@ describe("hstSuggestionChip - the offer for a blank HST box", () => {
     const next = applyComponentEdit(start, "hst", "$1.65");
     expect(chip?.cents).toBe(165);
     expect(next.total).toBe("$14.35");
+  });
+});
+
+/* ────────────────────────────────────────────────────────────────────────
+   2026-09-01, later the same day: a save-for-later that writes only what a
+   human looked at, the withheld-amounts note, and the two suggestions the
+   merge gained (payment method and other fees).
+   ──────────────────────────────────────────────────────────────────────── */
+
+describe("patchForSaveForLater - only the reviewed fields' values are written", () => {
+  /**
+   * The defect this whole block exists to catch. The form is PREFILLED from
+   * the merge, so a save-for-later that diffed the whole draft wrote the
+   * parser's guesses into the row for every field nobody touched - the
+   * suggested total became the stored total, and stopped being a
+   * suggestion. Constraint 2: no OCR value saves without a human confirming
+   * it, and a save-for-later is by definition the moment nobody has.
+   */
+  const row = receipt({
+    vendor: null,
+    totalCents: null,
+    suggestions: merged({
+      vendor: { value: "Food Basics", source: "llm" },
+      totalCents: { value: 1435, source: "heuristic" },
+    }),
+  });
+  // Exactly what is on screen when the receipt opens, then one edit.
+  const onScreen = draftFromPending(row);
+  const edited = { ...onScreen, vendor: "Food Basics #12" };
+
+  it("prefills both fields on screen - the precondition the rest of this block needs", () => {
+    expect(onScreen.vendor).toBe("Food Basics");
+    expect(onScreen.total).toBe("$14.35");
+  });
+
+  it("sends a touched vendor and NOT the untouched suggested total", () => {
+    const patch = patchForSaveForLater(row, edited, new Set(["vendor"]));
+    expect(patch).toEqual({
+      vendor: "Food Basics #12",
+      reviewedFields: ["vendor"],
+    });
+    expect("totalCents" in patch).toBe(false);
+  });
+
+  it("confirm still sends the total - accepting the whole form is the confirmation", () => {
+    const patch = patchForConfirm(row, edited, new Set(["vendor"]));
+    expect(patch).toEqual({
+      vendor: "Food Basics #12",
+      totalCents: 1435,
+      reviewedFields: ["vendor"],
+      status: "confirmed",
+    });
+  });
+
+  it("sends nothing at all when the one edit was reverted to the row's value", () => {
+    // Vendor touched, but typed back to nothing - the row's own state. The
+    // reviewed set still grew, which is the change worth sending.
+    const reverted = { ...onScreen, vendor: "" };
+    expect(patchForSaveForLater(row, reverted, new Set(["vendor"]))).toEqual({
+      reviewedFields: ["vendor"],
+    });
+  });
+
+  it("carries a field reviewed on an earlier visit, not just today's touches", () => {
+    // The reviewed set is a union across visits (`reviewedFieldsForSave`),
+    // and the patch is limited by that union - so a field looked at last
+    // week is still writable this week without being re-touched.
+    const earlier = receipt({
+      reviewedFields: ["totalCents"],
+      totalCents: 1435,
+      suggestions: merged({ vendor: { value: "Food Basics", source: "llm" } }),
+    });
+    const d = { ...draftFromPending(earlier), total: "$14.99" };
+    expect(patchForSaveForLater(earlier, d, new Set())).toEqual({
+      totalCents: 1499,
+      reviewedFields: ["totalCents"],
+    });
+  });
+
+  it("still refuses an unparseable amount in a field nobody reviewed", () => {
+    // The money parser runs over every box before the narrowing, on
+    // purpose: a form that quietly saved around a number it could not read
+    // would be masking exactly the error it should be naming.
+    const bad = { ...onScreen, hst: "abc" };
+    expect(() => patchForSaveForLater(row, bad, new Set(["vendor"]))).toThrow(
+      DraftError,
+    );
+    expect(() => patchForSaveForLater(row, bad, new Set(["vendor"]))).toThrow(/HST/);
+  });
+
+  it("never writes a suggested value into the row for a field left untouched", () => {
+    // The general statement of the same rule, over every field the merge
+    // can prefill at once: nothing is reviewed, so nothing is written.
+    const suggestedEverywhere = receipt({
+      suggestions: merged({
+        vendor: { value: "Food Basics", source: "llm" },
+        purchasedAt: { value: "2026-08-19", source: "both", disagreement: false },
+        totalCents: { value: 1435, source: "heuristic" },
+        hstCents: { value: 165, source: "heuristic", disagreement: false },
+        subtotalCents: { value: 1270, source: "heuristic" },
+        tipCents: { value: 0, source: "heuristic" },
+        otherFeesCents: { value: 0, source: "llm" },
+        paymentMethod: { value: "MASTERCARD", source: "llm" },
+      }),
+    });
+    const patch = patchForSaveForLater(
+      suggestedEverywhere,
+      draftFromPending(suggestedEverywhere),
+      new Set(),
+    );
+    expect(patch).toEqual({ reviewedFields: [] });
+  });
+});
+
+describe("patchChangesNothing - the confirmed-receipt edit that sends no reviewed set", () => {
+  it("calls an empty patch a no-op even on a receipt with a stored reviewed set", () => {
+    // Predicted before running (CLAUDE.md: predict before verifying). A
+    // confirmed receipt that was half-filled before it was confirmed still
+    // carries `reviewedFields` on the row, while the confirmed-receipt edit
+    // path builds its patch with `patchFromDraft` alone and sends no set at
+    // all. Comparing that absence against the stored set reported "changed"
+    // and put `PATCH {}` on the wire for every no-op save.
+    const row = receipt({ status: "confirmed", reviewedFields: ["vendor"] });
+    expect(patchChangesNothing(row, {})).toBe(true);
+  });
+
+  it("still calls an empty reviewed set against a stored non-empty one a change", () => {
+    // Sending `reviewedFields: []` is a real instruction - un-review
+    // everything - and is not the same as not sending the key.
+    const row = receipt({ reviewedFields: ["vendor"] });
+    expect(patchChangesNothing(row, { reviewedFields: [] })).toBe(false);
+  });
+});
+
+describe("withheldAmountsNote - why an amount box is empty (2026-09-01)", () => {
+  const NO_TOUCH = new Set<keyof ReceiptDraft>();
+  const withheld = (): WithholdableAmountSuggestion => ({
+    value: null,
+    source: null,
+    withheld: true,
+  });
+
+  function pending(overrides: Partial<MergedSuggestions>): Receipt {
+    return receipt({ status: "pending", suggestions: merged(overrides) });
+  }
+
+  it("names the total when the total alone was withheld", () => {
+    expect(
+      withheldAmountsNote(pending({ totalCents: withheld() }), NO_TOUCH),
+    ).toBe(
+      "The amounts read from this receipt didn't add up, so the total was left blank - enter it from the paper.",
+    );
+  });
+
+  it("names the subtotal when the subtotal alone was withheld", () => {
+    expect(
+      withheldAmountsNote(pending({ subtotalCents: withheld() }), NO_TOUCH),
+    ).toBe(
+      "The amounts read from this receipt didn't add up, so the subtotal was left blank - enter it from the paper.",
+    );
+  });
+
+  it("names both, plurally, when both were withheld", () => {
+    expect(
+      withheldAmountsNote(
+        pending({ totalCents: withheld(), subtotalCents: withheld() }),
+        NO_TOUCH,
+      ),
+    ).toBe(
+      "The amounts read from this receipt didn't add up, so the total and subtotal were left blank - enter them from the paper.",
+    );
+  });
+
+  it("says nothing when nothing was withheld", () => {
+    expect(
+      withheldAmountsNote(
+        pending({ totalCents: { value: 1435, source: "heuristic" } }),
+        NO_TOUCH,
+      ),
+    ).toBeNull();
+  });
+
+  it("says nothing for a merge that predates the flag entirely", () => {
+    // An older response carries no `withheld` key at all; an absent flag
+    // must read as false rather than as anything else.
+    const older = receipt({
+      status: "pending",
+      suggestions: {
+        vendor: { value: null, source: null },
+        purchasedAt: { value: null, source: null, disagreement: false },
+        totalCents: { value: null, source: null },
+        hstCents: { value: null, source: null, disagreement: false },
+        subtotalCents: { value: null, source: null },
+        tipCents: { value: null, source: null },
+      },
+    });
+    expect(withheldAmountsNote(older, NO_TOUCH)).toBeNull();
+  });
+
+  it("says nothing on a receipt with no suggestions at all", () => {
+    expect(withheldAmountsNote(receipt({ suggestions: null }), NO_TOUCH)).toBeNull();
+  });
+
+  it("never renders on a confirmed receipt", () => {
+    const confirmed = {
+      ...pending({ totalCents: withheld() }),
+      status: "confirmed" as const,
+    };
+    expect(withheldAmountsNote(confirmed, NO_TOUCH)).toBeNull();
+  });
+
+  it("clears once the total is typed - §10A.1's rule for every note here", () => {
+    expect(
+      withheldAmountsNote(
+        pending({ totalCents: withheld() }),
+        new Set<keyof ReceiptDraft>(["total"]),
+      ),
+    ).toBeNull();
+  });
+
+  it("narrows to the field still blank when only one of the two was typed", () => {
+    expect(
+      withheldAmountsNote(
+        pending({ totalCents: withheld(), subtotalCents: withheld() }),
+        new Set<keyof ReceiptDraft>(["total"]),
+      ),
+    ).toBe(
+      "The amounts read from this receipt didn't add up, so the subtotal was left blank - enter it from the paper.",
+    );
+  });
+
+  it("touching an unrelated field does not clear it", () => {
+    expect(
+      withheldAmountsNote(
+        pending({ totalCents: withheld() }),
+        new Set<keyof ReceiptDraft>(["vendor"]),
+      ),
+    ).not.toBeNull();
+  });
+});
+
+describe("draftFromPending - a withheld amount lands blank, from anywhere", () => {
+  /**
+   * The production case the server's rule was written from: a $218.94
+   * Costco purchase stored as $8.50, because the parser took "TOTAL
+   * DISCOUNT(S) $ 8.50" for the total while reading the subtotal and HST
+   * off the same slip correctly. The server withholds the total and sends
+   * no value for it - and the row holds that same $8.50, because the row IS
+   * the capture-time heuristic snapshot. Falling through to the row would
+   * put the withheld number straight back on screen.
+   */
+  const costco = receipt({
+    totalCents: 850,
+    subtotalCents: 21160,
+    hstCents: 734,
+    suggestions: merged({
+      totalCents: { value: null, source: null, withheld: true },
+      subtotalCents: { value: 21160, source: "heuristic" },
+      hstCents: { value: 734, source: "heuristic", disagreement: false },
+    }),
+  });
+
+  it("leaves the box empty rather than falling back to the row's own copy", () => {
+    const d = draftFromPending(costco);
+    expect(d.total).toBe("");
+    // The two amounts that corroborated each other are still offered.
+    expect(d.subtotal).toBe("$211.60");
+    expect(d.hst).toBe("$7.34");
+  });
+
+  it("blanks a withheld subtotal on the same terms", () => {
+    const both = receipt({
+      totalCents: 850,
+      subtotalCents: 21160,
+      suggestions: merged({
+        totalCents: { value: null, source: null, withheld: true },
+        subtotalCents: { value: null, source: null, withheld: true },
+      }),
+    });
+    const d = draftFromPending(both);
+    expect(d.total).toBe("");
+    expect(d.subtotal).toBe("");
+  });
+
+  it("is not amber - nothing was suggested, so nothing may promise it was", () => {
+    // `summarizeFieldEdits` reads the same server-sourced set the tint
+    // does, so a withheld field producing no accepted/overridden outcome is
+    // the testable half of "a withheld amount is never amber".
+    const { suggestionOutcomes } = summarizeFieldEdits(costco, []);
+    expect(suggestionOutcomes.map((outcome) => outcome.field).sort()).toEqual([
+      "hst",
+      "subtotal",
+    ]);
+  });
+
+  it("still lets a reviewed field's row value win over the blanking rule", () => {
+    // A human's typed total is never blanked by anything. The server cannot
+    // actually produce this pair (a reviewed field's suggestion is
+    // suppressed before the arithmetic rule runs, so it withholds nothing),
+    // which is exactly why the client's ordering has to be pinned rather
+    // than assumed.
+    const reviewed: Receipt = {
+      ...costco,
+      totalCents: 21894,
+      reviewedFields: ["totalCents"],
+    };
+    expect(draftFromPending(reviewed).total).toBe("$218.94");
+  });
+});
+
+describe("draftFromPending - the payment-method and other-fees suggestions (2026-09-01)", () => {
+  it("prefills payment method from the merge when the row has none", () => {
+    const row = receipt({
+      paymentMethod: null,
+      suggestions: merged({ paymentMethod: { value: "MASTERCARD", source: "llm" } }),
+    });
+    expect(draftFromPending(row).paymentMethod).toBe("MASTERCARD");
+  });
+
+  it("prefills other fees from the merge when the row has none", () => {
+    const row = receipt({
+      otherFeesCents: null,
+      suggestions: merged({ otherFeesCents: { value: 250, source: "llm" } }),
+    });
+    expect(draftFromPending(row).otherFees).toBe("$2.50");
+  });
+
+  it("lets the row's own value win over the served suggestion, unlike vendor", () => {
+    // Precedence, first leg: row value > served suggestion. Neither field
+    // has ever had a capture-time heuristic write behind it, so a value in
+    // the row is a human's - the §7.1 reason the merge outranks a pending
+    // row's copy does not apply to these two.
+    const row = receipt({
+      paymentMethod: "Amex",
+      otherFeesCents: 900,
+      suggestions: merged({
+        paymentMethod: { value: "MASTERCARD", source: "llm" },
+        otherFeesCents: { value: 250, source: "llm" },
+      }),
+    });
+    const d = draftFromPending(row);
+    expect(d.paymentMethod).toBe("Amex");
+    expect(d.otherFees).toBe("$9.00");
+  });
+
+  it("marks a served suggestion amber, exactly as vendor and tip are", () => {
+    const row = receipt({
+      suggestions: merged({
+        paymentMethod: { value: "MASTERCARD", source: "llm" },
+        otherFeesCents: { value: 250, source: "llm" },
+      }),
+    });
+    const { suggestionOutcomes } = summarizeFieldEdits(row, []);
+    expect(suggestionOutcomes.map((outcome) => outcome.field).sort()).toEqual([
+      "otherFees",
+      "paymentMethod",
+    ]);
+  });
+
+  it("does not mark a field amber when the row's value won", () => {
+    // Amber promises "an unreviewed suggestion is sitting in this box". The
+    // box holds the row's value here, so the promise would be false.
+    const row = receipt({
+      paymentMethod: "Amex",
+      otherFeesCents: 900,
+      suggestions: merged({
+        paymentMethod: { value: "MASTERCARD", source: "llm" },
+        otherFeesCents: { value: 250, source: "llm" },
+      }),
+    });
+    expect(summarizeFieldEdits(row, []).suggestionOutcomes).toEqual([]);
+  });
+
+  it("a reviewed payment method is the human's, suggestion or not", () => {
+    const row = receipt({
+      paymentMethod: "Amex",
+      reviewedFields: ["paymentMethod"],
+      suggestions: merged({ paymentMethod: { value: "MASTERCARD", source: "llm" } }),
+    });
+    expect(draftFromPending(row).paymentMethod).toBe("Amex");
+    expect(summarizeFieldEdits(row, []).suggestionOutcomes).toEqual([]);
+  });
+});
+
+describe("the vendor default never overrides a served payment-method suggestion", () => {
+  // Precedence, second leg: served suggestion > vendor default. It falls
+  // out of `vendorDefaultFill`'s own "empty and untouched only" rule rather
+  // than needing a rule of its own - which is the point of pinning it here,
+  // because that rule is the only thing holding the ordering up.
+  const vendorDefaults: ReceiptOptions["vendorDefaults"] = {
+    "Food Basics": { category: "groceries", paymentMethod: "visa" },
+  };
+
+  it("offers nothing for payment method once the merge has prefilled it", () => {
+    const row = receipt({
+      vendor: null,
+      paymentMethod: null,
+      suggestions: merged({
+        vendor: { value: "Food Basics", source: "llm" },
+        paymentMethod: { value: "MASTERCARD", source: "llm" },
+      }),
+    });
+    const d = draftFromPending(row);
+    expect(d.paymentMethod).toBe("MASTERCARD");
+    const fill = vendorDefaultFill(d, new Set(), vendorDefaults);
+    expect(fill.paymentMethod).toBeNull();
+    // Category has no served suggestion, so the default still applies there.
+    expect(fill.category).toBe("groceries");
+  });
+
+  it("still applies when the merge served no payment method", () => {
+    const row = receipt({
+      vendor: null,
+      paymentMethod: null,
+      suggestions: merged({ vendor: { value: "Food Basics", source: "llm" } }),
+    });
+    const fill = vendorDefaultFill(draftFromPending(row), new Set(), vendorDefaults);
+    expect(fill).toEqual({ category: "groceries", paymentMethod: "visa" });
+  });
+
+  it("and the row's own value outranks both", () => {
+    // Full precedence in one case: row "Amex" beats the served
+    // "MASTERCARD", which beats the vendor default "visa".
+    const row = receipt({
+      vendor: null,
+      paymentMethod: "Amex",
+      suggestions: merged({
+        vendor: { value: "Food Basics", source: "llm" },
+        paymentMethod: { value: "MASTERCARD", source: "llm" },
+      }),
+    });
+    const d = draftFromPending(row);
+    expect(d.paymentMethod).toBe("Amex");
+    expect(vendorDefaultFill(d, new Set(), vendorDefaults).paymentMethod).toBeNull();
+  });
+});
+
+describe("the detail screen's redraw after a save-for-later (2026-09-01)", () => {
+  /**
+   * `ReceiptDetail.save()` redraws with `draftForDisplay({...receipt,
+   * ...updated})`. It called `draftFromReceipt` until this date, which was
+   * right while a save wrote the whole draft and wrong the moment
+   * `patchForSaveForLater` narrowed to the reviewed fields: the row stopped
+   * being the full picture, so redrawing from it alone emptied every box the
+   * merge had prefilled and nobody had touched. The person clicked Save and
+   * watched the suggested total disappear - data loss, as far as anyone
+   * looking at the screen could tell, from the change that was supposed to
+   * stop the parser's guesses being stored.
+   *
+   * The round trip, at the level the two pure functions see it.
+   */
+  const row = receipt({
+    vendor: null,
+    totalCents: null,
+    suggestions: merged({
+      vendor: { value: "Food Basics", source: "llm" },
+      totalCents: { value: 1435, source: "heuristic" },
+    }),
+  });
+  const edited = { ...draftFromPending(row), vendor: "Food Basics #12" };
+  const patch = patchForSaveForLater(row, edited, new Set(["vendor"]));
+  /**
+   * What the server hands back for that PATCH: the vendor written, the
+   * reviewed set stored, and the total still nothing but a suggestion -
+   * because nothing wrote it. The vendor suggestion is gone, which is the
+   * server's own rule (it stops serving one for a reviewed field).
+   */
+  const updated: Receipt = {
+    ...row,
+    vendor: patch.vendor ?? null,
+    reviewedFields: patch.reviewedFields ?? [],
+    suggestions: merged({ totalCents: { value: 1435, source: "heuristic" } }),
+  };
+
+  it("left the total unwritten - the precondition that makes the redraw matter", () => {
+    expect("totalCents" in patch).toBe(false);
+    expect(updated.totalCents).toBeNull();
+  });
+
+  it("keeps the untouched suggested total on screen rather than blanking it", () => {
+    expect(draftForDisplay(updated).total).toBe("$14.35");
+  });
+
+  it("shows the row's value for the field just saved, never the parser's again", () => {
+    expect(draftForDisplay(updated).vendor).toBe("Food Basics #12");
+  });
+
+  it("is what the old rule got wrong - the defect itself, pinned", () => {
+    // The redraw this replaced. Kept as a test so the reason for the change
+    // cannot be lost: `draftFromReceipt` still returns an empty total here,
+    // and that is exactly what the person used to see after saving.
+    expect(draftFromReceipt(updated).total).toBe("");
+  });
+
+  it("is safe only because a reviewed field's row value outranks any suggestion", () => {
+    // The property the whole change rests on: even if the server DID go on
+    // serving a suggestion for the field just typed, re-deriving the merge
+    // cannot overwrite it - which is the fear the old rule was written
+    // against, and is now handled a layer down.
+    const stillServing: Receipt = {
+      ...updated,
+      suggestions: merged({
+        vendor: { value: "F00D BASlCS", source: "heuristic" },
+        totalCents: { value: 1435, source: "heuristic" },
+      }),
+    };
+    expect(draftForDisplay(stillServing).vendor).toBe("Food Basics #12");
+  });
+
+  it("leaves the confirmed-receipt edit path byte-for-byte unchanged", () => {
+    // `draftForDisplay` IS `draftFromReceipt` for a confirmed receipt, so
+    // the edit-after-confirm redraw is the same function call it always was
+    // - suggestions or no suggestions on the row.
+    const confirmed: Receipt = {
+      ...updated,
+      status: "confirmed",
+      totalCents: 1435,
+    };
+    expect(draftForDisplay(confirmed)).toEqual(draftFromReceipt(confirmed));
+    expect(draftForDisplay(confirmed).total).toBe("$14.35");
   });
 });

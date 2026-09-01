@@ -19,6 +19,27 @@ export interface MergedDateSuggestion extends MergedSuggestion<string> {
 }
 
 /**
+ * An amount the server's arithmetic rule can decline to serve (2026-09-01;
+ * server/src/domain/suggestedAmounts.ts carries the rule and its reasoning).
+ * `withheld: true` is NOT the same as a plain absence: `{value: null,
+ * source: null}` means neither parser found anything, while this means one
+ * of them found something the server declines to offer because the set of
+ * amounts it belongs to is impossible - a total below the sum of its own
+ * parts, the $218.94 Costco slip stored as $8.50 that the diagnosis over
+ * 136 production receipts found. The raw values are deliberately not sent,
+ * so there is nothing for a client to second-guess the rule with.
+ *
+ * Optional here where the server declares it required: older fixtures and
+ * any response built before this date carry no such key, and an absent flag
+ * reads exactly as `false` does at every site that consumes it. The two
+ * fields it can ever be true for are the server's own `WithheldAmountField`
+ * pair - total and subtotal.
+ */
+export interface WithholdableAmountSuggestion extends MergedSuggestion<number> {
+  withheld?: boolean;
+}
+
+/**
  * An amount suggestion that also carries the disagreement flag, mirroring
  * the server's own `MergedAmountSuggestion` (domain/mergedSuggestions.ts).
  * The served `value`/`source` still follow the plain money rule - heuristic
@@ -31,9 +52,10 @@ export interface MergedDateSuggestion extends MergedSuggestion<string> {
  * wrong-but-plausible number the arithmetic check cannot catch when the
  * subtotal is also missing. Not extended to total or subtotal in this pass
  * (server's own comment: every extra inline note costs attention, and one
- * that fires on every receipt is wallpaper rather than signal).
+ * that fires on every receipt is wallpaper rather than signal) - those two
+ * gained the withholding flag above instead, which is a different question.
  */
-export interface MergedAmountSuggestion extends MergedSuggestion<number> {
+export interface MergedAmountSuggestion extends WithholdableAmountSuggestion {
   disagreement: boolean;
 }
 
@@ -46,17 +68,44 @@ export interface MergedAmountSuggestion extends MergedSuggestion<number> {
 export interface MergedSuggestions {
   vendor: MergedSuggestion<string>;
   purchasedAt: MergedDateSuggestion;
-  totalCents: MergedSuggestion<number>;
+  /**
+   * Total and subtotal carry the withholding flag as of 2026-09-01 - not a
+   * disagreement flag (the August note above on why that stayed HST-only
+   * still stands) but the arithmetic rule's, because these are the only two
+   * fields it can ever suppress.
+   */
+  totalCents: WithholdableAmountSuggestion;
   hstCents: MergedAmountSuggestion;
-  subtotalCents: MergedSuggestion<number>;
+  subtotalCents: WithholdableAmountSuggestion;
   /**
    * Merged heuristic-only, like the other amounts (2026-08-28 tip/other-fees
-   * split of the retired `other_tax_cents`). There is deliberately no
-   * `otherFeesCents` suggestion here - "other fees" is a residual with no
-   * consistent printed label, so no heuristic can match it. It is a human-
-   * entered field and never starts amber.
+   * split of the retired `other_tax_cents`).
    */
   tipCents: MergedSuggestion<number>;
+  /**
+   * Added 2026-09-01, and the reversal of a sentence that stood here since
+   * August: "there is deliberately no `otherFeesCents` suggestion - no
+   * heuristic can match a residual with no consistent printed label." That
+   * is still true of the HEURISTIC, and other fees is still absent on every
+   * photographed receipt. What changed is the other parser: on a `pdf-text`
+   * receipt, where the text layer has no OCR noise in it, the merge falls
+   * through to the LLM for money, so this key can carry a value there. It
+   * gets no exception for being new - same merge rule as every other amount.
+   *
+   * Optional here for the same reason `withheld` is: a response built before
+   * this date has no such key, and an absent suggestion and an absent key
+   * mean the same thing to every reader of it.
+   */
+  otherFeesCents?: MergedSuggestion<number>;
+  /**
+   * Added 2026-09-01, merged like `vendor` - LLM-preferred, heuristic
+   * fallthrough. Not because a card brand resembles a vendor name, but
+   * because the on-device parser has no rule for it at all and never will:
+   * it is printed on ~80% of slips and was stored on 0 of 130 production
+   * receipts, and reading "MASTERCARD" off a slip is a reading task rather
+   * than a pattern match. Optional for the same reason as the key above.
+   */
+  paymentMethod?: MergedSuggestion<string>;
 }
 
 export type ReceiptStatus = "pending" | "confirmed";

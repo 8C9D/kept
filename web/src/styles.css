@@ -561,6 +561,18 @@ button.link.status-pending:hover, button.link.status-confirmed:hover { text-deco
 }
 .field-grid p.warning.derive-note button.link:hover:not(:disabled) { color: var(--ink); }
 
+/* The withheld-amounts note (2026-09-01, ReceiptForm.tsx's
+   `withheldAmountsNote`): the one inline note on this form that is
+   deliberately NOT amber. Amber says "an unreviewed suggestion is sitting
+   in this box"; this says the opposite - the server declined to suggest
+   anything, so the box is empty on purpose - and tinting it would promise a
+   value that is not there. Spans both columns like every other note, and
+   sits under the amount fields it explains. */
+.field-grid .withheld-note {
+  grid-column: 1 / -1;
+  margin: -0.3rem 0 0;
+}
+
 /* Proposal #8's near-duplicate warning (ReceiptForm.tsx's
    `PossibleDuplicatesNote`): the same `.warning` amber band as every
    other inline note on this form (a `div` here, not a `p`, because it

@@ -17,7 +17,6 @@ import {
   DraftError,
   ReceiptFieldsForm,
   draftForDisplay,
-  draftFromReceipt,
   logFieldEditTelemetry,
   patchChangesNothing,
   patchForSaveForLater,
@@ -168,8 +167,22 @@ export function ReceiptDetailView({
     }
     try {
       const updated = await api.updateReceipt(receipt.id, patch);
-      setReceipt({ ...receipt, ...updated });
-      setDraft(draftFromReceipt({ ...receipt, ...updated }));
+      const saved = { ...receipt, ...updated };
+      setReceipt(saved);
+      // `draftForDisplay`, not `draftFromReceipt` (2026-09-01, and the
+      // reversal of a rule that stood since August - see that function's own
+      // doc comment for the full account). A save-for-later now writes only
+      // the fields a human reviewed, so redrawing from the row alone emptied
+      // every box the merge had prefilled and nobody had touched: the person
+      // clicked Save and watched the suggested total disappear, which reads
+      // as data loss and is the opposite of what just happened. Re-deriving
+      // the merge is safe here in a way it was not before, because the
+      // fields they just typed are in `reviewedFields` now and
+      // `draftFromPending` gives the row outright precedence for those - the
+      // server has also stopped serving suggestions for them. A confirmed
+      // receipt is unaffected: `draftForDisplay` IS `draftFromReceipt` for
+      // one, so the edit-after-confirm path is byte-for-byte what it was.
+      setDraft(draftForDisplay(saved));
       setNotice(pending ? "Saved. Still pending - confirm it in the queue." : "Saved.");
       options.noteSaved(updated);
       onChanged();
