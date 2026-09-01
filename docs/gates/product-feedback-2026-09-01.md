@@ -6,10 +6,9 @@ Scope: the owner's product feedback after two weeks of real use, and the
 actually wrong. Built across `server/`, `ios/`, `web/` in one session, in
 eight commits on `main` (`a2bf95a` … `ab14580`).
 
-**Nothing here is deployed.** No `fly deploy`, no migration against Neon,
-no Cloudflare Pages redeploy, no archive and no TestFlight upload. The
-phones are on **1.0 (4)**, which predates every change in this report.
-Migration `0009` is applied to the **local** database only.
+**Deployed the same afternoon, after this report was written** - see §9 at
+the end. The paragraphs that follow describe the state at gate time and are
+left as written.
 
 **Suites**, all re-run in this documentation pass rather than taken from
 the building sessions:
@@ -427,3 +426,18 @@ receipts for weeks, and almost nobody ever saw it, because it answers five
 seconds after the screen that asks the question has already been finished
 with. Nearly every decision above is a consequence of measuring that rather
 than guessing at it.
+
+## 9 · Deployed - 2026-09-01 afternoon, on the owner's instruction
+
+Executed in §6's order and verified per step; the full record is
+`docs/DECISIONS.md` 2026-09-01, last entry.
+
+| step | artifact read |
+|---|---|
+| fresh dump | `kept-prod-20260901-pre0009.dump` restored to scratch; 5/5 tables match production by count and whole-row md5; image set = afternoon manifest (237); uploaded to `kept-backups`, re-downloaded to the same sha256 |
+| `0009` | via `fly ssh console`: **no-op** (v8 image lacks the file). From the laptop: 10 migrations recorded, `receipt_field_options` = 142 rows (95/26/21, matching the prediction), both columns present, 237 receipts at `reviewed_fields = '{}'` |
+| `fly deploy` | machine **v9**, check passing, boot log names the model; `/api/me` 401 + `no-store`, `/options` 401, `POST /parse` 401, direct `fly.dev` 403 |
+| Pages | live `index.html` sha256 = `dist/index.html`; 4/4 assets 200; `/privacy` 308→200; CSP present |
+| TestFlight | 1.0 (5) uploaded, `Upload succeeded`; sibling export of the same archive: `Apple Distribution`, `get-task-allow=false`, no `ProvisionedDevices`, `(1.0, 5)` |
+
+Nothing submitted to App Review. Owner-action queue unchanged.

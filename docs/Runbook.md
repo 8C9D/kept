@@ -92,13 +92,15 @@ The image runs the same entrypoint local development runs (`node --import tsx sr
 
 **Migrations do not run on deploy.** See §2.
 
-⚠ **The batch waiting to deploy as of 2026-09-01 has an order, and it is not the default one.** Built and committed, nothing run against production. In sequence:
+⚠ **The 2026-09-01 batch had an order, and it was not the default one.** Executed in full the same afternoon (`docs/DECISIONS.md`, 2026-09-01, last entry) - kept here because the next batch that pairs a migration with code that reads it will need the same sequence. In sequence:
 
 1. **A fresh verified dump** (§4) — the two taken on 2026-09-01 are point-in-time artifacts, not a licence to skip this.
 2. **Migration `0009_reviewed-fields-and-options.sql`, BEFORE the deploy** — see §2 for why an additive migration goes first this time.
 3. **`fly deploy`**, then the §1 confirmation checks below.
 4. **The Cloudflare Pages redeploy**, in the same session.
 5. **Then, and only then, TestFlight build 1.0 (5).**
+
+⚠ **Step 2 cannot run through `fly ssh console`, ever, in this order.** That command runs `drizzle-kit migrate` inside the *deployed* image, and the deployed image is by definition the one from before this deploy - it does not ship the migration that has to precede it. On 2026-09-01 it printed `migrations applied successfully!` against v8 and applied nothing; production was read back to find out. A before-deploy migration runs from the laptop (§2's fallback), and its effect is verified in the database, never from the migrate command's output.
 
 ⚠ **Step 5 cannot move ahead of step 3.** The deployed build's create and update schemas are **strict**, so a phone running 1.0 (5) against today's production would have **every save answered 400** on the unknown `ocrSource` and `reviewedFields` keys — surfacing in the app as outbox items needing attention, which is the honest failure and still a broken app in someone's hand. The reverse is safe: 1.0 (4) sends neither key and the new columns default.
 
@@ -183,6 +185,7 @@ fly ssh console -C "npm run db:migrate"
 `drizzle-kit migrate` reads `DATABASE_URL` from the machine's environment, applies only what has not been applied, and records each one.
 
 ⚠ **This command has not worked from the owner's Mac since 2026-08-26.** The WireGuard tunnel establishes and then times out probing the internal API; `fly doctor` reports the gateway ping failing with "no response from gateway received" while authentication and the agent pass. It is *not* simply blocked UDP - WireGuard-over-websockets on TCP/443 fails identically. The diagnosis is unfinished (`docs/DECISIONS.md`, 2026-08-26).
+**Update 2026-09-01: the tunnel worked again that afternoon, and it did not help.** `fly ssh console -C "npm run db:migrate"` connected, ran, and reported success - inside the **v8 image**, which shipped `0000` through `0008` and did not contain `0009`. It applied nothing. For any migration that must run *before* its deploy (§1's ordering note), the machine cannot run it whatever the tunnel does, because the file is not there; the laptop path below is the only path, not a fallback. Verify by reading `drizzle.__drizzle_migrations` and the schema itself, never by the migrate command's exit line.
 Migration 0005 ran instead from the laptop, pointing `drizzle-kit` at Neon's **direct** (non-`-pooler`) endpoint - the same `DATABASE_URL` `~/.kept/backup.env` carries for `pg_dump`, and the one the backup had just proven reaches production:
 
 ```sh
@@ -310,14 +313,16 @@ file**. The drill procedure itself was executed 2026-08-20 against a manual
 production dump - row counts verified; the image leg is vacuous until
 production holds an image (see below).
 
-### Two verified backups exist for 2026-09-01, and the second one is a photograph, not a policy
+### Three verified backups exist for 2026-09-01, and each one is a photograph, not a policy
 
 Both were taken by hand, both were **restored and verified** rather than merely written (§10B: an untested backup is an assumption).
 
 - **Morning**, before anything: `~/.kept/backups/kept-prod-20260901.dump`, with its images beside it — **2 users, 136 receipts, 136 images**, every image hash-checked.
 - **Afternoon**, a second dump the same day: `~/.kept/backups/kept-prod-20260901-postbackfill.dump` and `kept-backups/pg/kept-20260901-manual-164645.dump` in R2 (16:46 UTC) — **237 receipts, 237 images**.
 
-⚠ **The second one is a point-in-time artifact and stops being a pre-migration backup the moment anything is written.** It is not the backup for the `0009` deploy described in §1/§2 — **take a fresh dump then**, and verify it. A dump's value is entirely in how little has happened since.
+- **Pre-`0009`**, 19:54 UTC, minutes before the migration: `~/.kept/backups/kept-prod-20260901-pre0009.dump` (142,834 B, sha256 `8ccffae3…`) and `kept-backups/pg/kept-20260901-manual-195446.dump` — **237 receipts, 237 images**, matched against production on every table by count and whole-row md5. Its image leg was verified by comparison: the restored `receipt_images` (key, sha256) set equals the afternoon image backup's 237-row manifest exactly, so `images-20260901-postbackfill/` is this dump's image backup too.
+
+⚠ **Each is a point-in-time artifact and stops being a pre-migration backup the moment anything is written.** None of them is the backup for the *next* migration — **take a fresh dump then**, and verify it. A dump's value is entirely in how little has happened since.
 
 ⚠ **Both are manual, and that is still the standing gap.** The scheduled agent below refuses every night for want of the R2 `kept-backups` API token, so what protects the data between hand-run dumps is Neon's 6-hour history window and nothing else.
 
