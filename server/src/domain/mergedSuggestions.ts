@@ -75,10 +75,12 @@ import { validateSuggestedAmounts } from "./suggestedAmounts.js";
  * lives HERE, at what is served, and never touches `ocr_suggestions` or
  * `llm_suggestions`, which stay immutable records of what each parser said.
  *
- * Only six of the ten reviewable field names have a suggestion to withhold
- * (`domain/reviewedFields.ts` lists all ten); the other four name fields no
- * parser suggests, so they pass through this rule without effect rather
- * than being refused by it.
+ * Eight of the ten reviewable field names have a suggestion to withhold
+ * (`domain/reviewedFields.ts` lists all ten; `paymentMethod` and
+ * `otherFeesCents` joined the suggested set with prompt v5, 2026-09-01);
+ * the other two - `category` and `notes` - name fields no parser suggests,
+ * so they pass through this rule without effect rather than being refused
+ * by it.
  *
  * **2. `pdf-text` money falls through to the LLM; `vision` money still does
  * not.** A deliberate, scoped exception to the no-fallthrough rule above,

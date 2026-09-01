@@ -27,11 +27,12 @@
  * reason: a column that could hold arbitrary client text is a column a
  * receipt's contents leak into.
  *
- * Only six of the ten have a suggestion to suppress (mergedSuggestions.ts
- * maps them); the other four - `otherFeesCents`, `category`,
- * `paymentMethod`, `notes` - are recorded anyway. A client that reports
- * "the person reviewed the category" is telling the truth about a draft's
- * state, and a vocabulary that accepted only the six would force clients to
+ * Eight of the ten have a suggestion to suppress (mergedSuggestions.ts
+ * maps them; `paymentMethod` and `otherFeesCents` joined with prompt v5,
+ * 2026-09-01); the other two - `category`, `notes` - are recorded anyway.
+ * A client that reports "the person reviewed the category" is telling the
+ * truth about a draft's state, and a vocabulary that accepted only the
+ * suggested subset would force clients to
  * decide which truths are worth sending.
  */
 export const REVIEWED_FIELDS = [
