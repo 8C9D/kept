@@ -8,7 +8,12 @@ import Foundation
 /// this exact enum). Typed because the presigned signature covers the
 /// type: declaring one and PUTting another is a 403, so the two call
 /// sites must be unable to disagree by construction.
-enum ImageUploadContentType: String, Encodable, Equatable {
+///
+/// `Decodable` as well since 2026-09-01: a queued outbox item records the
+/// type of the document it is holding (a PDF import queues
+/// `application/pdf` bytes), so this now round-trips through `item.json`
+/// as well as onto the wire.
+enum ImageUploadContentType: String, Codable, Equatable, Sendable {
     case jpeg = "image/jpeg"
     case png = "image/png"
     case pdf = "application/pdf"

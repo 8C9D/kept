@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Home, per spec §7.1: capture up top, then the receipt list, newest
 /// purchase first, paged as it scrolls. Pending receipts carry an amber
@@ -29,6 +30,23 @@ struct HomeView: View {
     /// Pushes the export screen (2026-08-28 - see Export/ExportView.swift
     /// for why this exists at all).
     @State private var showExport = false
+    /// Pushes the manage-values screen (2026-09-01).
+    @State private var showManageValues = false
+    /// Whether the PDF file importer is up (2026-09-01). Multiple
+    /// selection is allowed on purpose: the case this exists for is a
+    /// folder of emailed receipts, not one attachment.
+    @State private var showPDFImporter = false
+    /// The picked files, while their import runs.
+    @State private var pdfImportRequest: PDFImportRequest?
+    /// Why the file picker itself failed, if it did - rare (a document
+    /// provider erroring), and stated rather than dropped.
+    @State private var pdfImportPickerError: String?
+
+    /// Wraps the picked URLs so they can drive a `sheet(item:)`.
+    private struct PDFImportRequest: Identifiable {
+        let urls: [URL]
+        var id: String { urls.map(\.absoluteString).joined(separator: "|") }
+    }
     /// Whether the receipt-date range sheet is up. A sheet because a
     /// DatePicker cannot live inside the toolbar Menu that opens it.
     @State private var showDateRangeFilter = false
@@ -116,14 +134,34 @@ struct HomeView: View {
                             showServerSettings = true
                         }
                         #endif
-                        // Least destructive first, same rule the two
-                        // buttons below already follow: this one changes
-                        // nothing, so it sits above Sign out and Delete
-                        // account rather than among them.
+                        // Least destructive first, same rule the
+                        // buttons below already follow: these change
+                        // nothing about existing receipts, so they sit
+                        // above Sign out and Delete account rather than
+                        // among them.
+                        //
+                        // Import is above Export because it is the one
+                        // that ADDS receipts, which is what this screen is
+                        // mostly for (2026-09-01: spec §6A consequence 2 -
+                        // "the email backlog is a folder of PDFs").
+                        Button {
+                            showPDFImporter = true
+                        } label: {
+                            Label("Import PDF…", systemImage: "doc.badge.plus")
+                        }
                         Button {
                             showExport = true
                         } label: {
                             Label("Export", systemImage: "square.and.arrow.up")
+                        }
+                        // Housekeeping over the person's own reusable
+                        // values (2026-09-01) - below Export because it is
+                        // the rarer errand, above Sign out because it is
+                        // still a harmless one.
+                        Button {
+                            showManageValues = true
+                        } label: {
+                            Label("Manage values", systemImage: "tag")
                         }
                         Button("Sign out", role: .destructive) {
                             session.signOut()
@@ -154,6 +192,48 @@ struct HomeView: View {
             }
             .navigationDestination(isPresented: $showExport) {
                 ExportView(api: api, eventLogger: eventLogger)
+            }
+            .navigationDestination(isPresented: $showManageValues) {
+                ManageValuesView(api: api, options: options)
+            }
+            // Files, iCloud Drive, or whatever document provider holds the
+            // emailed receipts. `.pdf` only: this import reads a text
+            // layer or renders a page, and neither is a thing a .docx or a
+            // .jpg has (a photograph already has the Capture button).
+            .fileImporter(
+                isPresented: $showPDFImporter,
+                allowedContentTypes: [.pdf],
+                allowsMultipleSelection: true
+            ) { result in
+                switch result {
+                case .success(let urls) where !urls.isEmpty:
+                    pdfImportRequest = PDFImportRequest(urls: urls)
+                case .success:
+                    // Nothing picked - the person cancelled, which needs
+                    // no screen.
+                    break
+                case .failure(let error):
+                    pdfImportPickerError = error.localizedDescription
+                }
+            }
+            .sheet(item: $pdfImportRequest) { request in
+                PDFImportView(outbox: outbox, options: options, urls: request.urls) { didImportAnything in
+                    pdfImportRequest = nil
+                    if didImportAnything {
+                        Task { await model.loadFirstPage() }
+                    }
+                }
+            }
+            .alert(
+                "Those files could not be opened",
+                isPresented: Binding(
+                    get: { pdfImportPickerError != nil },
+                    set: { if !$0 { pdfImportPickerError = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { pdfImportPickerError = nil }
+            } message: {
+                Text(pdfImportPickerError ?? "")
             }
             .task {
                 await model.loadFirstPage()

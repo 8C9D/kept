@@ -124,6 +124,10 @@ struct ReusableValueFieldRow: View {
     /// itself should not require one) simply logs nothing.
     var onReuse: (() -> Void)? = nil
 
+    /// Up while the long-list picker is open (2026-09-01) - see
+    /// `PastValuesPresentation` for why a long list is not a menu.
+    @State private var showingPicker = false
+
     var body: some View {
         LabeledContent(label) {
             HStack(spacing: 8) {
@@ -143,20 +147,43 @@ struct ReusableValueFieldRow: View {
                     .focused(focus, equals: field)
                     .accessibilityIdentifier("field.\(label)")
                 if !pastValues.isEmpty {
-                    Menu {
-                        ForEach(pastValues, id: \.self) { value in
-                            Button(value) {
-                                text = value
-                                onReuse?()
-                            }
+                    // The same control in both shapes - a menu for a list
+                    // you can see all of, a searchable sheet for one you
+                    // cannot (2026-09-01, since the options route's
+                    // 100-value cap went away). Same icon, same
+                    // identifier, same one-tap-fills-the-field result.
+                    if PastValuesPresentation.usesSearchSheet(valueCount: pastValues.count) {
+                        Button {
+                            showingPicker = true
+                        } label: {
+                            Image(systemName: "chevron.down.circle")
+                                .imageScale(.large)
                         }
-                    } label: {
-                        Image(systemName: "chevron.down.circle")
-                            .imageScale(.large)
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("\(label) you have used before")
+                        .accessibilityIdentifier("options.\(label)")
+                    } else {
+                        Menu {
+                            ForEach(pastValues, id: \.self) { value in
+                                Button(value) {
+                                    text = value
+                                    onReuse?()
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "chevron.down.circle")
+                                .imageScale(.large)
+                        }
+                        .accessibilityLabel("\(label) you have used before")
+                        .accessibilityIdentifier("options.\(label)")
                     }
-                    .accessibilityLabel("\(label) you have used before")
-                    .accessibilityIdentifier("options.\(label)")
                 }
+            }
+        }
+        .sheet(isPresented: $showingPicker) {
+            PastValuesPickerSheet(title: label, values: pastValues) { value in
+                text = value
+                onReuse?()
             }
         }
     }

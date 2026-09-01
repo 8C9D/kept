@@ -13,6 +13,39 @@ struct CapturedReceiptDraft {
     /// Stated when on-device recognition failed outright, so the blank
     /// form reads as "recognition failed", not "the receipt is blank".
     let ocrFailureNote: String?
+    /// Pages two and up of ONE receipt (2026-09-01, the owner's decision): a
+    /// hotel folio or a long restaurant bill scanned back to back, which
+    /// the person said was one receipt rather than several. Extraction ran
+    /// on page 1 alone - the totals and the vendor are printed there, and
+    /// running the heuristics over a continuation page produces confident
+    /// nonsense rather than more evidence.
+    ///
+    /// Empty for every ordinary single scan, which is what the whole flow
+    /// still looks like when it is.
+    let additionalPages: [Data]
+
+    /// What the outbox stores for this draft: page one plus the rest, all
+    /// photographs. One derivation so the confirm exit and the "Later"
+    /// exit cannot queue different documents for the same scan.
+    var document: OutboxDocument {
+        .photo(imageData, additionalPages: additionalPages)
+    }
+
+    init(
+        imageData: Data,
+        suggestions: ReceiptSuggestions,
+        ocrRawText: String?,
+        capturedAt: Date,
+        ocrFailureNote: String?,
+        additionalPages: [Data] = []
+    ) {
+        self.imageData = imageData
+        self.suggestions = suggestions
+        self.ocrRawText = ocrRawText
+        self.capturedAt = capturedAt
+        self.ocrFailureNote = ocrFailureNote
+        self.additionalPages = additionalPages
+    }
 }
 
 /// Turns scanned pages into durably queued receipts (spec §6A, §7.4),
@@ -35,6 +68,16 @@ struct CapturedReceiptDraft {
 final class CaptureFlowModel: ObservableObject {
     enum Phase {
         case idle
+        /// Several pages came back from one scanning session and nobody
+        /// has said yet what they ARE (2026-09-01, the owner's decision):
+        /// N separate receipts - the backlog case this app was built for -
+        /// or one receipt with N pages. The question is asked because the
+        /// scanner cannot tell them apart and guessing either way is
+        /// destructive: guessing "separate" splits a folio into halves
+        /// that each look like a receipt with a missing total, and
+        /// guessing "one" silently swallows a stack of eighty into one
+        /// row.
+        case choosingPageMode(pageCount: Int)
         /// Single capture: on-device OCR is running. Quick, and never a
         /// network wait.
         case reading
@@ -80,6 +123,11 @@ final class CaptureFlowModel: ObservableObject {
     /// Kept so retry resumes at the failure, not from the top.
     private var remainingPages: [Data] = []
     private var savedCount = 0
+    /// The pages a multi-page scanning session returned, held while the
+    /// person answers "separate receipts or one receipt?" - the answer
+    /// decides which of the two paths below they go down, and neither can
+    /// start before it.
+    private var pagesAwaitingChoice: [Data] = []
 
     /// The single capture awaiting its confirm-screen exit, kept so a
     /// failed "Later" enqueue can be retried from the failure screen.
@@ -120,15 +168,42 @@ final class CaptureFlowModel: ObservableObject {
     /// Entry point after the scanner returns. A call while a pass is
     /// already running is dropped - there is no legitimate second batch
     /// mid-batch.
+    ///
+    /// One page behaves exactly as it always has: straight to the read and
+    /// the confirm screen, no question asked, because there is nothing to
+    /// ask about. Two or more stop here and ask (2026-09-01) - see
+    /// `Phase.choosingPageMode`.
     func savePages(_ pages: [Data]) async {
         guard !isProcessing else { return }
         if pages.count == 1, let page = pages.first {
             await prepareSingleCapture(page)
-        } else {
-            remainingPages = pages
-            savedCount = 0
-            await saveRemaining()
+        } else if pages.count > 1 {
+            pagesAwaitingChoice = pages
+            phase = .choosingPageMode(pageCount: pages.count)
         }
+    }
+
+    /// "Save as N separate receipts": the batch path, unchanged - one
+    /// pending receipt per page, worked down through the confirm queue
+    /// afterwards (spec §6A).
+    func saveScannedPagesAsSeparateReceipts() async {
+        guard !isProcessing, !pagesAwaitingChoice.isEmpty else { return }
+        remainingPages = pagesAwaitingChoice
+        pagesAwaitingChoice = []
+        savedCount = 0
+        await saveRemaining()
+    }
+
+    /// "One receipt with N pages": the single-capture path, carrying the
+    /// rest of the pages along. The read runs on page 1 only and the
+    /// confirm screen opens exactly as it does for a one-page scan; the
+    /// extra pages ride in the outbox item and are attached to the created
+    /// receipt afterwards.
+    func saveScannedPagesAsOneReceipt() async {
+        guard !isProcessing, let first = pagesAwaitingChoice.first else { return }
+        let rest = Array(pagesAwaitingChoice.dropFirst())
+        pagesAwaitingChoice = []
+        await prepareSingleCapture(first, additionalPages: rest)
     }
 
     func retry() async {
@@ -141,7 +216,7 @@ final class CaptureFlowModel: ObservableObject {
 
     // MARK: - Single capture (scan → confirm, per the gate ratification)
 
-    private func prepareSingleCapture(_ page: Data) async {
+    private func prepareSingleCapture(_ page: Data, additionalPages: [Data] = []) async {
         isProcessing = true
         defer { isProcessing = false }
 
@@ -170,7 +245,8 @@ final class CaptureFlowModel: ObservableObject {
             suggestions: suggestions,
             ocrRawText: rawText,
             capturedAt: capturedAt,
-            ocrFailureNote: ocrFailureNote
+            ocrFailureNote: ocrFailureNote,
+            additionalPages: additionalPages
         )
         singleDraft = draft
         // Weak: the phase below retains the confirm model, whose closure
@@ -179,9 +255,10 @@ final class CaptureFlowModel: ObservableObject {
         let confirmModel = ConfirmReceiptModel(draft: draft) { [weak self] fields in
             guard let self else { throw CaptureFlowTornDownError() }
             try await self.outbox.enqueue(
-                imageData: draft.imageData,
+                document: draft.document,
                 parsed: ParsedReceipt(suggestions: draft.suggestions, ocrRawText: draft.ocrRawText),
-                confirmation: fields
+                confirmation: fields,
+                partial: nil
             )
         }
         phase = .confirming(confirmModel)
@@ -259,7 +336,7 @@ final class CaptureFlowModel: ObservableObject {
 
         do {
             try await outbox.enqueue(
-                imageData: draft.imageData,
+                document: draft.document,
                 parsed: ParsedReceipt(suggestions: draft.suggestions, ocrRawText: draft.ocrRawText),
                 confirmation: nil,
                 partial: singlePartial

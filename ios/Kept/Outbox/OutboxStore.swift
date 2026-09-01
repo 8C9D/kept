@@ -10,12 +10,31 @@ protocol OutboxStore: Sendable {
     /// the receipt. Throws when the write fails - a full disk, mainly -
     /// and the capture flow must surface that as a failed save, because
     /// the person still has the paper in hand and needs to know.
-    func add(_ item: OutboxItem, imageData: Data) async throws
+    ///
+    /// `additionalPages` are pages two and up of a multi-page receipt
+    /// (2026-09-01), written before the commit record like the first
+    /// page's bytes are: a receipt is not durable until every page of it
+    /// is, or a kill mid-write would leave a two-page receipt that can
+    /// only ever upload one page.
+    func add(_ item: OutboxItem, imageData: Data, additionalPages: [Data]) async throws
     func update(_ item: OutboxItem) async throws
     func imageData(itemId: UUID) async throws -> Data
+    /// One of pages two and up, by zero-based index into what `add`
+    /// stored. Read at drain time rather than held in memory for the same
+    /// reason the first page's bytes are - the queue survives a relaunch,
+    /// and memory does not.
+    func additionalPageData(itemId: UUID, index: Int) async throws -> Data
     /// Removing an already-absent item is a success: remove-after-create
     /// must be idempotent across a kill between the two.
     func remove(itemId: UUID) async throws
+}
+
+extension OutboxStore {
+    /// The pre-2026-09-01 shape, kept so every single-page call site and
+    /// test reads as short as it did.
+    func add(_ item: OutboxItem, imageData: Data) async throws {
+        try await add(item, imageData: imageData, additionalPages: [])
+    }
 }
 
 struct OutboxLoadResult: Sendable {
@@ -61,7 +80,15 @@ struct OutboxLockedError: LocalizedError {
 /// One directory per item under Application Support:
 ///
 ///   Outbox/<item id>/image.jpg     - written first
+///   Outbox/<item id>/page-2.jpg …  - pages two and up, then written
 ///   Outbox/<item id>/item.json     - written last, atomically: the commit
+///
+/// `image.jpg` holds the document whatever the document IS - a scanned
+/// JPEG, or since 2026-09-01 an imported PDF's bytes. The name is a
+/// filename inside the app's own container, not a claim about the format;
+/// what the bytes are is `item.contentType`, which is what the presign and
+/// the PUT read. Renaming it would strand every item an installed build
+/// already wrote.
 ///
 /// item.json's presence is what makes an item exist. A directory without
 /// it is an enqueue that failed partway (the save call threw and the
@@ -128,7 +155,7 @@ actor FileOutboxStore: OutboxStore {
         return result
     }
 
-    func add(_ item: OutboxItem, imageData: Data) async throws {
+    func add(_ item: OutboxItem, imageData: Data, additionalPages: [Data]) async throws {
         try ensureDirectory()
         let itemDirectory = self.itemDirectory(item.id)
         do {
@@ -141,6 +168,15 @@ actor FileOutboxStore: OutboxStore {
                 to: itemDirectory.appending(path: Self.imageFileName),
                 options: Self.writeOptions
             )
+            // Before the commit record, for the reason the first page is:
+            // item.json's presence is what makes the item exist, so every
+            // page it promises has to be on disk by the time it lands.
+            for (index, page) in additionalPages.enumerated() {
+                try page.write(
+                    to: itemDirectory.appending(path: Self.additionalPageFileName(index: index)),
+                    options: Self.writeOptions
+                )
+            }
             try Self.encoder.encode(item).write(
                 to: itemDirectory.appending(path: Self.itemFileName),
                 options: Self.writeOptions
@@ -164,8 +200,19 @@ actor FileOutboxStore: OutboxStore {
     }
 
     func imageData(itemId: UUID) async throws -> Data {
+        try readPage(itemId: itemId, fileName: Self.imageFileName)
+    }
+
+    func additionalPageData(itemId: UUID, index: Int) async throws -> Data {
+        try readPage(itemId: itemId, fileName: Self.additionalPageFileName(index: index))
+    }
+
+    /// One page's bytes, with the locked-vs-destroyed distinction the
+    /// drain's classifier depends on. Shared by both readers so a
+    /// later page cannot end up classified differently from the first.
+    private func readPage(itemId: UUID, fileName: String) throws -> Data {
         do {
-            return try Data(contentsOf: itemDirectory(itemId).appending(path: Self.imageFileName))
+            return try Data(contentsOf: itemDirectory(itemId).appending(path: fileName))
         } catch let error as CocoaError where error.code == .fileReadNoPermission {
             // Locked, not gone. The distinction decides whether the drain
             // waits for the next unlock or tells the person their receipt
@@ -188,6 +235,13 @@ actor FileOutboxStore: OutboxStore {
 
     private static let itemFileName = "item.json"
     private static let imageFileName = "image.jpg"
+
+    /// Pages two and up, numbered as a person would count them: index 0 is
+    /// `page-2.jpg`. Named off the page number rather than the array index
+    /// so a queue being diagnosed by hand reads the way the receipt does.
+    private static func additionalPageFileName(index: Int) -> String {
+        "page-\(index + 2).jpg"
+    }
 
     private func itemDirectory(_ id: UUID) -> URL {
         directory.appending(path: id.uuidString.lowercased())

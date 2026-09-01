@@ -19,13 +19,17 @@ final class CaptureFlowModelTests: XCTestCase {
         }
 
         struct EnqueuedReceipt {
-            let imageData: Data
+            let document: OutboxDocument
             let parsed: ParsedReceipt?
             let confirmation: ConfirmedReceiptFields?
             /// What the confirm form had half-filled when "Later" was
             /// tapped (2026-09-01) - nil for a batch page and for a Later
             /// nobody had typed anything into.
             let partial: PendingReceiptFields?
+
+            var imageData: Data { document.data }
+            /// Pages two and up (2026-09-01, "one receipt with N pages").
+            var additionalPages: [Data] { document.additionalPages }
         }
 
         private(set) var enqueued: [EnqueuedReceipt] = []
@@ -39,20 +43,20 @@ final class CaptureFlowModelTests: XCTestCase {
         private var callNumber = 0
 
         func enqueue(imageData: Data) async throws {
-            try await record(imageData: imageData, parsed: nil, confirmation: nil, partial: nil)
+            try await record(document: .photo(imageData), parsed: nil, confirmation: nil, partial: nil)
         }
 
         func enqueue(
-            imageData: Data,
+            document: OutboxDocument,
             parsed: ParsedReceipt,
             confirmation: ConfirmedReceiptFields?,
             partial: PendingReceiptFields?
         ) async throws {
-            try await record(imageData: imageData, parsed: parsed, confirmation: confirmation, partial: partial)
+            try await record(document: document, parsed: parsed, confirmation: confirmation, partial: partial)
         }
 
         private func record(
-            imageData: Data,
+            document: OutboxDocument,
             parsed: ParsedReceipt?,
             confirmation: ConfirmedReceiptFields?,
             partial: PendingReceiptFields?
@@ -64,7 +68,7 @@ final class CaptureFlowModelTests: XCTestCase {
                 throw DiskFull()
             }
             enqueued.append(EnqueuedReceipt(
-                imageData: imageData, parsed: parsed, confirmation: confirmation, partial: partial
+                document: document, parsed: parsed, confirmation: confirmation, partial: partial
             ))
         }
     }
@@ -246,12 +250,83 @@ final class CaptureFlowModelTests: XCTestCase {
         }
     }
 
+    // MARK: - Several pages: separate receipts, or one receipt (2026-09-01)
+
+    /// The scanner cannot tell a stack of receipts from a folio, so the
+    /// person is asked before either path starts. Nothing is queued until
+    /// they answer.
+    func testSeveralPagesAskBeforeQueueingAnything() async {
+        let model = makeModel()
+        await model.savePages([Data([1]), Data([2]), Data([3])])
+
+        guard case .choosingPageMode(let pageCount) = model.phase else {
+            return XCTFail("Expected choosingPageMode, got \(model.phase)")
+        }
+        XCTAssertEqual(pageCount, 3)
+        XCTAssertTrue(outbox.enqueued.isEmpty, "the question is asked before anything is queued")
+    }
+
+    /// One page is not a question: straight to the read and the confirm
+    /// screen, exactly as before this choice existed.
+    func testOnePageStillGoesStraightToTheConfirmScreen() async {
+        let model = makeModel(recognizer: StubTextRecognizer(results: [Self.parsedText]))
+        await model.savePages([Data("single page".utf8)])
+        guard case .confirming = model.phase else {
+            return XCTFail("Expected confirming, got \(model.phase)")
+        }
+    }
+
+    /// "One receipt with N pages": one enqueue, carrying the rest of the
+    /// pages, through the single-capture confirm screen. The read ran on
+    /// page 1 alone.
+    func testOneReceiptWithSeveralPagesConfirmsOnceAndCarriesTheRest() async {
+        let pages = [Data([1]), Data([2]), Data([3])]
+        let model = makeModel(recognizer: StubTextRecognizer(results: [Self.parsedText]))
+        await model.savePages(pages)
+        await model.saveScannedPagesAsOneReceipt()
+
+        guard case .confirming(let confirmModel) = model.phase else {
+            return XCTFail("Expected confirming, got \(model.phase)")
+        }
+        // Page 1 is what was read and what the form is backed by; every
+        // page is reachable from the image section.
+        XCTAssertEqual(confirmModel.imageSource, .local(pages[0]))
+        XCTAssertEqual(confirmModel.imageSources, pages.map { .local($0) })
+        XCTAssertEqual(confirmModel.totalText, "113.00")
+
+        let saved = await confirmModel.save()
+        XCTAssertTrue(saved)
+        XCTAssertEqual(outbox.enqueued.count, 1, "one receipt, not three")
+        XCTAssertEqual(outbox.enqueued[0].imageData, pages[0])
+        XCTAssertEqual(outbox.enqueued[0].additionalPages, [pages[1], pages[2]])
+        XCTAssertEqual(outbox.enqueued[0].document.contentType, .jpeg)
+        XCTAssertEqual(outbox.enqueued[0].document.ocrSource, .vision)
+    }
+
+    /// The same pages, answered the other way: the batch path, unchanged -
+    /// one pending receipt per page, none carrying extras.
+    func testSeparateReceiptsQueuesOnePendingReceiptPerPage() async {
+        let pages = [Data([1]), Data([2]), Data([3])]
+        let model = makeModel()
+        await model.savePages(pages)
+        await model.saveScannedPagesAsSeparateReceipts()
+
+        if case .saved(let count) = model.phase {
+            XCTAssertEqual(count, 3)
+        } else {
+            XCTFail("Expected saved, got \(model.phase)")
+        }
+        XCTAssertEqual(outbox.enqueuedPages, pages)
+        XCTAssertTrue(outbox.enqueued.allSatisfy { $0.additionalPages.isEmpty })
+    }
+
     // MARK: - Batch
 
     func testEachPageIsQueuedInScanOrder() async {
         let pages = [Data([1]), Data([2]), Data([3])]
         let model = makeModel()
         await model.savePages(pages)
+        await model.saveScannedPagesAsSeparateReceipts()
 
         if case .saved(let count) = model.phase {
             XCTAssertEqual(count, 3)
@@ -265,6 +340,7 @@ final class CaptureFlowModelTests: XCTestCase {
         outbox.failOnCallNumber = 2
         let model = makeModel()
         await model.savePages([Data([1]), Data([2]), Data([3])])
+        await model.saveScannedPagesAsSeparateReceipts()
 
         guard case .failed(let message) = model.phase else {
             return XCTFail("Expected failed, got \(model.phase)")
@@ -298,7 +374,8 @@ final class CaptureFlowModelTests: XCTestCase {
         }
         let model = makeModel()
 
-        async let firstPass: Void = model.savePages([Data([1]), Data([2])])
+        await model.savePages([Data([1]), Data([2])])
+        async let firstPass: Void = model.saveScannedPagesAsSeparateReceipts()
         // Let the first pass park on the gated enqueue, then re-enter.
         while await !gate.hasWaiters {
             await Task.yield()
@@ -331,7 +408,7 @@ final class CaptureFlowSecondOpinionTests: XCTestCase {
         func enqueue(imageData: Data) async throws {}
 
         func enqueue(
-            imageData: Data,
+            document: OutboxDocument,
             parsed: ParsedReceipt,
             confirmation: ConfirmedReceiptFields?,
             partial: PendingReceiptFields?

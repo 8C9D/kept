@@ -14,16 +14,22 @@ protocol OutboxEnqueuing: AnyObject {
     /// "saved" is the one unforgivable answer (wave-5 kickoff §1).
     func enqueue(imageData: Data) async throws
 
-    /// The single-capture variant: OCR already ran (its result rides in
-    /// `parsed`, so the drain never re-reads the image), and when the
-    /// person confirmed on the spot, `confirmation` carries their fields -
-    /// the create lands the receipt already `confirmed`. A nil
+    /// The already-read variant: text extraction already ran (its result
+    /// rides in `parsed`, so the drain never re-reads the document), and
+    /// when the person confirmed on the spot, `confirmation` carries their
+    /// fields - the create lands the receipt already `confirmed`. A nil
     /// confirmation is the "Later" exit: queued pending, like a batch
     /// page - and `partial` is then whatever they had typed before
     /// leaving, so that exit stops costing them their typing (2026-09-01).
     /// Nil for both is the ordinary Later: the parser's snapshot alone.
+    ///
+    /// `document` rather than a bare `Data` since 2026-09-01: the bytes
+    /// can now be an imported PDF instead of a photograph, and a receipt
+    /// can carry more than one page. What the bytes are, which reader read
+    /// them, and what else belongs to the same receipt travel together so
+    /// no call site can set one and forget another.
     func enqueue(
-        imageData: Data,
+        document: OutboxDocument,
         parsed: ParsedReceipt,
         confirmation: ConfirmedReceiptFields?,
         partial: PendingReceiptFields?
@@ -31,14 +37,29 @@ protocol OutboxEnqueuing: AnyObject {
 }
 
 extension OutboxEnqueuing {
-    /// The pre-2026-09-01 shape, kept so the call sites and tests that
-    /// have nothing half-typed to carry stay as short as they were.
+    /// The pre-2026-09-01 shapes, kept so the call sites and tests holding
+    /// one photographed page with nothing half-typed stay as short as they
+    /// were.
     func enqueue(
         imageData: Data,
         parsed: ParsedReceipt,
         confirmation: ConfirmedReceiptFields?
     ) async throws {
         try await enqueue(imageData: imageData, parsed: parsed, confirmation: confirmation, partial: nil)
+    }
+
+    func enqueue(
+        imageData: Data,
+        parsed: ParsedReceipt,
+        confirmation: ConfirmedReceiptFields?,
+        partial: PendingReceiptFields?
+    ) async throws {
+        try await enqueue(
+            document: .photo(imageData),
+            parsed: parsed,
+            confirmation: confirmation,
+            partial: partial
+        )
     }
 }
 
@@ -224,17 +245,22 @@ final class OutboxController: ObservableObject {
     // MARK: - Enqueue (the §7.4 save path)
 
     func enqueue(imageData: Data) async throws {
-        try await enqueueItem(imageData: imageData, progress: .captured, confirmation: nil, partial: nil)
+        try await enqueueItem(
+            document: .photo(imageData),
+            progress: .captured,
+            confirmation: nil,
+            partial: nil
+        )
     }
 
     func enqueue(
-        imageData: Data,
+        document: OutboxDocument,
         parsed: ParsedReceipt,
         confirmation: ConfirmedReceiptFields?,
         partial: PendingReceiptFields?
     ) async throws {
         try await enqueueItem(
-            imageData: imageData,
+            document: document,
             progress: .parsed(parsed),
             confirmation: confirmation,
             partial: partial
@@ -242,7 +268,7 @@ final class OutboxController: ObservableObject {
     }
 
     private func enqueueItem(
-        imageData: Data,
+        document: OutboxDocument,
         progress: OutboxItem.Progress,
         confirmation: ConfirmedReceiptFields?,
         partial: PendingReceiptFields?
@@ -263,13 +289,19 @@ final class OutboxController: ObservableObject {
             userId: userId,
             sequence: sequence,
             capturedAt: now(),
-            sha256: Self.sha256Hex(imageData),
+            sha256: Self.sha256Hex(document.data),
             progress: progress,
             ocrAttempts: 0,
             confirmation: confirmation,
-            partial: partial
+            partial: partial,
+            contentType: document.contentType,
+            ocrSource: document.ocrSource,
+            // nil rather than 0 for the ordinary one-page receipt: the key
+            // then stays absent from item.json, so a queue read by hand
+            // looks exactly as it did before multi-page receipts existed.
+            additionalPageCount: document.additionalPages.isEmpty ? nil : document.additionalPages.count
         )
-        try await store.add(item, imageData: imageData)
+        try await store.add(item, imageData: document.data, additionalPages: document.additionalPages)
         items.append(item)
         items.sort { $0.sequence < $1.sequence }
         rebuildEntries()
@@ -529,19 +561,25 @@ final class OutboxController: ObservableObject {
                 item = try await runOcr(on: item)
             case .parsed(let parsed):
                 let image = try await store.imageData(itemId: item.id)
-                let target = try await api.uploadTarget(contentType: .jpeg)
+                // The item's own type, not a hardcoded JPEG (2026-09-01):
+                // an imported PDF presigns and PUTs as application/pdf, and
+                // the presigned signature covers the content type, so
+                // declaring one and sending another is a silent 403.
+                let contentType = item.uploadContentType
+                let target = try await api.uploadTarget(contentType: contentType)
                 // The presigned key was issued for whoever the session
                 // names NOW. If that is no longer this item's owner, the
                 // key must not stick to the item: a later create under
                 // the owner's session would name a foreign object key
                 // and be refused permanently.
                 guard try currentUserId() == item.userId else { return }
-                try await api.uploadImage(to: target, data: image, contentType: .jpeg)
+                try await api.uploadImage(to: target, data: image, contentType: contentType)
                 item.progress = .uploaded(parsed, objectKey: target.objectKey)
                 try await persist(item)
             case .uploaded(let parsed, let objectKey):
+                let created: Receipt?
                 do {
-                    _ = try await api.createReceipt(
+                    created = try await api.createReceipt(
                         createRequest(for: item, parsed: parsed, objectKey: objectKey)
                     )
                 } catch let apiError as APIError where Self.isDuplicateImage(apiError) {
@@ -553,15 +591,95 @@ final class OutboxController: ObservableObject {
                     // classic cause is a create whose response was lost.
                     // Counting it saved is recovery, not masking - the
                     // wave-4 ruling, extended to the queue.
+                    created = nil
                 }
-                await finishItem(item.id)
-                return
+                guard item.extraPageCount > 0 else {
+                    await finishItem(item.id)
+                    return
+                }
+                guard let created else {
+                    // A multi-page receipt whose create came back 409:
+                    // page one is attached to a receipt that exists, but
+                    // the error carries no id (the server's
+                    // `duplicateImageError` is a message, not a record),
+                    // so this queue cannot attach the rest. Blocked and
+                    // stated with its remedy rather than silently dropping
+                    // pages a person scanned (kickoff §3) - the pages are
+                    // still on this phone, and "Add a page" on the receipt
+                    // itself is the way in.
+                    await blockItem(
+                        item.id,
+                        message: "Page 1 of this receipt is already saved, but its other \(item.extraPageCount == 1 ? "page" : "pages") could not be attached automatically. Open that receipt and use \"Add a page\", then discard this one."
+                    )
+                    return
+                }
+                item.progress = .created(parsed, receiptId: created.id, pagesAdded: 0)
+                try await persist(item)
+            case .created(let parsed, let receiptId, let pagesAdded):
+                guard let advanced = try await attachNextPage(
+                    of: item,
+                    parsed: parsed,
+                    receiptId: receiptId,
+                    pagesAdded: pagesAdded
+                ) else {
+                    return
+                }
+                item = advanced
+                if item.extraPageCount <= pagesAdded + 1 {
+                    // Every page is attached; only now does the local copy
+                    // go. A kill anywhere above resumes at the page that
+                    // had not landed yet, never re-creating the receipt.
+                    await finishItem(item.id)
+                    return
+                }
             }
             guard let current = items.first(where: { $0.id == item.id }) else {
                 return
             }
             item = current
         }
+    }
+
+    /// Attaches page `pagesAdded + 2` of a multi-page receipt (2026-09-01)
+    /// and persists the advance, so the next page - or a relaunch - starts
+    /// from the one after it.
+    ///
+    /// The request order is the create route's own: presign, PUT, THEN
+    /// tell the API where the bytes landed. A thrown PUT exits before
+    /// `addReceiptImage` is reached, by construction, so an image row can
+    /// never point at bytes that were never written (spec §8's sharp
+    /// edge). The ownership re-check between presign and PUT is the same
+    /// one the first page gets, for the same reason.
+    /// Nil when the signed-in user stopped being this item's owner
+    /// mid-step; the caller stops, exactly as the first page's upload does.
+    private func attachNextPage(
+        of item: OutboxItem,
+        parsed: ParsedReceipt,
+        receiptId: UUID,
+        pagesAdded: Int
+    ) async throws -> OutboxItem? {
+        var item = item
+        let page = try await store.additionalPageData(itemId: item.id, index: pagesAdded)
+        let contentType = item.uploadContentType
+        let target = try await api.uploadTarget(contentType: contentType)
+        guard try currentUserId() == item.userId else { return nil }
+        try await api.uploadImage(to: target, data: page, contentType: contentType)
+        do {
+            _ = try await api.addReceiptImage(
+                receiptId: receiptId,
+                objectKey: target.objectKey,
+                sha256: Self.sha256Hex(page)
+            )
+        } catch let apiError as APIError where Self.isDuplicateImage(apiError) {
+            // These exact bytes are already attached to one of this user's
+            // receipts - which, on this path, means this page landed and
+            // the answer was lost. Counting it done is the same recovery
+            // the create's own 409 gets; retrying it forever would be the
+            // masking.
+        }
+        item.progress = .created(parsed, receiptId: receiptId, pagesAdded: pagesAdded + 1)
+        try await persist(item)
+        return item
     }
 
     /// An OCR failure wrapped so the classifier can tell "this one image
@@ -647,10 +765,12 @@ final class OutboxController: ObservableObject {
                 notes: confirmed.notes,
                 status: .confirmed,
                 ocrRawText: parsed.ocrRawText,
-                // Every receipt this app creates was photographed
-                // (2026-09-01): the web client is the only source that can
-                // send anything else.
-                ocrSource: "vision",
+                // How the text was actually read (2026-09-01): a
+                // photograph Vision read, or - since the PDF import - an
+                // emailed PDF's own text layer. The server's merge treats
+                // the two differently for money fields, so guessing here
+                // would change which suggestions a person is offered.
+                ocrSource: item.uploadOcrSource.rawValue,
                 ocrSuggestions: OcrSuggestionsPayload(suggestions),
                 reviewedFields: confirmed.reviewedFields,
                 image: CreateReceiptRequest.Image(objectKey: objectKey, sha256: item.sha256)
@@ -694,7 +814,7 @@ final class OutboxController: ObservableObject {
             paymentMethod: typedOrParsed(.paymentMethod, partial?.paymentMethod, suggestions.paymentMethod),
             notes: typedOrParsed(.notes, partial?.notes, nil),
             ocrRawText: parsed.ocrRawText,
-            ocrSource: "vision",
+            ocrSource: item.uploadOcrSource.rawValue,
             ocrSuggestions: OcrSuggestionsPayload(suggestions),
             reviewedFields: partial?.reviewedFields,
             image: CreateReceiptRequest.Image(objectKey: objectKey, sha256: item.sha256)

@@ -101,9 +101,11 @@ final class APIClient: Sendable {
 
     /// DELETE with no body and no response body - `/api/receipts/:id`
     /// (spec §10B) needs neither, unlike `/api/me`'s optional Apple
-    /// reauthorization code.
-    func delete(_ path: String) async throws {
-        _ = try await send(method: "DELETE", path: path, query: [], body: nil, requiresSession: true)
+    /// reauthorization code. `query` carries what a bodiless DELETE has
+    /// nowhere else to put: `/api/receipts/options/:field?value=`
+    /// (2026-09-01) names the value it is forgetting there.
+    func delete(_ path: String, query: [URLQueryItem] = []) async throws {
+        _ = try await send(method: "DELETE", path: path, query: query, body: nil, requiresSession: true)
     }
 
     /// The one non-API request in the app: uploading image bytes to the

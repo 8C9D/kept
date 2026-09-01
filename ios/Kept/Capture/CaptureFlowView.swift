@@ -92,6 +92,13 @@ struct CaptureFlowView: View {
     @ViewBuilder
     private var pagesBody: some View {
         switch captureModel.phase {
+        case .choosingPageMode(let pageCount):
+            ScannedPagesChoiceView(pageCount: pageCount) {
+                Task { await captureModel.saveScannedPagesAsSeparateReceipts() }
+            } onOneReceipt: {
+                Task { await captureModel.saveScannedPagesAsOneReceipt() }
+            }
+
         case .idle, .reading:
             VStack(spacing: 12) {
                 ProgressView()
@@ -165,6 +172,68 @@ struct CaptureFlowView: View {
                 // and the paper is still in hand.
                 onFinished(true)
             }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// The question a multi-page scanning session has to answer before either
+/// path can start (2026-09-01, the owner's decision): N separate receipts -
+/// the backlog case this app was built for - or one receipt with N pages.
+///
+/// The scanner cannot tell them apart, and guessing either way is
+/// destructive: "separate" splits a folio into halves that each look like
+/// a receipt with a missing total, and "one" silently swallows a stack of
+/// eighty into a single row. So the one person who knows is asked, once.
+///
+/// Deliberately a SCREEN rather than a `confirmationDialog`: a dialog
+/// always offers Cancel, and there is no honest cancel here. The pages are
+/// scanned, unsaved, and the paper may already be back in a pocket - every
+/// way out of this has to end with them queued (wave-5 kickoff §1: a scan
+/// is never lost to a tap).
+///
+/// Its own type rather than a branch inside the flow above so it can be
+/// laid out and looked at without a camera; the simulator has neither one
+/// nor a way to present `VNDocumentCameraViewController` at all.
+struct ScannedPagesChoiceView: View {
+    let pageCount: Int
+    let onSeparateReceipts: () -> Void
+    let onOneReceipt: () -> Void
+
+    init(
+        pageCount: Int,
+        onSeparateReceipts: @escaping () -> Void,
+        onOneReceipt: @escaping () -> Void
+    ) {
+        self.pageCount = pageCount
+        self.onSeparateReceipts = onSeparateReceipts
+        self.onOneReceipt = onOneReceipt
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "doc.on.doc")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text("\(pageCount) pages scanned")
+                .font(.headline)
+            Text("A stack scanned back to back is several receipts. A folio or a bill that ran onto a second sheet is one.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button(action: onSeparateReceipts) {
+                Text("Save as \(pageCount) separate receipts")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("pages.separate")
+            Button(action: onOneReceipt) {
+                Text("One receipt with \(pageCount) pages")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("pages.oneReceipt")
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)

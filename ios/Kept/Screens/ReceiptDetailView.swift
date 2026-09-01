@@ -31,10 +31,20 @@ struct ReceiptDetailView: View {
     /// Non-nil while the confirm form is presented over this screen; the
     /// model is created at tap time from the already-loaded detail.
     @State private var confirmModel: ConfirmReceiptModel?
-    /// Non-nil while the zoom sheet is up, holding which image was tapped
-    /// - there can be more than one page in principle (spec §5's
-    /// multi-page seam), even though v1 capture stores one.
-    @State private var zoomedImageSource: ReceiptImageSource?
+    /// Non-nil while the zoom sheet is up, holding every page of this
+    /// receipt and which one was tapped (2026-09-01): the sheet can turn
+    /// pages, so it is handed the whole set rather than the single image
+    /// under the finger.
+    @State private var zoomedImages: ZoomedImages?
+
+    /// The zoom sheet's presentation value. `Identifiable` off the page
+    /// index so re-tapping the same page re-presents rather than being
+    /// deduplicated away.
+    private struct ZoomedImages: Identifiable {
+        let sources: [ReceiptImageSource]
+        let page: Int
+        var id: Int { page }
+    }
     @State private var confirmingDelete = false
     /// Non-nil while the "add a page" / "replace this page's image" scan
     /// flow (proposal #6, 2026-08-28) is up.
@@ -144,14 +154,9 @@ struct ReceiptDetailView: View {
                 )
             }
         }
-        .sheet(isPresented: Binding(
-            get: { zoomedImageSource != nil },
-            set: { if !$0 { zoomedImageSource = nil } }
-        )) {
-            if let zoomedImageSource {
-                ZoomableImageSheet(source: zoomedImageSource) {
-                    eventLogger.log(.imageZoomed, receiptId: receipt.id)
-                }
+        .sheet(item: $zoomedImages) { zoomed in
+            ZoomableImageSheet(sources: zoomed.sources, initialPage: zoomed.page) {
+                eventLogger.log(.imageZoomed, receiptId: receipt.id)
             }
         }
         .fullScreenCover(item: $pageUploadRequest) { request in
@@ -338,7 +343,7 @@ struct ReceiptDetailView: View {
             // proposal #6, 2026-08-28: a two-page receipt used to show
             // only its first page here, hiding half the evidence someone
             // is checking numbers against.
-            ForEach(images, id: \.page) { image in
+            ForEach(Array(images.enumerated()), id: \.element.page) { index, image in
                 VStack(alignment: .leading, spacing: 6) {
                     if images.count > 1 {
                         Text("Page \(image.page)")
@@ -351,10 +356,17 @@ struct ReceiptDetailView: View {
                     // included (2026-08-28: this screen never wired it up, and
                     // "see the paper" (§7.2) applies here as much as it does
                     // on the confirm form).
+                    // Renders a PDF as readily as a photograph since
+                    // 2026-09-01 - an imported receipt is stored as the
+                    // document that was emailed, and this screen is where
+                    // it gets looked at (ReceiptDocumentViews.swift).
                     ReceiptImageView(source: .remote(image.downloadUrl))
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            zoomedImageSource = .remote(image.downloadUrl)
+                            zoomedImages = ZoomedImages(
+                                sources: images.map { .remote($0.downloadUrl) },
+                                page: index
+                            )
                             eventLogger.log(.imageOpened, receiptId: receipt.id)
                         }
                         .accessibilityLabel("Receipt image, page \(image.page). Tap to zoom.")

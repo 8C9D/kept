@@ -11,10 +11,24 @@ enum ReceiptImageSource: Equatable {
 
 /// The confirm screen's inline receipt image: the person is checking
 /// numbers against paper, so the image loads eagerly and failures say so.
+///
+/// A source that is a PDF (2026-09-01, the import) goes to PDFKit instead -
+/// routed here rather than at the call sites so no screen can be given a
+/// document it does not know how to draw. Every photograph path below is
+/// byte for byte what it was.
 struct ReceiptImageView: View {
     let source: ReceiptImageSource
 
     var body: some View {
+        if source.isPDF {
+            PDFReceiptView(source: source)
+        } else {
+            imageBody
+        }
+    }
+
+    @ViewBuilder
+    private var imageBody: some View {
         switch source {
         case .remote(let url):
             AsyncImage(url: url) { phase in
@@ -91,7 +105,11 @@ struct ReceiptImageLoadFailureLabel: View {
 /// modifiers - and centring, bounce, pan clamping and double-tap-to-zoom
 /// come from the platform rather than being reimplemented by hand.
 struct ZoomableImageSheet: View {
-    let source: ReceiptImageSource
+    /// Every page of the receipt, in page order. More than one since
+    /// 2026-09-01 ("one receipt with N pages"): checking a folio's HST
+    /// against the paper means being able to reach page 2 without closing
+    /// the sheet and reopening it somewhere else.
+    let sources: [ReceiptImageSource]
     /// `image_zoomed` (behavioural telemetry, 2026-08-28) - called at most
     /// once per sheet presentation, the first time the person actually
     /// zooms in past the fit scale (Coordinator.scrollViewDidZoom below).
@@ -100,9 +118,28 @@ struct ZoomableImageSheet: View {
     /// nothing.
     var onZoomed: (() -> Void)? = nil
 
+    /// The single-page shape every pre-2026-09-01 call site uses,
+    /// unchanged for them.
+    init(source: ReceiptImageSource, initialPage: Int = 0, onZoomed: (() -> Void)? = nil) {
+        self.init(sources: [source], initialPage: initialPage, onZoomed: onZoomed)
+    }
+
+    init(sources: [ReceiptImageSource], initialPage: Int = 0, onZoomed: (() -> Void)? = nil) {
+        self.sources = sources
+        self.onZoomed = onZoomed
+        _page = State(initialValue: min(max(initialPage, 0), max(sources.count - 1, 0)))
+    }
+
     @Environment(\.dismiss) private var dismiss
+    @State private var page: Int
     @State private var loadedImage: UIImage?
     @State private var loadFailed = false
+
+    /// The page being shown, or nil for the impossible empty sheet (no
+    /// caller presents one; stated rather than force-unwrapped).
+    private var source: ReceiptImageSource? {
+        sources.indices.contains(page) ? sources[page] : nil
+    }
 
     var body: some View {
         NavigationStack {
@@ -115,19 +152,74 @@ struct ZoomableImageSheet: View {
                         Button("Done") { dismiss() }
                     }
                 }
-                // Keyed on the source so a sheet reused for a different
-                // image (not how this is presented today, but the sheet
-                // should not depend on that) reloads rather than showing
-                // the previous image's bytes.
+                // A plain overlay, deliberately - not a `.bottomBar`
+                // toolbar group, which squeezed "Page 1 of 2" down to
+                // "Pag…", and not a `safeAreaInset`, which reserves space
+                // in content that is meant to run edge to edge while
+                // zoomed (`ignoresSafeArea` below). An overlay sits over
+                // the image and takes nothing from it.
+                .overlay(alignment: .bottom) {
+                    pageControl
+                }
+                // Keyed on the page's source so turning a page - or
+                // reusing the sheet for a different receipt - reloads
+                // rather than showing the previous image's bytes.
                 .task(id: source) {
                     await load()
                 }
         }
     }
 
+    /// Buttons, not a swipe (2026-09-01. The zoomed content is a
+    /// `UIScrollView` whose pan gesture owns horizontal drags the moment
+    /// someone is zoomed in, so a paging swipe over it would work at the
+    /// fit scale and quietly stop working as soon as the sheet was used
+    /// for what it is for.) Absent entirely for a one-page receipt, which
+    /// is every receipt this app made before today.
+    @ViewBuilder
+    private var pageControl: some View {
+        if sources.count > 1 {
+            HStack(spacing: 20) {
+                Button {
+                    page -= 1
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .disabled(page == 0)
+                .accessibilityLabel("Previous page")
+                Text("Page \(page + 1) of \(sources.count)")
+                    .font(.footnote)
+                    .monospacedDigit()
+                    .fixedSize()
+                    .accessibilityIdentifier("zoom.pageIndicator")
+                Button {
+                    page += 1
+                } label: {
+                    Image(systemName: "chevron.right")
+                }
+                .disabled(page == sources.count - 1)
+                .accessibilityLabel("Next page")
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            // A solid capsule rather than `.regularMaterial`: this floats
+            // over a photograph of a receipt, which is very close to
+            // white, and a material over near-white is a control with no
+            // edge.
+            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+            .padding(.bottom, 24)
+        }
+    }
+
     @ViewBuilder
     private var content: some View {
-        if let loadedImage {
+        if let source, source.isPDF {
+            // PDFKit brings its own pinch zoom and scrolling, so the
+            // hand-built UIScrollView below is neither needed nor
+            // applicable - a PDF has no UIImage to hand it.
+            PDFReceiptView(source: source, displaysAsSinglePage: true)
+                .ignoresSafeArea(edges: [.horizontal, .bottom])
+        } else if let loadedImage {
             ZoomableImageView(image: loadedImage, onZoomed: onZoomed)
                 // The scroll view owns safe-area handling itself (its
                 // content is meant to run edge to edge while zoomed); the
@@ -147,6 +239,11 @@ struct ZoomableImageSheet: View {
     private func load() async {
         loadedImage = nil
         loadFailed = false
+        guard let source, !source.isPDF else {
+            // A PDF page draws itself (above); there is no image to decode
+            // and no failure state to reach from here.
+            return
+        }
         switch source {
         case .local(let data):
             loadedImage = UIImage(data: data)

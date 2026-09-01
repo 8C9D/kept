@@ -792,6 +792,73 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(profile.fiscalYearEndDay, 30)
     }
 
+    // MARK: - Managing the reusable values (2026-09-01)
+
+    func testRenamingAnOptionPATCHesTheFieldPathWithBothValues() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: #"{"receiptsUpdated":12}"#)
+
+        let updated = try await client.renameReceiptOption(
+            field: .paymentMethod,
+            from: "Visa ",
+            to: "Visa"
+        )
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.httpMethod, "PATCH")
+        // The `:field` segment is the server's own API name, not the
+        // stored column ("paymentMethod", never "payment_method").
+        XCTAssertEqual(request.url?.path, "/api/receipts/options/paymentMethod")
+        // Decoded rather than string-compared: JSONEncoder does not
+        // promise key order, and a test that depended on it would fail on
+        // a run that happened to emit `to` first (it did).
+        let body = try XCTUnwrap(request.httpBody)
+        let fields = try JSONDecoder().decode([String: String].self, from: body)
+        XCTAssertEqual(fields, ["from": "Visa ", "to": "Visa"])
+        XCTAssertEqual(updated, 12)
+    }
+
+    func testDeletingAnOptionSendsTheValueAsAnEncodedQueryParameter() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 204, jsonBody: "")
+
+        try await client.deleteReceiptOption(field: .vendor, value: "Bob & Sons #2")
+
+        let request = try XCTUnwrap(transport.requests.first)
+        XCTAssertEqual(request.httpMethod, "DELETE")
+        XCTAssertEqual(request.url?.path, "/api/receipts/options/vendor")
+        // Percent-encoded by URLQueryItem, so a vendor with an ampersand
+        // or a hash in it reaches the server as the stored string
+        // verbatim - which is what the route matches on.
+        let components = try XCTUnwrap(
+            URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+        )
+        XCTAssertEqual(
+            components.queryItems,
+            [URLQueryItem(name: "value", value: "Bob & Sons #2")]
+        )
+        XCTAssertNil(request.httpBody, "a DELETE in this API carries no body")
+    }
+
+    /// 404 when `from` is not one of the caller's own values - surfaced as
+    /// the server's own message, which is what the screen shows.
+    func testARenameOfAValueTheUserDoesNotHaveSurfacesTheServersMessage() async throws {
+        let client = try makeClient()
+        transport.enqueue(
+            status: 404,
+            jsonBody: #"{"error":{"code":"not_found","message":"Receipt not found"}}"#
+        )
+
+        do {
+            _ = try await client.renameReceiptOption(field: .category, from: "nope", to: "x")
+            XCTFail("Expected a thrown APIError")
+        } catch APIError.requestFailed(let code, let message, let status) {
+            XCTAssertEqual(code, "not_found")
+            XCTAssertEqual(message, "Receipt not found")
+            XCTAssertEqual(status, 404)
+        }
+    }
+
     // MARK: - Account deletion
 
     func testDeleteAccountSendsTheCodeAndAcceptsAnEmpty204() async throws {

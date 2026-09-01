@@ -309,8 +309,21 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     let purpose: Purpose
     /// A presigned URL (short-lived; displayed promptly, never persisted)
     /// for stored receipts, or the scanned bytes still in hand for a
-    /// capture-time confirm.
+    /// capture-time confirm. Page one, when there is more than one.
     let imageSource: ReceiptImageSource?
+    /// Pages two and up (2026-09-01): the rest of a stored receipt's
+    /// images, or the rest of a scan the person said was ONE receipt.
+    /// Empty for every single-page receipt, which is what the screen still
+    /// looks like when it is.
+    let extraImageSources: [ReceiptImageSource]
+
+    /// Every page in order - what the image section pages through and what
+    /// the zoom sheet is handed. One derivation so the inline view and the
+    /// sheet can never disagree about how many pages there are.
+    var imageSources: [ReceiptImageSource] {
+        guard let imageSource else { return [] }
+        return [imageSource] + extraImageSources
+    }
     /// Stated when on-device OCR failed outright at capture, so an empty
     /// form reads as "recognition failed", not "the receipt is blank".
     let ocrFailureNote: String?
@@ -529,6 +542,11 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             currency: receipt.currency,
             purpose: purpose,
             imageSource: detail.images.first.map { .remote($0.downloadUrl) },
+            // Every further page the server serves (proposal #6's
+            // multi-page receipts), so a folio's second sheet is reachable
+            // from the form someone is checking numbers on - not only from
+            // the detail screen's list (2026-09-01).
+            extraImageSources: detail.images.dropFirst().map { .remote($0.downloadUrl) },
             ocrFailureNote: nil,
             // An edit prefills from the row alone: the merge is still
             // served on confirmed receipts (the accuracy set needs it) and
@@ -604,6 +622,10 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             currency: "CAD",
             purpose: .confirm,
             imageSource: .local(draft.imageData),
+            // "One receipt with N pages" (2026-09-01): the pages ride
+            // through the confirm screen as images to flick through. Only
+            // page 1 was read - see CapturedReceiptDraft.
+            extraImageSources: draft.additionalPages.map { .local($0) },
             ocrFailureNote: draft.ocrFailureNote,
             suggestions: ConfirmSuggestionSet(parse: draft.suggestions),
             // Nothing has been reviewed yet and there is no row to have
@@ -670,6 +692,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         currency: String,
         purpose: Purpose,
         imageSource: ReceiptImageSource?,
+        extraImageSources: [ReceiptImageSource] = [],
         ocrFailureNote: String?,
         suggestions: ConfirmSuggestionSet?,
         reviewedFields: Set<ReviewedField>,
@@ -683,6 +706,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         self.currency = currency
         self.purpose = purpose
         self.imageSource = imageSource
+        self.extraImageSources = extraImageSources
         self.ocrFailureNote = ocrFailureNote
         self.saveAction = saveAction
         self.duplicateCheckAction = duplicateCheckAction

@@ -23,6 +23,20 @@ struct OutboxItem: Codable, Equatable, Identifiable, Sendable {
         /// The image bytes are in object storage under `objectKey`; only
         /// the receipt create remains.
         case uploaded(ParsedReceipt, objectKey: String)
+        /// The receipt EXISTS server-side under `receiptId` and `pagesAdded`
+        /// of its additional pages have been attached (2026-09-01, the
+        /// "one receipt with N pages" capture). Only a multi-page item ever
+        /// reaches this state; a one-page item goes straight from
+        /// `.uploaded` to removed, exactly as it always has.
+        ///
+        /// ⚠ This case is what makes a kill between two pages resumable
+        /// rather than destructive. Without it the retry would re-run the
+        /// CREATE - a second receipt for the same paper, or a 409 that
+        /// stranded the pages nobody had attached yet. `pagesAdded` is a
+        /// count, not a set: the pages go up in order and the count is
+        /// persisted after each one, so it is also the index of the next
+        /// page to send.
+        case created(ParsedReceipt, receiptId: UUID, pagesAdded: Int)
     }
 
     let id: UUID
@@ -72,6 +86,126 @@ struct OutboxItem: Codable, Equatable, Identifiable, Sendable {
     /// human: manual retry or discard - never an automatic loop, never a
     /// silent disappearance (wave-5 kickoff §3).
     var blockedMessage: String?
+    /// What the stored document actually IS (2026-09-01, PDF import). The
+    /// presigned signature covers the content type, so the drain must
+    /// declare the same one it PUTs - `application/pdf` for an imported
+    /// PDF, `image/jpeg` for everything the camera produces.
+    ///
+    /// Optional, and never written by any earlier build: an item queued
+    /// before this field existed carries no such key, and the synthesized
+    /// decoder reads a missing key on an Optional property as nil - which
+    /// `uploadContentType` below resolves to JPEG, the only thing those
+    /// items can be.
+    let contentType: ImageUploadContentType?
+    /// Which reader produced `ocrRawText` (2026-09-01) - a PDF's text
+    /// layer reads `pdf-text`, everything else `vision`. Optional for the
+    /// same forward-compatibility reason as `contentType`, and nil means
+    /// `vision`: before this field existed the camera was the only source
+    /// this app had.
+    let ocrSource: OcrSource?
+    /// How many pages beyond the first this receipt carries (2026-09-01,
+    /// "one receipt with N pages"). Their bytes live beside the document's
+    /// in the store; the drain attaches them one at a time after the
+    /// create, persisting after each. Optional and nil-means-zero, so an
+    /// item queued by an earlier build still drains as the single-page
+    /// receipt it is.
+    let additionalPageCount: Int?
+
+    /// Spelled out rather than synthesized so the three 2026-09-01 fields
+    /// can default: every existing construction site describes a
+    /// single-page JPEG that Vision read, which is exactly these defaults,
+    /// and a memberwise init would have made each of them restate it.
+    init(
+        id: UUID,
+        userId: UUID,
+        sequence: Int,
+        capturedAt: Date,
+        sha256: String,
+        progress: Progress,
+        ocrAttempts: Int,
+        confirmation: ConfirmedReceiptFields?,
+        partial: PendingReceiptFields?,
+        blockedMessage: String? = nil,
+        contentType: ImageUploadContentType? = nil,
+        ocrSource: OcrSource? = nil,
+        additionalPageCount: Int? = nil
+    ) {
+        self.id = id
+        self.userId = userId
+        self.sequence = sequence
+        self.capturedAt = capturedAt
+        self.sha256 = sha256
+        self.progress = progress
+        self.ocrAttempts = ocrAttempts
+        self.confirmation = confirmation
+        self.partial = partial
+        self.blockedMessage = blockedMessage
+        self.contentType = contentType
+        self.ocrSource = ocrSource
+        self.additionalPageCount = additionalPageCount
+    }
+
+    /// The content type the presign and the PUT must both name. One
+    /// derivation so the two calls cannot disagree - the 403 that
+    /// disagreement produces is silent about its cause.
+    var uploadContentType: ImageUploadContentType {
+        contentType ?? .jpeg
+    }
+
+    /// `ocr_source` as the create body carries it, defaulted for items
+    /// queued before the field existed.
+    var uploadOcrSource: OcrSource {
+        ocrSource ?? .vision
+    }
+
+    var extraPageCount: Int {
+        additionalPageCount ?? 0
+    }
+}
+
+/// The bytes an outbox item is FOR, plus the two facts about them that
+/// only their source knows: what they are, and which reader read them
+/// (2026-09-01).
+///
+/// It exists because "a captured receipt" stopped being one JPEG that
+/// Vision had read. It can now be an emailed PDF whose own text layer was
+/// the reader (the owner's decision: extract the text layer and let the
+/// server's LLM parse it, the same path the web client takes), or a
+/// several-page scan that is ONE receipt rather than several. Bundling
+/// them keeps the enqueue signature from growing a parameter per
+/// permutation, and keeps a call site from setting a PDF's content type
+/// while forgetting its source.
+struct OutboxDocument: Equatable, Sendable {
+    /// Page one - the bytes the create's own image row points at.
+    let data: Data
+    let contentType: ImageUploadContentType
+    let ocrSource: OcrSource
+    /// Pages two and up, in order. Attached after the create, one at a
+    /// time; empty for every single-page capture and every PDF import.
+    let additionalPages: [Data]
+
+    init(
+        data: Data,
+        contentType: ImageUploadContentType,
+        ocrSource: OcrSource,
+        additionalPages: [Data] = []
+    ) {
+        self.data = data
+        self.contentType = contentType
+        self.ocrSource = ocrSource
+        self.additionalPages = additionalPages
+    }
+
+    /// A scanned page (or several pages of one receipt) - the camera path,
+    /// which is everything this app captured before the PDF import existed.
+    static func photo(_ data: Data, additionalPages: [Data] = []) -> OutboxDocument {
+        OutboxDocument(
+            data: data,
+            contentType: .jpeg,
+            ocrSource: .vision,
+            additionalPages: additionalPages
+        )
+    }
 }
 
 /// What OCR and the §7.3 heuristics produced for a queued receipt, made

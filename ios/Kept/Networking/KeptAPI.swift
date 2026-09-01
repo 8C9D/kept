@@ -27,6 +27,29 @@ protocol KeptAPI: Sendable {
     /// §5/§10B) - the old bytes stay retained, never erased.
     func replaceReceiptImage(receiptId: UUID, page: Int, objectKey: String, sha256: String) async throws -> ReceiptImage
     func receiptOptions() async throws -> ReceiptOptions
+    /// PATCH /api/receipts/options/:field (2026-09-01) - rename one
+    /// remembered value everywhere it appears: the offered list AND every
+    /// receipt of this person's carrying exactly `from`, soft-deleted ones
+    /// included (the server route's own doc comment argues why). Returns
+    /// `receiptsUpdated`, which the manage-values screen reports back -
+    /// "12 receipts updated" and "0" are different events and the person
+    /// just caused one of them.
+    ///
+    /// Exact match, never normalized, the same 2026-08-26 free-text ruling
+    /// the filters follow. Renaming onto a value that already exists MERGES
+    /// the two, which is the commonest reason to rename at all; 404 when
+    /// `from` is not one of the caller's own values.
+    func renameReceiptOption(field: ReceiptOptionField, from: String, to: String) async throws -> Int
+    /// DELETE /api/receipts/options/:field?value= (2026-09-01) - stop
+    /// offering one value.
+    ///
+    /// ⚠ Receipts KEEP their text. This is not a bulk clear and must never
+    /// be described as one: these are tax records under a six-year
+    /// retention rule (§10B), and "stop suggesting this" is a statement
+    /// about a pick-list, not about history. It is not permanent either -
+    /// saving a receipt with the same value again re-adds it, which is
+    /// correct: a person who types it again has typed it again.
+    func deleteReceiptOption(field: ReceiptOptionField, value: String) async throws
     /// GET /api/receipts/summary (proposal #3, 2026-08-28) - confirmed-only
     /// totals plus a separate pending count, for the same filter the list
     /// is currently showing. No cursor, no limit: an aggregate has no
@@ -183,6 +206,35 @@ extension APIClient: KeptAPI {
     /// a receipt id and never collides with one.
     func receiptOptions() async throws -> ReceiptOptions {
         try await get("/api/receipts/options")
+    }
+
+    /// Both option-management routes are literal paths registered above
+    /// `/:id`, the same shadowing reason `/options` itself is - neither is
+    /// ever mistaken for a receipt id.
+    func renameReceiptOption(field: ReceiptOptionField, from: String, to: String) async throws -> Int {
+        struct Body: Encodable {
+            let from: String
+            let to: String
+        }
+        struct Response: Decodable {
+            let receiptsUpdated: Int
+        }
+        let response: Response = try await patch(
+            "/api/receipts/options/\(field.rawValue)",
+            body: Body(from: from, to: to)
+        )
+        return response.receiptsUpdated
+    }
+
+    /// The value rides in the query string because a DELETE in this API
+    /// carries no body; `URLQueryItem` does the percent-encoding, so a
+    /// vendor with an ampersand or a space in it reaches the server as the
+    /// stored string verbatim (which is what the route matches on).
+    func deleteReceiptOption(field: ReceiptOptionField, value: String) async throws {
+        try await delete(
+            "/api/receipts/options/\(field.rawValue)",
+            query: [URLQueryItem(name: "value", value: value)]
+        )
     }
 
     /// The filter-only query (no sort/order/cursor/limit): the server's

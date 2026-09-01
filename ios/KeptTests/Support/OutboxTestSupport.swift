@@ -10,6 +10,9 @@ import Foundation
 final class InMemoryOutboxStore: OutboxStore {
     private(set) var items: [UUID: OutboxItem] = [:]
     private(set) var images: [UUID: Data] = [:]
+    /// Pages two and up, per item, in the order `add` was given them
+    /// (2026-09-01, "one receipt with N pages").
+    private(set) var additionalPages: [UUID: [Data]] = [:]
     /// Every update() in order, so tests can assert what was persisted
     /// when - the step machine's durability is the §3 "killed mid-upload"
     /// guarantee.
@@ -28,9 +31,10 @@ final class InMemoryOutboxStore: OutboxStore {
 
     /// Puts an item on "disk" as if a previous run enqueued it - the
     /// seeding path for relaunch-and-resume tests.
-    func seed(_ item: OutboxItem, imageData: Data) {
+    func seed(_ item: OutboxItem, imageData: Data, additionalPages: [Data] = []) {
         items[item.id] = item
         images[item.id] = imageData
+        self.additionalPages[item.id] = additionalPages
     }
 
     /// Simulates image bytes lost from disk while the item record remains.
@@ -48,12 +52,13 @@ final class InMemoryOutboxStore: OutboxStore {
         )
     }
 
-    func add(_ item: OutboxItem, imageData: Data) async throws {
+    func add(_ item: OutboxItem, imageData: Data, additionalPages: [Data]) async throws {
         if let addError {
             throw addError
         }
         items[item.id] = item
         images[item.id] = imageData
+        self.additionalPages[item.id] = additionalPages
     }
 
     /// Thrown when updating an item that is not stored - the production
@@ -83,12 +88,23 @@ final class InMemoryOutboxStore: OutboxStore {
         return data
     }
 
+    func additionalPageData(itemId: UUID, index: Int) async throws -> Data {
+        if let imageDataError {
+            throw imageDataError
+        }
+        guard let pages = additionalPages[itemId], pages.indices.contains(index) else {
+            throw OutboxMissingImageError(itemId: itemId)
+        }
+        return pages[index]
+    }
+
     func remove(itemId: UUID) async throws {
         if let removeError {
             throw removeError
         }
         items[itemId] = nil
         images[itemId] = nil
+        additionalPages[itemId] = nil
     }
 }
 

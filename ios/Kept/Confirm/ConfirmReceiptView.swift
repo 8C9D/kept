@@ -48,6 +48,10 @@ struct ConfirmReceiptView: View {
 
     @FocusState private var focusedField: ConfirmReceiptModel.EditableField?
     @State private var showZoomedImage = false
+    /// Which page of a multi-page receipt the image section is showing
+    /// (2026-09-01) - and the page the zoom sheet opens on, so tapping a
+    /// page zooms THAT page rather than page one.
+    @State private var shownImagePage = 0
     /// Non-nil while a proposal #8 match is open for comparison.
     @State private var openedDuplicateMatch: Receipt?
     @State private var confirmingDelete = false
@@ -234,8 +238,10 @@ struct ConfirmReceiptView: View {
             }
         }
         .sheet(isPresented: $showZoomedImage) {
-            if let imageSource = model.imageSource {
-                ZoomableImageSheet(source: imageSource) {
+            if !model.imageSources.isEmpty {
+                // Opened on the page the person was looking at, and able
+                // to reach the others from there (2026-09-01).
+                ZoomableImageSheet(sources: model.imageSources, initialPage: shownImagePage) {
                     eventLogger.log(.imageZoomed, receiptId: model.receiptId)
                 }
             }
@@ -415,15 +421,42 @@ struct ConfirmReceiptView: View {
     @ViewBuilder
     private var imageSection: some View {
         Section {
-            if let imageSource = model.imageSource {
-                ReceiptImageView(source: imageSource)
-                    .frame(maxWidth: .infinity, minHeight: 160, maxHeight: 260)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        showZoomedImage = true
-                        eventLogger.log(.imageOpened, receiptId: model.receiptId)
+            if !model.imageSources.isEmpty {
+                // One page or several, the same control: a TabView in page
+                // style, which is a plain image when there is one page and
+                // a flick-through when there are more (2026-09-01, "one
+                // receipt with N pages"). The page dots are hidden and a
+                // counted label carries the job instead - three grey dots
+                // on a photograph of a receipt are easy to miss, and
+                // "Page 1 of 3" is not.
+                VStack(spacing: 4) {
+                    TabView(selection: $shownImagePage) {
+                        ForEach(Array(model.imageSources.enumerated()), id: \.offset) { index, source in
+                            ReceiptImageView(source: source)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    showZoomedImage = true
+                                    eventLogger.log(.imageOpened, receiptId: model.receiptId)
+                                }
+                                .accessibilityLabel(
+                                    model.imageSources.count > 1
+                                        ? "Receipt image, page \(index + 1) of \(model.imageSources.count). Tap to zoom."
+                                        : "Receipt image. Tap to zoom."
+                                )
+                                .tag(index)
+                        }
                     }
-                    .accessibilityLabel("Receipt image. Tap to zoom.")
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .frame(maxWidth: .infinity, minHeight: 160, maxHeight: 260)
+                    if model.imageSources.count > 1 {
+                        Text("Page \(shownImagePage + 1) of \(model.imageSources.count)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .frame(maxWidth: .infinity)
+                            .accessibilityIdentifier("image.pageIndicator")
+                    }
+                }
             } else {
                 Text("No image stored for this receipt.")
                     .font(.footnote)

@@ -19,6 +19,12 @@ final class StubKeptAPI: KeptAPI {
     var addReceiptImageHandler: ((_ receiptId: UUID, _ objectKey: String, _ sha256: String) async throws -> ReceiptImage)?
     var replaceReceiptImageHandler: ((_ receiptId: UUID, _ page: Int, _ objectKey: String, _ sha256: String) async throws -> ReceiptImage)?
     var receiptOptionsHandler: (() async throws -> ReceiptOptions)?
+    /// PATCH/DELETE /api/receipts/options/:field (2026-09-01). Both default
+    /// to succeeding plainly - "the rename went through, nothing carried
+    /// it" is the least interesting outcome, and a test about anything
+    /// else should not have to say so.
+    var renameReceiptOptionHandler: ((_ field: ReceiptOptionField, _ from: String, _ to: String) async throws -> Int)? = { _, _, _ in 0 }
+    var deleteReceiptOptionHandler: ((_ field: ReceiptOptionField, _ value: String) async throws -> Void)? = { _, _ in }
     var receiptsSummaryHandler: ((_ query: ReceiptQuery) async throws -> ReceiptSummary)?
     var possibleDuplicatesHandler: (
         (_ purchasedAt: String, _ totalCents: Int, _ vendor: String?, _ excludeId: UUID?) async throws -> [Receipt]
@@ -64,7 +70,15 @@ final class StubKeptAPI: KeptAPI {
     private var recordedFetchProfileCalls = 0
     private var recordedDeleteReceiptCalls: [UUID] = []
     private var recordedDeleteAccountCalls: [String?] = []
+    /// The content type each presign was asked for, and each PUT
+    /// declared, in order (2026-09-01): the presigned signature covers the
+    /// content type, so a presign and a PUT that disagree is a silent 403
+    /// - which makes "these two are the same" a thing worth asserting.
+    private var recordedUploadTargetCalls: [ImageUploadContentType] = []
+    private var recordedUploadImageCalls: [(objectKey: String, data: Data, contentType: ImageUploadContentType)] = []
     private var recordedReceiptOptionsCalls = 0
+    private var recordedRenameReceiptOptionCalls: [(field: ReceiptOptionField, from: String, to: String)] = []
+    private var recordedDeleteReceiptOptionCalls: [(field: ReceiptOptionField, value: String)] = []
     private var recordedReceiptsSummaryCalls: [ReceiptQuery] = []
     private var recordedPossibleDuplicatesCalls: [
         (purchasedAt: String, totalCents: Int, vendor: String?, excludeId: UUID?)
@@ -77,8 +91,24 @@ final class StubKeptAPI: KeptAPI {
         callLock.withLock { recordedReceiptsPageCalls }
     }
 
+    var uploadTargetCalls: [ImageUploadContentType] {
+        callLock.withLock { recordedUploadTargetCalls }
+    }
+
+    var uploadImageCalls: [(objectKey: String, data: Data, contentType: ImageUploadContentType)] {
+        callLock.withLock { recordedUploadImageCalls }
+    }
+
     var receiptOptionsCalls: Int {
         callLock.withLock { recordedReceiptOptionsCalls }
+    }
+
+    var renameReceiptOptionCalls: [(field: ReceiptOptionField, from: String, to: String)] {
+        callLock.withLock { recordedRenameReceiptOptionCalls }
+    }
+
+    var deleteReceiptOptionCalls: [(field: ReceiptOptionField, value: String)] {
+        callLock.withLock { recordedDeleteReceiptOptionCalls }
     }
 
     var receiptsSummaryCalls: [ReceiptQuery] {
@@ -187,6 +217,18 @@ final class StubKeptAPI: KeptAPI {
         return try await receiptOptionsHandler()
     }
 
+    func renameReceiptOption(field: ReceiptOptionField, from: String, to: String) async throws -> Int {
+        callLock.withLock { recordedRenameReceiptOptionCalls.append((field, from, to)) }
+        guard let renameReceiptOptionHandler else { throw UnstubbedCall(endpoint: "renameReceiptOption") }
+        return try await renameReceiptOptionHandler(field, from, to)
+    }
+
+    func deleteReceiptOption(field: ReceiptOptionField, value: String) async throws {
+        callLock.withLock { recordedDeleteReceiptOptionCalls.append((field, value)) }
+        guard let deleteReceiptOptionHandler else { throw UnstubbedCall(endpoint: "deleteReceiptOption") }
+        try await deleteReceiptOptionHandler(field, value)
+    }
+
     func receiptsSummary(query: ReceiptQuery) async throws -> ReceiptSummary {
         callLock.withLock { recordedReceiptsSummaryCalls.append(query) }
         guard let receiptsSummaryHandler else { throw UnstubbedCall(endpoint: "receiptsSummary") }
@@ -209,11 +251,13 @@ final class StubKeptAPI: KeptAPI {
     }
 
     func uploadTarget(contentType: ImageUploadContentType) async throws -> UploadTarget {
+        callLock.withLock { recordedUploadTargetCalls.append(contentType) }
         guard let uploadTargetHandler else { throw UnstubbedCall(endpoint: "uploadTarget") }
         return try await uploadTargetHandler(contentType)
     }
 
     func uploadImage(to target: UploadTarget, data: Data, contentType: ImageUploadContentType) async throws {
+        callLock.withLock { recordedUploadImageCalls.append((target.objectKey, data, contentType)) }
         guard let uploadImageHandler else { throw UnstubbedCall(endpoint: "uploadImage") }
         try await uploadImageHandler(target, data, contentType)
     }

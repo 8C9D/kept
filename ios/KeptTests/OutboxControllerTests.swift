@@ -85,7 +85,10 @@ final class OutboxControllerTests: XCTestCase {
         ocrAttempts: Int = 0,
         confirmation: ConfirmedReceiptFields? = nil,
         partial: PendingReceiptFields? = nil,
-        blockedMessage: String? = nil
+        blockedMessage: String? = nil,
+        contentType: ImageUploadContentType? = nil,
+        ocrSource: OcrSource? = nil,
+        additionalPageCount: Int? = nil
     ) -> OutboxItem {
         OutboxItem(
             id: UUID(),
@@ -97,7 +100,10 @@ final class OutboxControllerTests: XCTestCase {
             ocrAttempts: ocrAttempts,
             confirmation: confirmation,
             partial: partial,
-            blockedMessage: blockedMessage
+            blockedMessage: blockedMessage,
+            contentType: contentType,
+            ocrSource: ocrSource,
+            additionalPageCount: additionalPageCount
         )
     }
 
@@ -400,14 +406,7 @@ final class OutboxControllerTests: XCTestCase {
 
         // The step machine wrote parsed, then uploaded - so a kill at any
         // point resumes rather than repeats.
-        let progressions = store.updates.map { update -> String in
-            switch update.progress {
-            case .captured: return "captured"
-            case .parsed: return "parsed"
-            case .uploaded: return "uploaded"
-            }
-        }
-        XCTAssertEqual(progressions, ["parsed", "uploaded"])
+        XCTAssertEqual(store.updates.map(\.progress.stepName), ["parsed", "uploaded"])
     }
 
     // MARK: - §3: token expired while items are queued
@@ -784,6 +783,233 @@ final class OutboxControllerTests: XCTestCase {
         store.loadAllResult = OutboxLoadResult(items: [], unreadableCount: 2)
         let controller = await makeController()
         XCTAssertEqual(controller.unreadableCount, 2)
+    }
+
+    // MARK: - An imported PDF (2026-09-01)
+
+    /// The presigned signature covers the content type, so a presign that
+    /// says JPEG and a PUT that sends a PDF is a 403 with nothing in it to
+    /// explain itself. Both calls read the item's own type, and this is
+    /// where that is pinned.
+    func testAnImportedPDFPresignsAndUploadsAsApplicationPDF() async throws {
+        let pdf = Data("%PDF-1.4 pretend document".utf8)
+        let controller = await makeController()
+
+        try await controller.enqueue(
+            document: OutboxDocument(data: pdf, contentType: .pdf, ocrSource: .pdfText),
+            parsed: ParsedReceipt(suggestions: ReceiptSuggestions(), ocrRawText: "TOTAL 113.00"),
+            confirmation: nil,
+            partial: nil
+        )
+        await settle(controller)
+
+        XCTAssertEqual(api.uploadTargetCalls, [.pdf])
+        XCTAssertEqual(api.uploadImageCalls.map(\.contentType), [.pdf])
+        // The ORIGINAL document is what went up - not a render of it.
+        XCTAssertEqual(api.uploadImageCalls.first?.data, pdf)
+
+        let create = try XCTUnwrap(api.createReceiptCalls.first)
+        // The server's merge treats a PDF's text layer differently from a
+        // photograph's OCR, so this field decides which suggestions the
+        // person is offered. It is never guessed.
+        XCTAssertEqual(create.ocrSource, "pdf-text")
+        XCTAssertEqual(create.ocrRawText, "TOTAL 113.00")
+        // No on-device parser read this document, and the immutable
+        // `ocrSuggestions` record says exactly that.
+        XCTAssertNil(create.ocrSuggestions.totalCents)
+        XCTAssertNil(create.ocrSuggestions.vendor)
+        XCTAssertNil(create.status, "an import lands pending; nobody confirmed it")
+    }
+
+    /// A scanned PDF: read by Vision off a render, so `ocrSource` is
+    /// `vision` - but the bytes stored are still the PDF.
+    func testAScannedPDFUploadsThePDFAndReportsVision() async throws {
+        let pdf = Data("%PDF-1.4 scanned".utf8)
+        let controller = await makeController()
+
+        try await controller.enqueue(
+            document: OutboxDocument(data: pdf, contentType: .pdf, ocrSource: .vision),
+            parsed: Self.parsedFixture,
+            confirmation: nil,
+            partial: nil
+        )
+        await settle(controller)
+
+        XCTAssertEqual(api.uploadTargetCalls, [.pdf])
+        let create = try XCTUnwrap(api.createReceiptCalls.first)
+        XCTAssertEqual(create.ocrSource, "vision")
+        XCTAssertEqual(create.ocrSuggestions.totalCents, 11300)
+    }
+
+    // MARK: - One receipt with N pages (2026-09-01)
+
+    func testEveryExtraPageIsAttachedAfterTheCreateInOrder() async throws {
+        let receiptId = UUID()
+        api.createReceiptHandler = { _ in Fixtures.receipt(id: receiptId, status: .pending) }
+        api.addReceiptImageHandler = { _, objectKey, _ in
+            ReceiptImage(page: 2, downloadUrl: URL(string: "https://storage.example/\(objectKey)")!)
+        }
+        let controller = await makeController()
+
+        let pages = [Data("page one".utf8), Data("page two".utf8), Data("page three".utf8)]
+        try await controller.enqueue(
+            document: .photo(pages[0], additionalPages: [pages[1], pages[2]]),
+            parsed: Self.parsedFixture,
+            confirmation: nil,
+            partial: nil
+        )
+        await settle(controller)
+
+        XCTAssertEqual(api.createReceiptCalls.count, 1, "one receipt, not three")
+        XCTAssertEqual(api.addReceiptImageCalls.count, 2)
+        XCTAssertTrue(api.addReceiptImageCalls.allSatisfy { $0.receiptId == receiptId })
+        // In page order, each carrying its own bytes' digest - digests
+        // computed independently with shasum, not with the code under
+        // test.
+        XCTAssertEqual(api.uploadImageCalls.map(\.data), pages)
+        XCTAssertEqual(
+            api.addReceiptImageCalls.map(\.sha256),
+            [
+                "bc437d733d36dab424e68a96432e4d41755ec23550a064e4f475eff4de7879eb",
+                "60a1419be88c7111da0bb9419487a48c4b370f47cac4a13348155b0aa3f60f41",
+            ]
+        )
+        // Page one's own digest went with the create, not with any page
+        // add - the item's `sha256` is the document's, and the extras
+        // hash their own bytes at drain time.
+        XCTAssertEqual(
+            api.createReceiptCalls.first?.image.sha256,
+            "08e548c038b1608847f6285d147959da2c6632aca2cda9fd1166ec8f32b460e7"
+        )
+        // Persisted after every step, so a kill anywhere in here resumes.
+        // `created(0)` is the important one: the receipt's id is on disk
+        // BEFORE the first page is attached, which is what stops a
+        // relaunch from re-running the create.
+        // (This item was queued already-parsed - the single-capture path -
+        // so there is no `parsed` write; the OCR step never ran.)
+        XCTAssertEqual(
+            store.updates.map(\.progress.stepName),
+            ["uploaded", "created(0)", "created(1)", "created(2)"]
+        )
+        // Only when every page has landed does the local copy go.
+        XCTAssertTrue(store.items.isEmpty)
+        XCTAssertEqual(controller.serverConfirmedCount, 1)
+        XCTAssertTrue(controller.entries.isEmpty)
+    }
+
+    /// The kill-between-pages guarantee: a relaunch resumes at the page
+    /// that had not landed, NEVER re-running the create (which would make
+    /// a second receipt, or 409 and strand the rest).
+    func testAKillBetweenPagesResumesWithoutRecreatingTheReceipt() async throws {
+        let receiptId = UUID()
+        api.addReceiptImageHandler = { _, objectKey, _ in
+            ReceiptImage(page: 3, downloadUrl: URL(string: "https://storage.example/\(objectKey)")!)
+        }
+        // As a previous run left it: the receipt exists, page 2 is
+        // attached, page 3 is not.
+        let item = seededItem(
+            progress: .created(Self.parsedFixture, receiptId: receiptId, pagesAdded: 1),
+            additionalPageCount: 2
+        )
+        store.seed(
+            item,
+            imageData: Data("page one".utf8),
+            additionalPages: [Data("page two".utf8), Data("page three".utf8)]
+        )
+
+        let controller = await makeController()
+        await settle(controller)
+
+        XCTAssertTrue(api.createReceiptCalls.isEmpty, "the receipt already exists")
+        XCTAssertEqual(api.addReceiptImageCalls.count, 1)
+        XCTAssertEqual(api.uploadImageCalls.map(\.data), [Data("page three".utf8)])
+        XCTAssertTrue(store.items.isEmpty)
+        XCTAssertEqual(controller.serverConfirmedCount, 1)
+    }
+
+    /// 409 `duplicate_image` on an extra page means those exact bytes are
+    /// already attached to one of this user's receipts - which on this
+    /// path means the page landed and the answer was lost. Counted as
+    /// done, the same recovery the create's own 409 gets.
+    func testADuplicateImageOnAnExtraPageCountsAsAttached() async throws {
+        let receiptId = UUID()
+        api.createReceiptHandler = { _ in Fixtures.receipt(id: receiptId, status: .pending) }
+        api.addReceiptImageHandler = { _, _, _ in
+            throw APIError.requestFailed(
+                code: "duplicate_image",
+                message: "An identical image is already attached to one of your receipts",
+                status: 409
+            )
+        }
+        let controller = await makeController()
+
+        try await controller.enqueue(
+            document: .photo(Data("page one".utf8), additionalPages: [Data("page two".utf8)]),
+            parsed: Self.parsedFixture,
+            confirmation: nil,
+            partial: nil
+        )
+        await settle(controller)
+
+        XCTAssertEqual(api.addReceiptImageCalls.count, 1, "not retried forever")
+        XCTAssertTrue(store.items.isEmpty, "the item finished")
+        XCTAssertEqual(controller.serverConfirmedCount, 1)
+        XCTAssertTrue(controller.entries.isEmpty)
+    }
+
+    /// The one case the queue genuinely cannot finish on its own: a create
+    /// that answers 409, on an item with extra pages. The receipt exists
+    /// but the error carries no id, so the pages have nowhere to go. It
+    /// blocks with its remedy rather than dropping pages someone scanned.
+    func testACreateDuplicateOnAMultiPageItemBlocksWithItsRemedy() async throws {
+        api.createReceiptHandler = { _ in
+            throw APIError.requestFailed(
+                code: "duplicate_image",
+                message: "An identical image is already attached to one of your receipts",
+                status: 409
+            )
+        }
+        let controller = await makeController()
+
+        try await controller.enqueue(
+            document: .photo(Data("page one".utf8), additionalPages: [Data("page two".utf8)]),
+            parsed: Self.parsedFixture,
+            confirmation: nil,
+            partial: nil
+        )
+        await settle(controller)
+
+        XCTAssertTrue(api.addReceiptImageCalls.isEmpty)
+        guard case .needsAttention(let message) = controller.entries.first?.status else {
+            return XCTFail("Expected needsAttention, got \(String(describing: controller.entries.first?.status))")
+        }
+        XCTAssertTrue(message.contains("Add a page"), message)
+        XCTAssertEqual(store.items.count, 1, "the pages stay on this phone")
+    }
+
+    /// A single-page receipt is untouched by any of this: it still goes
+    /// straight from the create to gone, with no page loop and no extra
+    /// persisted step.
+    func testASinglePageReceiptStillFinishesAtTheCreate() async throws {
+        let controller = await makeController()
+        try await controller.enqueue(imageData: Data("page one bytes".utf8))
+        await settle(controller)
+
+        XCTAssertTrue(api.addReceiptImageCalls.isEmpty)
+        XCTAssertEqual(store.updates.map(\.progress.stepName), ["parsed", "uploaded"])
+        XCTAssertTrue(store.items.isEmpty)
+    }
+}
+
+extension OutboxItem.Progress {
+    /// A short name per step, for asserting the persisted sequence.
+    var stepName: String {
+        switch self {
+        case .captured: return "captured"
+        case .parsed: return "parsed"
+        case .uploaded: return "uploaded"
+        case .created(_, _, let pagesAdded): return "created(\(pagesAdded))"
+        }
     }
 }
 
