@@ -13,3 +13,6 @@ xcuserdata/
 
 # Web client build output
 web/dist/
+
+# Receipt import workspaces hold real purchase records; they live in ~/.kept/imports/, never here.
+imports/
