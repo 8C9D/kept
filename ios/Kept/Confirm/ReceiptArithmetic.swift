@@ -49,6 +49,17 @@ enum ReceiptArithmetic {
     /// honest response, not inventing a number that looks like an answer.
     private static let neverNegativeFields: Set<DerivableMoneyField> = [.tip, .otherFees]
 
+    /// The three fields a blank tip or other-fees line does not block
+    /// (2026-09-01) - mirrors arithmetic.ts's `OMISSION_IS_ZERO_FIELDS`
+    /// verbatim. A receipt that prints neither is the ordinary case, not
+    /// an under-determined equation: `showsArithmeticWarning` has always
+    /// read a blank tip or fee as "no such line on this receipt",
+    /// contributing zero, and this function reading it as anything else
+    /// meant the two disagreed about the same equation - the commonest
+    /// receipt shape of all (a subtotal and a total, no tip, no fees, HST
+    /// missing) had three blanks and derived nothing.
+    private static let omissionIsZeroFields: Set<DerivableMoneyField> = [.tip, .otherFees]
+
     /// The storable range every money column is held to (money.ts's int4
     /// bound `MAX_STORABLE_CENTS`/`MIN_STORABLE_CENTS`) - mirrored so a
     /// value this function would otherwise offer, and the server would
@@ -57,6 +68,16 @@ enum ReceiptArithmetic {
     private static let maxStorableCents = 2_147_483_647
     private static let minStorableCents = -2_147_483_648
 
+    /// Whether a value is one the server could store - the same int4 gate
+    /// `deriveMissingAmount` applies to anything it would otherwise offer,
+    /// exposed (2026-09-01) so the confirm form's total-tracking rule
+    /// refuses the identical values instead of keeping a second copy of
+    /// the bound. Mirrors the web form's use of `finalizeDerivedAmount`
+    /// for exactly the same purpose (ReceiptForm.tsx `applyComponentEdit`).
+    static func isStorable(cents: Int) -> Bool {
+        cents >= minStorableCents && cents <= maxStorableCents
+    }
+
     /// `nil` for any of the five arguments means "this field is blank" -
     /// exactly `deriveMissingAmount`'s contract (never "invalid text";
     /// ConfirmReceiptModel is responsible for refusing to call this at all
@@ -64,10 +85,24 @@ enum ReceiptArithmetic {
     /// `showsArithmeticWarning` already applies).
     ///
     /// Returns `nil` in the same four cases the server function does:
-    /// zero fields missing (nothing to fill in), two or more missing (the
-    /// equation has more than one unknown), the balancing value is a
-    /// negative tip or negative other-fees, or the value falls outside
-    /// the storable cents range.
+    /// zero fields missing (nothing to fill in), two or more genuinely
+    /// unknown (the equation has more than one unknown), the balancing
+    /// value is a negative tip or negative other-fees, or the value falls
+    /// outside the storable cents range.
+    ///
+    /// **What counts as "genuinely unknown", widened 2026-09-01** in step
+    /// with the server's own widening (read `deriveMissingAmount`'s doc
+    /// comment in arithmetic.ts for the full reasoning). When the field
+    /// being solved for is HST, subtotal or total, a blank tip or
+    /// other-fees line counts as 0 rather than as an unknown - so
+    /// `{subtotal 1270, total 1435}` derives HST 165 and `{subtotal 1270,
+    /// hst 165}` derives total 1435, which is the shape most receipts
+    /// actually arrive in. Solving FOR a tip or other-fees amount still
+    /// requires the other four present, and that asymmetry is the point:
+    /// "the tip line is blank, so there was no tip" is a reading of the
+    /// paper anyone would make, while "the tip is whatever makes these
+    /// four numbers balance" is inventing a gratuity out of a rounding
+    /// difference.
     static func deriveMissingAmount(
         subtotalCents: Int?,
         hstCents: Int?,
@@ -83,11 +118,29 @@ enum ReceiptArithmetic {
             (.total, totalCents),
         ]
         let missing = entries.filter { $0.1 == nil }.map(\.0)
-        guard missing.count == 1, let field = missing.first else { return nil }
+        // Split the blanks into the ones that are genuinely unknown and
+        // the ones that read as "no such line" - the server's identical
+        // two-step, mirrored verbatim. Exactly one real unknown is
+        // solvable; with none, the only solvable shape left is a single
+        // blank tip or other-fees line with all four of its neighbours
+        // filled in, which is the pre-2026-09-01 rule unchanged for those
+        // two fields.
+        let unknown = missing.filter { !omissionIsZeroFields.contains($0) }
+        let solvable: DerivableMoneyField?
+        if unknown.count == 1 {
+            solvable = unknown.first
+        } else if unknown.isEmpty, missing.count == 1 {
+            solvable = missing.first
+        } else {
+            solvable = nil
+        }
+        guard let field = solvable else { return nil }
 
-        // Every field but the missing one is non-nil here (the count == 1
-        // check above), so summing with `?? 0` adds every KNOWN component
-        // and adds nothing for the one field being solved for.
+        // Every field but the one being solved for either has a value or
+        // is a blank tip/other-fees line reading as zero, so summing with
+        // `?? 0` adds every KNOWN component and adds nothing for the field
+        // this call is solving for - whichever of the five it turns out to
+        // be.
         let knownComponentSum =
             (subtotalCents ?? 0) + (hstCents ?? 0) + (tipCents ?? 0) + (otherFeesCents ?? 0)
         let value = field == .total ? knownComponentSum : (totalCents ?? 0) - knownComponentSum
@@ -95,7 +148,7 @@ enum ReceiptArithmetic {
         if neverNegativeFields.contains(field), value < 0 {
             return nil
         }
-        guard value >= minStorableCents, value <= maxStorableCents else {
+        guard isStorable(cents: value) else {
             return nil
         }
         return DerivedAmount(field: field, cents: value)
@@ -188,6 +241,111 @@ enum ReceiptArithmetic {
             : .plausible
     }
 
+    // MARK: - The default rate (2026-09-01)
+
+    /// Ontario's combined HST, in basis points - `DEFAULT_HST_RATE_BPS`,
+    /// mirrored from both the server's arithmetic.ts and the web form.
+    /// A DEFAULT rather than a fact: nothing in this system knows which
+    /// province a receipt was printed in (`checkHstRatePlausibility`'s own
+    /// comment makes the same point from the other direction), which is
+    /// why the rate is a parameter here rather than a constant inside the
+    /// arithmetic.
+    static let defaultHstRateBps = 1300
+
+    /// What HST and total a subtotal WOULD carry at a given rate - the
+    /// live mirror of the server's `suggestDefaultRateHst`
+    /// (server/src/domain/arithmetic.ts) and of the web form's own mirror
+    /// of it (`suggestDefaultRateHst`, ReceiptForm.tsx). For the receipt
+    /// that prints a subtotal and nothing else - a handwritten invoice, a
+    /// slip whose tax line the parsers could not find - where
+    /// `deriveMissingAmount` has nothing to subtract from and stays
+    /// silent.
+    ///
+    /// ⚠ A suggestion, exactly like everything else in this file, and a
+    /// weaker one than the derivations above: those solve an equation the
+    /// receipt's own numbers determine, while this one applies a rate the
+    /// receipt may not have been charged. It reaches the person only as a
+    /// chip that says "HST at 13% of subtotal" in those words, never as a
+    /// fill that happens quietly - constraint 2 with an extra reason to
+    /// mean it. Deciding whether a receipt's CURRENCY makes the Ontario
+    /// rate meaningful at all is the caller's (ConfirmReceiptModel's
+    /// `hstRateCurrency`); this function mirrors a server function that
+    /// takes a rate in basis points and has no business knowing about
+    /// currencies.
+    ///
+    /// Round HALF UP in integer arithmetic, never a float: `(subtotal *
+    /// rate + 5000) / 10000` floored is the same number a cash register
+    /// computes, and dividing first introduces exactly the binary-fraction
+    /// error the integer-cents rule exists to keep out.
+    ///
+    /// `nil` when there is nothing honest to suggest: a subtotal of zero
+    /// or less (there is no rate to apply to nothing, and a refund's
+    /// negative subtotal is not a receipt anyone wants a suggested tax on
+    /// - the same guard `checkHstRatePlausibility` uses), or a total that
+    /// would fall outside the storable cents range.
+    static func suggestDefaultRateHst(
+        subtotalCents: Int,
+        rateBasisPoints: Int = defaultHstRateBps
+    ) -> DefaultRateHst? {
+        // A rate that is not a non-negative number of basis points is a
+        // programming error rather than a receipt - the server throws
+        // there; a precondition is this language's version of the same
+        // refusal to quietly compute something.
+        precondition(rateBasisPoints >= 0, "A tax rate must be a non-negative number of basis points")
+        guard subtotalCents > 0 else { return nil }
+
+        let (scaled, scaleOverflowed) = subtotalCents.multipliedReportingOverflow(by: rateBasisPoints)
+        guard !scaleOverflowed else { return nil }
+        let (rounded, roundOverflowed) = scaled.addingReportingOverflow(5_000)
+        guard !roundOverflowed else { return nil }
+        let hst = rounded / 10_000
+        let (total, totalOverflowed) = subtotalCents.addingReportingOverflow(hst)
+        guard !totalOverflowed, isStorable(cents: hst), isStorable(cents: total) else {
+            // A subtotal near the int4 ceiling has a total that is not
+            // storable. No suggestion is the honest answer; the mismatch
+            // is not this function's to paper over.
+            return nil
+        }
+        return DefaultRateHst(hstCents: hst, totalCents: total)
+    }
+
+    // MARK: - The amount floor (2026-09-01)
+
+    /// Does the total at least cover the parts? The live mirror of the
+    /// server's `checkAmountFloor` (arithmetic.ts) and of the web form's
+    /// (`checkAmountFloor`, ReceiptForm.tsx) - a third advisory note
+    /// beside `checkReceiptArithmetic` and `checkHstRatePlausibility`, for
+    /// the one direction of mismatch that is never a legitimate receipt.
+    ///
+    /// Distinct from the general reconciliation check, which fires on any
+    /// inequality in either direction. A total that EXCEEDS its components
+    /// has an ordinary explanation - a line this form has no box for, a
+    /// fee nobody typed - and says "there is something else on this
+    /// paper". A total BELOW its components has no such reading: subtotal,
+    /// HST, tip and fees are all charges, and no arrangement of them can
+    /// add up to more than what was paid. One of the numbers on screen is
+    /// wrong, and that is a sharper thing to say than "worth a look".
+    ///
+    /// A missing HST, tip or other-fees line contributes zero, the same
+    /// reading every other function here gives an absent line.
+    /// `notApplicable` when either anchor is missing: with no subtotal
+    /// there are no components to fall below, and with no total there is
+    /// nothing to compare.
+    ///
+    /// ⚠ Never a block - nothing in this file ever is. Plenty of receipts
+    /// are genuinely odd, and the person confirming is the authority.
+    static func checkAmountFloor(
+        subtotalCents: Int?,
+        hstCents: Int?,
+        tipCents: Int?,
+        otherFeesCents: Int?,
+        totalCents: Int?
+    ) -> AmountFloorCheck {
+        guard let subtotalCents, let totalCents else { return .notApplicable }
+        let components = subtotalCents + (hstCents ?? 0) + (tipCents ?? 0) + (otherFeesCents ?? 0)
+        return totalCents < components ? .totalBelowComponents : .ok
+    }
+
     // MARK: - Suggested-amount sanity (2026-09-01)
 
     /// Independent rounding between a merchant's tax line and its total is
@@ -264,4 +422,20 @@ enum WithheldAmountField: Hashable, CaseIterable {
 /// `ReceiptArithmetic.checkHstRatePlausibility` for the full reasoning.
 enum HstRatePlausibility: Equatable {
     case notApplicable, plausible, looksLikeHalfSplit
+}
+
+/// The HST a rate would produce on a subtotal, and the total that follows
+/// from it - mirrors `DefaultRateHst` (arithmetic.ts). Both halves
+/// together, never a bare tax figure, because applying the suggestion
+/// moves both boxes and a caller that had to add them back up itself
+/// could round differently than the function that computed them.
+struct DefaultRateHst: Equatable {
+    let hstCents: Int
+    let totalCents: Int
+}
+
+/// Mirrors `AmountFloorCheck` (arithmetic.ts) one for one - see
+/// `ReceiptArithmetic.checkAmountFloor` for the full reasoning.
+enum AmountFloorCheck: Equatable {
+    case notApplicable, ok, totalBelowComponents
 }

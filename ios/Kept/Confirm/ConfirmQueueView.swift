@@ -46,6 +46,12 @@ struct ConfirmQueueView: View {
                     api: api,
                     onSaved: { await queue.advanceAfterSave() },
                     onSetAside: { await queue.setAsideCurrent() },
+                    // A half-filled receipt is still pending, so the queue
+                    // moves on exactly as it does for "Later"
+                    // (ConfirmQueueModel.saveCurrentForLater()) - the
+                    // difference is on the server, where what was typed is
+                    // now stored and will not be re-suggested.
+                    onSavedForLater: { await queue.saveCurrentForLater() },
                     // A binned receipt is one the person dealt with, so
                     // the queue moves on exactly as it does after a save
                     // (ConfirmQueueModel.advanceAfterDelete()).

@@ -87,6 +87,13 @@ final class CaptureFlowModel: ObservableObject {
     /// True when the pending failure screen belongs to a single capture's
     /// "Later" exit rather than a batch page - retry() re-runs that exit.
     private var retryIsSingleSetAside = false
+    /// What the confirm form held when "Later" was tapped (2026-09-01),
+    /// read off the model before `phase` moves on. Kept here rather than
+    /// re-read at enqueue time because a failed "Later" leaves `phase` on
+    /// the failure screen, and `retry()` must send the same typed values
+    /// the first attempt did rather than silently fall back to the
+    /// parser's snapshot.
+    private var singlePartial: PendingReceiptFields?
 
     /// Re-entrancy guard: each enqueue below is a suspension point where a
     /// double-tapped retry could start a second pass over the same head
@@ -230,19 +237,36 @@ final class CaptureFlowModel: ObservableObject {
     /// "Later" on the capture-time confirm screen: the receipt still gets
     /// queued - pending, like a batch page - because leaving the screen
     /// must never cost the scan.
+    ///
+    /// ⚠ It must not cost the TYPING either (2026-09-01). Until now this
+    /// discarded whatever had been entered: the vendor someone had just
+    /// corrected, the total they had just read off the paper, all of it
+    /// gone, and the receipt queued carrying the parser's snapshot alone -
+    /// so the confirm queue offered them the same wrong guesses again
+    /// later. The confirm form's own reviewed set
+    /// (`pendingReceiptFields()`) rides along instead, and the drain's
+    /// create writes those columns and reports them reviewed. Nil when
+    /// nobody had touched anything, which is the ordinary case, and the
+    /// create body is then exactly what it always was.
     func setAsideSingleCapture() async {
         guard !isProcessing, let draft = singleDraft else { return }
         isProcessing = true
         defer { isProcessing = false }
 
+        if case .confirming(let model) = phase {
+            singlePartial = model.pendingReceiptFields()
+        }
+
         do {
             try await outbox.enqueue(
                 imageData: draft.imageData,
                 parsed: ParsedReceipt(suggestions: draft.suggestions, ocrRawText: draft.ocrRawText),
-                confirmation: nil
+                confirmation: nil,
+                partial: singlePartial
             )
             retryIsSingleSetAside = false
             singleDraft = nil
+            singlePartial = nil
             phase = .saved(count: 1)
         } catch {
             retryIsSingleSetAside = true
@@ -254,6 +278,7 @@ final class CaptureFlowModel: ObservableObject {
     /// queued the confirmed receipt durably.
     func finishSingleCapture() {
         singleDraft = nil
+        singlePartial = nil
         phase = .saved(count: 1)
     }
 

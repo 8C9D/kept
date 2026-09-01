@@ -27,6 +27,7 @@ final class StubKeptAPI: KeptAPI {
     var uploadImageHandler: ((_ target: UploadTarget, _ data: Data, _ contentType: ImageUploadContentType) async throws -> Void)?
     var createReceiptHandler: ((_ request: CreateReceiptRequest) async throws -> Receipt)?
     var confirmReceiptHandler: ((_ id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt)?
+    var saveReceiptForLaterHandler: ((_ id: UUID, _ request: SaveForLaterRequest) async throws -> Receipt)?
     var quickConfirmReceiptHandler: ((_ id: UUID, _ request: QuickConfirmRequest) async throws -> Receipt)?
     /// POST /api/receipts/parse (2026-09-01). Unstubbed by default: the
     /// capture path fires it in the background and swallows every failure,
@@ -56,6 +57,7 @@ final class StubKeptAPI: KeptAPI {
     private var recordedReplaceReceiptImageCalls: [(receiptId: UUID, page: Int, objectKey: String, sha256: String)] = []
     private var recordedCreateReceiptCalls: [CreateReceiptRequest] = []
     private var recordedConfirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] = []
+    private var recordedSaveReceiptForLaterCalls: [(id: UUID, request: SaveForLaterRequest)] = []
     private var recordedQuickConfirmReceiptCalls: [(id: UUID, request: QuickConfirmRequest)] = []
     private var recordedParseReceiptTextCalls: [(ocrRawText: String, capturedAt: Date)] = []
     private var recordedRestoreReceiptCalls: [UUID] = []
@@ -101,6 +103,13 @@ final class StubKeptAPI: KeptAPI {
 
     var confirmReceiptCalls: [(id: UUID, request: ConfirmReceiptRequest)] {
         callLock.withLock { recordedConfirmReceiptCalls }
+    }
+
+    /// Every "Save for later" PATCH, in order - what the confirm-form
+    /// tests inspect to assert that only the reviewed fields' values were
+    /// written and that no `status` rode along.
+    var saveReceiptForLaterCalls: [(id: UUID, request: SaveForLaterRequest)] {
+        callLock.withLock { recordedSaveReceiptForLaterCalls }
     }
 
     var parseReceiptTextCalls: [(ocrRawText: String, capturedAt: Date)] {
@@ -219,6 +228,12 @@ final class StubKeptAPI: KeptAPI {
         callLock.withLock { recordedConfirmReceiptCalls.append((id, request)) }
         guard let confirmReceiptHandler else { throw UnstubbedCall(endpoint: "confirmReceipt") }
         return try await confirmReceiptHandler(id, request)
+    }
+
+    func saveReceiptForLater(id: UUID, _ request: SaveForLaterRequest) async throws -> Receipt {
+        callLock.withLock { recordedSaveReceiptForLaterCalls.append((id, request)) }
+        guard let saveReceiptForLaterHandler else { throw UnstubbedCall(endpoint: "saveReceiptForLater") }
+        return try await saveReceiptForLaterHandler(id, request)
     }
 
     func quickConfirmReceipt(id: UUID, _ request: QuickConfirmRequest) async throws -> Receipt {

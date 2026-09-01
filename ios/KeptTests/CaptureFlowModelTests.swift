@@ -22,6 +22,10 @@ final class CaptureFlowModelTests: XCTestCase {
             let imageData: Data
             let parsed: ParsedReceipt?
             let confirmation: ConfirmedReceiptFields?
+            /// What the confirm form had half-filled when "Later" was
+            /// tapped (2026-09-01) - nil for a batch page and for a Later
+            /// nobody had typed anything into.
+            let partial: PendingReceiptFields?
         }
 
         private(set) var enqueued: [EnqueuedReceipt] = []
@@ -35,21 +39,23 @@ final class CaptureFlowModelTests: XCTestCase {
         private var callNumber = 0
 
         func enqueue(imageData: Data) async throws {
-            try await record(imageData: imageData, parsed: nil, confirmation: nil)
+            try await record(imageData: imageData, parsed: nil, confirmation: nil, partial: nil)
         }
 
         func enqueue(
             imageData: Data,
             parsed: ParsedReceipt,
-            confirmation: ConfirmedReceiptFields?
+            confirmation: ConfirmedReceiptFields?,
+            partial: PendingReceiptFields?
         ) async throws {
-            try await record(imageData: imageData, parsed: parsed, confirmation: confirmation)
+            try await record(imageData: imageData, parsed: parsed, confirmation: confirmation, partial: partial)
         }
 
         private func record(
             imageData: Data,
             parsed: ParsedReceipt?,
-            confirmation: ConfirmedReceiptFields?
+            confirmation: ConfirmedReceiptFields?,
+            partial: PendingReceiptFields?
         ) async throws {
             await onEnqueue?()
             callNumber += 1
@@ -57,7 +63,9 @@ final class CaptureFlowModelTests: XCTestCase {
                 failOnCallNumber = nil
                 throw DiskFull()
             }
-            enqueued.append(EnqueuedReceipt(imageData: imageData, parsed: parsed, confirmation: confirmation))
+            enqueued.append(EnqueuedReceipt(
+                imageData: imageData, parsed: parsed, confirmation: confirmation, partial: partial
+            ))
         }
     }
 
@@ -155,6 +163,67 @@ final class CaptureFlowModelTests: XCTestCase {
         } else {
             XCTFail("Expected saved, got \(model.phase)")
         }
+    }
+
+    /// "Later" used to discard whatever had been typed (2026-09-01): the
+    /// vendor someone had just corrected was gone, the receipt queued
+    /// carrying the parser's snapshot alone, and the confirm queue offered
+    /// them the same wrong guesses again later. The typed fields now ride
+    /// along, tagged with which ones a human actually looked at.
+    func testLaterCarriesWhatWasTypedIntoThePendingCreate() async {
+        let model = makeModel(recognizer: StubTextRecognizer(results: [Self.parsedText]))
+        await model.savePages([Data("single page".utf8)])
+        guard case .confirming(let confirmModel) = model.phase else {
+            return XCTFail("Expected confirming, got \(model.phase)")
+        }
+
+        confirmModel.markTouched(.vendor)
+        confirmModel.vendorText = "Maple Foods"
+        confirmModel.markTouched(editable: .category)
+        confirmModel.categoryText = "groceries"
+
+        await model.setAsideSingleCapture()
+
+        XCTAssertEqual(outbox.enqueued.count, 1)
+        let queued = outbox.enqueued[0]
+        XCTAssertNil(queued.confirmation, "Later never confirms")
+        XCTAssertEqual(queued.partial?.reviewedFields, [.vendor, .category])
+        XCTAssertEqual(queued.partial?.vendor, "Maple Foods")
+        XCTAssertEqual(queued.partial?.category, "groceries")
+        // The parse still rides along verbatim - it is the §7.3 accuracy
+        // record, and nothing a human typed replaces it.
+        XCTAssertEqual(queued.parsed?.suggestions.vendor, "MAPLE FOODS MARKET")
+    }
+
+    /// Nobody touched anything, so there is nothing to carry and the
+    /// create body is exactly what it was before this existed.
+    func testLaterCarriesNothingWhenNothingWasTouched() async {
+        let model = makeModel(recognizer: StubTextRecognizer(results: [Self.parsedText]))
+        await model.savePages([Data("single page".utf8)])
+        await model.setAsideSingleCapture()
+        XCTAssertNil(outbox.enqueued[0].partial)
+    }
+
+    /// A failed "Later" leaves the failure screen up, where the confirm
+    /// model is no longer the phase - so the typed values are read once,
+    /// before the phase moves, and the retry sends the same ones rather
+    /// than silently falling back to the parser's snapshot.
+    func testRetryingAFailedLaterStillCarriesWhatWasTyped() async {
+        outbox.failOnCallNumber = 1
+        let model = makeModel(recognizer: StubTextRecognizer(results: [Self.parsedText]))
+        await model.savePages([Data("single page".utf8)])
+        guard case .confirming(let confirmModel) = model.phase else {
+            return XCTFail("Expected confirming, got \(model.phase)")
+        }
+        confirmModel.markTouched(.vendor)
+        confirmModel.vendorText = "Maple Foods"
+
+        await model.setAsideSingleCapture()
+        XCTAssertTrue(outbox.enqueued.isEmpty)
+
+        await model.retry()
+        XCTAssertEqual(outbox.enqueued.count, 1)
+        XCTAssertEqual(outbox.enqueued[0].partial?.vendor, "Maple Foods")
     }
 
     func testLaterFailureStopsLoudlyAndRetryResumes() async {
@@ -264,7 +333,8 @@ final class CaptureFlowSecondOpinionTests: XCTestCase {
         func enqueue(
             imageData: Data,
             parsed: ParsedReceipt,
-            confirmation: ConfirmedReceiptFields?
+            confirmation: ConfirmedReceiptFields?,
+            partial: PendingReceiptFields?
         ) async throws {
             enqueuedParses.append(parsed)
         }

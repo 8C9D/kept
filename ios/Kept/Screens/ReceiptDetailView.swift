@@ -122,6 +122,16 @@ struct ReceiptDetailView: View {
                         await options.refresh()
                     },
                     onSetAside: { confirmModel = nil },
+                    // Half-filled and still pending (2026-09-01): back to
+                    // the detail screen, which re-reads the row so the
+                    // values just written are what it shows - and so the
+                    // next open of this form prefills from them rather
+                    // than re-offering the parser's guesses over them.
+                    onSavedForLater: {
+                        confirmModel = nil
+                        await model.load(id: receipt.id)
+                        await options.refresh()
+                    },
                     // The same end as this screen's own Delete button
                     // below: the row is gone, so the list behind reloads
                     // and this screen - which is about a receipt that no

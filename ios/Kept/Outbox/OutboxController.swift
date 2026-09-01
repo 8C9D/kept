@@ -19,12 +19,27 @@ protocol OutboxEnqueuing: AnyObject {
     /// person confirmed on the spot, `confirmation` carries their fields -
     /// the create lands the receipt already `confirmed`. A nil
     /// confirmation is the "Later" exit: queued pending, like a batch
-    /// page.
+    /// page - and `partial` is then whatever they had typed before
+    /// leaving, so that exit stops costing them their typing (2026-09-01).
+    /// Nil for both is the ordinary Later: the parser's snapshot alone.
+    func enqueue(
+        imageData: Data,
+        parsed: ParsedReceipt,
+        confirmation: ConfirmedReceiptFields?,
+        partial: PendingReceiptFields?
+    ) async throws
+}
+
+extension OutboxEnqueuing {
+    /// The pre-2026-09-01 shape, kept so the call sites and tests that
+    /// have nothing half-typed to carry stay as short as they were.
     func enqueue(
         imageData: Data,
         parsed: ParsedReceipt,
         confirmation: ConfirmedReceiptFields?
-    ) async throws
+    ) async throws {
+        try await enqueue(imageData: imageData, parsed: parsed, confirmation: confirmation, partial: nil)
+    }
 }
 
 /// The offline outbox (spec §7.4): owns the durable queue of captured
@@ -209,21 +224,28 @@ final class OutboxController: ObservableObject {
     // MARK: - Enqueue (the §7.4 save path)
 
     func enqueue(imageData: Data) async throws {
-        try await enqueueItem(imageData: imageData, progress: .captured, confirmation: nil)
+        try await enqueueItem(imageData: imageData, progress: .captured, confirmation: nil, partial: nil)
     }
 
     func enqueue(
         imageData: Data,
         parsed: ParsedReceipt,
-        confirmation: ConfirmedReceiptFields?
+        confirmation: ConfirmedReceiptFields?,
+        partial: PendingReceiptFields?
     ) async throws {
-        try await enqueueItem(imageData: imageData, progress: .parsed(parsed), confirmation: confirmation)
+        try await enqueueItem(
+            imageData: imageData,
+            progress: .parsed(parsed),
+            confirmation: confirmation,
+            partial: partial
+        )
     }
 
     private func enqueueItem(
         imageData: Data,
         progress: OutboxItem.Progress,
-        confirmation: ConfirmedReceiptFields?
+        confirmation: ConfirmedReceiptFields?,
+        partial: PendingReceiptFields?
     ) async throws {
         // Best-effort: loading first keeps new sequence numbers above the
         // stored ones, but a failed load must never block a save - this
@@ -244,7 +266,8 @@ final class OutboxController: ObservableObject {
             sha256: Self.sha256Hex(imageData),
             progress: progress,
             ocrAttempts: 0,
-            confirmation: confirmation
+            confirmation: confirmation,
+            partial: partial
         )
         try await store.add(item, imageData: imageData)
         items.append(item)
@@ -629,8 +652,22 @@ final class OutboxController: ObservableObject {
                 // send anything else.
                 ocrSource: "vision",
                 ocrSuggestions: OcrSuggestionsPayload(suggestions),
+                reviewedFields: confirmed.reviewedFields,
                 image: CreateReceiptRequest.Image(objectKey: objectKey, sha256: item.sha256)
             )
+        }
+        // The capture-time "Later" exit, since 2026-09-01: whatever the
+        // person had typed into the confirm form before leaving it rides
+        // in `item.partial`, and its own reviewed set decides column by
+        // column which of the two sources this create sends. Reviewed
+        // means the human's value goes in - INCLUDING when that value is
+        // nil, because "I looked and there is nothing on the paper" must
+        // leave the column empty rather than let the parser's guess back
+        // in. Everything unreviewed keeps sending the heuristic snapshot,
+        // exactly as it did before this existed.
+        let partial = item.partial
+        func typedOrParsed<Value>(_ field: ReviewedField, _ typed: Value?, _ parsed: Value?) -> Value? {
+            partial?.reviewed(field) == true ? typed : parsed
         }
         return CreateReceiptRequest(
             // The parser's date when it found one; otherwise the capture
@@ -638,22 +675,28 @@ final class OutboxController: ObservableObject {
             // finally went through, which after an offline weekend can
             // differ. The confirm screen presents either as a
             // suggestion to be confirmed (§7.2).
-            purchasedAt: suggestions.purchasedAt ?? ReceiptFormat.calendarDate(of: item.capturedAt),
+            purchasedAt: typedOrParsed(.purchasedAt, partial?.purchasedAt, suggestions.purchasedAt)
+                ?? ReceiptFormat.calendarDate(of: item.capturedAt),
             capturedAt: ReceiptFormat.timestamp(of: item.capturedAt),
-            vendor: suggestions.vendor,
-            subtotalCents: suggestions.subtotalCents,
-            hstCents: suggestions.hstCents,
-            totalCents: suggestions.totalCents,
-            // The heuristic's tip guess rides along like every other
-            // amount here; otherFeesCents is omitted (nil) because no
-            // heuristic ever produces one - a pending row simply has none
-            // until a human enters it on confirm.
-            tipCents: suggestions.tipCents,
-            otherFeesCents: suggestions.otherFeesCents,
-            paymentMethod: suggestions.paymentMethod,
+            vendor: typedOrParsed(.vendor, partial?.vendor, suggestions.vendor),
+            subtotalCents: typedOrParsed(.subtotalCents, partial?.subtotalCents, suggestions.subtotalCents),
+            hstCents: typedOrParsed(.hstCents, partial?.hstCents, suggestions.hstCents),
+            totalCents: typedOrParsed(.totalCents, partial?.totalCents, suggestions.totalCents),
+            // The heuristic's tip and fee guesses ride along like every
+            // other amount here.
+            tipCents: typedOrParsed(.tipCents, partial?.tipCents, suggestions.tipCents),
+            otherFeesCents: typedOrParsed(.otherFeesCents, partial?.otherFeesCents, suggestions.otherFeesCents),
+            // Category and notes have no parser behind them at all, so
+            // they are sent only when a human typed one - which, before
+            // the capture screen's "Later" carried anything, never
+            // happened and so was not sent at all.
+            category: typedOrParsed(.category, partial?.category, nil),
+            paymentMethod: typedOrParsed(.paymentMethod, partial?.paymentMethod, suggestions.paymentMethod),
+            notes: typedOrParsed(.notes, partial?.notes, nil),
             ocrRawText: parsed.ocrRawText,
             ocrSource: "vision",
             ocrSuggestions: OcrSuggestionsPayload(suggestions),
+            reviewedFields: partial?.reviewedFields,
             image: CreateReceiptRequest.Image(objectKey: objectKey, sha256: item.sha256)
         )
     }

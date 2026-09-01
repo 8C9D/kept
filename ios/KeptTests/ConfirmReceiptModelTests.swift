@@ -199,7 +199,13 @@ final class ConfirmReceiptModelTests: XCTestCase {
 
     // MARK: - Date disagreement (§7.3)
 
-    func testDateDisagreementNoteShowsAndClearsWithTheTint() {
+    /// 2026-09-01: the note now goes when the VALUE changes, not when the
+    /// field is focused. The owner's diagnosis - "the amber-clears-on-focus
+    /// rule hides the warnings that matter" - applies to all three inline
+    /// notes: tapping into a field to check it against the paper is the
+    /// moment the note is most needed, and it used to be the moment the
+    /// note disappeared.
+    func testDateDisagreementNoteStaysUntilTheDateChanges() {
         let model = model(receipt: scannedReceipt(
             suggestions: matchingSuggestions(dateDisagreement: true)
         ))
@@ -210,12 +216,17 @@ final class ConfirmReceiptModelTests: XCTestCase {
         model.markTouched(.vendor)
         XCTAssertTrue(model.showsDateDisagreementNote)
 
-        // Touching the date clears the amber and the note together -
-        // touched means a human looked and decided. Nothing brings either
-        // back.
+        // Nor is TOUCHING the date itself: focus marks it reviewed for
+        // telemetry and for `reviewedFields`, and the note - the thing the
+        // person tapped in to act on - stays put.
         model.markTouched(.date)
-        XCTAssertFalse(model.showsDateDisagreementNote)
+        XCTAssertTrue(model.showsDateDisagreementNote)
         XCTAssertFalse(model.isUnreviewed(.date))
+
+        // Changing the date is the decision, and it clears the note.
+        // Nothing brings it back.
+        model.purchasedDate = ReceiptFormat.pickerDate(fromIso: "2026-03-21")!
+        XCTAssertFalse(model.showsDateDisagreementNote)
     }
 
     func testNoDisagreementMeansNoNote() {
@@ -226,7 +237,7 @@ final class ConfirmReceiptModelTests: XCTestCase {
 
     // MARK: - HST disagreement (§7.3, 2026-08-28)
 
-    func testHstDisagreementNoteShowsAndClearsWithTheTint() {
+    func testHstDisagreementNoteStaysUntilTheHstChanges() {
         let model = model(receipt: scannedReceipt(
             suggestions: matchingSuggestions(hstDisagreement: true)
         ))
@@ -237,11 +248,14 @@ final class ConfirmReceiptModelTests: XCTestCase {
         model.markTouched(.vendor)
         XCTAssertTrue(model.showsHstDisagreementNote)
 
-        // Touching HST clears the amber and the note together, exactly
-        // the date note's rule.
+        // Touching HST is not changing it - exactly the date note's rule
+        // (2026-09-01).
         model.markTouched(.hst)
-        XCTAssertFalse(model.showsHstDisagreementNote)
+        XCTAssertTrue(model.showsHstDisagreementNote)
         XCTAssertFalse(model.isUnreviewed(.hst))
+
+        model.editComponentAmount(.hst, to: "14.00")
+        XCTAssertFalse(model.showsHstDisagreementNote)
     }
 
     func testNoHstDisagreementMeansNoNote() {
@@ -1174,7 +1188,10 @@ final class ConfirmReceiptModelTests: XCTestCase {
         )
     }
 
-    func testHstRateHintShowsAndClearsWithTheTint() {
+    /// The note the owner's 2026-09-01 diagnosis named by name: "the HST hint
+    /// disappears the moment you tap in to fix it". It now survives the
+    /// tap and goes when the amount does.
+    func testHstRateHintStaysUntilTheHstChanges() {
         let model = model(receipt: scannedReceipt(
             hstCents: 800, subtotalCents: 10000, suggestions: halfSplitSuggestions()
         ))
@@ -1185,11 +1202,16 @@ final class ConfirmReceiptModelTests: XCTestCase {
         model.markTouched(.vendor)
         XCTAssertTrue(model.showsHstRateHint)
 
-        // Touching HST clears the amber and the hint together - the same
-        // rule showsHstDisagreementNote already follows.
+        // Tapping into HST - which is what a person does to act on the
+        // hint - leaves the hint on screen while they read the paper.
         model.markTouched(.hst)
-        XCTAssertFalse(model.showsHstRateHint)
+        XCTAssertTrue(model.showsHstRateHint)
         XCTAssertFalse(model.isUnreviewed(.hst))
+
+        // Correcting the split to the combined 13% is what clears it, and
+        // the recomputed ratio agrees.
+        model.editComponentAmount(.hst, to: "13.00")
+        XCTAssertFalse(model.showsHstRateHint)
     }
 
     /// The default fixture is a legitimate 13% receipt (1300/10000) -

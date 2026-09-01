@@ -30,6 +30,13 @@ struct ConfirmReceiptView: View {
     var api: (any KeptAPI)? = nil
     let onSaved: () async -> Void
     let onSetAside: () async -> Void
+    /// Runs after the form is written WITHOUT being confirmed (2026-09-01,
+    /// "Save for later") - the receipt is still pending, so this is where
+    /// control goes next, not where the receipt goes. Nil means the caller
+    /// offers no such action here: the capture-time confirm, whose own
+    /// "Later" already queues the scan pending with whatever was typed,
+    /// and the UI-test harness.
+    var onSavedForLater: (() async -> Void)? = nil
     /// Runs after the receipt is deleted from this form (2026-09-01),
     /// before whatever presented it goes away. Nil means the caller offers
     /// no Delete here - the capture-time confirm, which has no server row
@@ -44,6 +51,9 @@ struct ConfirmReceiptView: View {
     /// Non-nil while a proposal #8 match is open for comparison.
     @State private var openedDuplicateMatch: Receipt?
     @State private var confirmingDelete = false
+    /// Up while Save is waiting for the person to acknowledge a mismatch
+    /// too large to be rounding (2026-09-01, `saveNeedsAcknowledgement`).
+    @State private var acknowledgingMismatch = false
 
     var body: some View {
         Form {
@@ -104,6 +114,37 @@ struct ConfirmReceiptView: View {
             Button("Keep it", role: .cancel) {}
         } message: {
             Text("It disappears from your list and every future export. The record and its image stay stored for tax retention - they aren't erased - and this can't be undone from inside the app.")
+        }
+        // One tap between an impossible set of amounts and a stored tax
+        // record (2026-09-01). The advisory note under the total fired on
+        // all four real data errors in production and was ticked past
+        // every time - a $218.94 Costco purchase went in at $8.50 - so the
+        // sharpest cases now ask, once, in words that name the gap. It
+        // still saves if that is what the paper says: "Save anyway"
+        // proceeds unchanged, logs nothing extra, and `.edit` never
+        // reaches here at all (ConfirmReceiptModel.saveNeedsAcknowledgement
+        // carries the store-credit receipt that makes that exemption
+        // necessary).
+        .confirmationDialog(
+            "Check these amounts",
+            isPresented: $acknowledgingMismatch,
+            titleVisibility: .visible
+        ) {
+            Button("Save anyway") {
+                Task { await saveReceipt() }
+            }
+            // Deliberately NOT `role: .cancel` (2026-09-01, established by
+            // screenshot). iOS 26 presents this dialog anchored to the
+            // Save button, and that presentation renders no cancel button
+            // at all - the shipped delete dialog above has the same shape
+            // and shows "Delete receipt" alone, with "Keep it" nowhere on
+            // screen. A dialog whose entire job is to make someone stop
+            // and look must show them the way back in words, so this one
+            // is an ordinary button. Tapping outside still dismisses it,
+            // and either way nothing is saved.
+            Button("Go back") {}
+        } message: {
+            Text(model.saveAcknowledgementMessage ?? "")
         }
         .alert(
             "Your receipt was not deleted",
@@ -171,12 +212,15 @@ struct ConfirmReceiptView: View {
             model.checkForPossibleDuplicates()
         }
         .onChange(of: focusedField) { oldFocus, newFocus in
-            // Focusing a field is looking at it, and a field that has been
-            // looked at stops raising notes about itself (spec §10A.1) -
-            // the date and HST disagreement notes and the HST rate hint
-            // all read this, and did so before the row tint existed.
-            if let suggestion = newFocus?.suggestion {
-                model.markTouched(suggestion)
+            // Focusing a field is looking at it, which is what puts it in
+            // the reviewed set a save reports (§10A.1, and 2026-09-01's
+            // `reviewedFields`). It no longer clears the inline notes -
+            // those now go when the VALUE changes, because the rate hint
+            // vanishing at the exact moment you tap in to act on it is
+            // the defect the owner named (ConfirmReceiptModel's
+            // `stillHoldsSuggestedValue`).
+            if let newFocus {
+                model.markTouched(editable: newFocus)
             }
             // field_edited's per-focus-cycle counting (2026-08-28): the
             // field being left is checked for an actual change, then the
@@ -275,6 +319,34 @@ struct ConfirmReceiptView: View {
     /// goes once it is gone. A capture-time confirm fails both.
     private var showsDelete: Bool {
         model.canDelete && onDeleted != nil
+    }
+
+    // MARK: - Saving (2026-09-01)
+
+    /// The one save path, so the button and the acknowledgement dialog's
+    /// "Save anyway" cannot diverge on what a save does.
+    private func saveReceipt() async {
+        guard await model.save() else { return }
+        logSave()
+        await onSaved()
+    }
+
+    /// Both halves have to be true, the same shape `showsDelete` uses: the
+    /// model has a server row to half-write (`canSaveForLater`), and
+    /// whoever presented this form said where control goes once it is
+    /// written. A capture-time confirm fails both.
+    private var showsSaveForLater: Bool {
+        model.canSaveForLater && onSavedForLater != nil
+    }
+
+    /// A save-for-later is a deferral - the receipt is still pending and
+    /// still counted - so it reports the same `confirm_deferred` the
+    /// toolbar's "Later" does. There is no new event: what changed is that
+    /// the deferral now keeps the typing, not what the deferral IS.
+    private func saveForLater() async {
+        guard await model.saveForLater() else { return }
+        logDeferralIfConfirming()
+        await onSavedForLater?()
     }
 
     /// `receipt_deleted` is logged here rather than inside the model for
@@ -404,19 +476,20 @@ struct ConfirmReceiptView: View {
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("note.withheldAmounts")
                 }
-                if model.showsArithmeticWarning {
+                if let warning = model.amountsWarning {
                     // Quiet, not red, and inside the card: a prompt to
                     // look, not an error - plenty of legitimate receipts
                     // do not reconcile (spec §7.2, §10A.1). Four
-                    // components now feed the check (2026-08-28: tip and
-                    // other fees rejoined subtotal and HST), so the
-                    // wording names the total rather than enumerating them.
-                    Label(
-                        "These amounts don't add up to the total. Worth a look.",
-                        systemImage: "exclamationmark.triangle"
-                    )
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    // components feed the check (2026-08-28: tip and
+                    // other fees rejoined subtotal and HST). ONE line,
+                    // whichever of the two facts is the sharper one -
+                    // `amountsWarning` owns that choice so the two notes
+                    // can never both render about a single arithmetic
+                    // fact (2026-09-01).
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("note.amounts")
                 }
                 derivedAmountAffordances
             }
@@ -435,6 +508,19 @@ struct ConfirmReceiptView: View {
     /// at most one row of buttons ever shows.
     @ViewBuilder
     private var derivedAmountAffordances: some View {
+        // The HST chip (2026-09-01): the difference the receipt's own
+        // numbers determine, or - only on a CAD receipt - 13% of the
+        // subtotal, never both and never auto-applied. It sits first
+        // because it is the offer for the commonest shape a receipt
+        // arrives in, a tax line the parsers could not read; where it and
+        // the derived fill would both answer for HST, the model suppresses
+        // the fill (`derivableFillLabel`) so the person is never handed
+        // two numbers this form invented and asked to choose.
+        if let chipLabel = model.hstSuggestionChipLabel {
+            derivedAmountButton(chipLabel, identifier: "hstChip.apply") {
+                model.applyHstSuggestionChip()
+            }
+        }
         if let label = model.derivableFillLabel {
             derivedAmountButton(label, identifier: "derivedFill.apply") {
                 model.applyDerivedFill()
@@ -480,6 +566,20 @@ struct ConfirmReceiptView: View {
     }
 
     // MARK: - Suggested fields, in the §7.2 order after the total
+
+    /// What the four component money rows bind to instead of their text
+    /// properties (2026-09-01): every edit goes through
+    /// `editComponentAmount`, so the total-tracking rule runs on a
+    /// keystroke exactly as it does on an amount chip, and the rule itself
+    /// lives in one tested place rather than in four `onChange` handlers.
+    /// The total is deliberately NOT bound this way - it is the anchor,
+    /// and editing it never moves anything else.
+    private func componentBinding(_ field: ConfirmReceiptModel.ComponentAmountField) -> Binding<String> {
+        Binding(
+            get: { model.componentText(field) },
+            set: { model.editComponentAmount(field, to: $0) }
+        )
+    }
 
     private var detailFieldsSection: some View {
         Section {
@@ -537,7 +637,7 @@ struct ConfirmReceiptView: View {
             )
             SuggestedFieldRow(
                 label: "HST",
-                text: $model.hstText,
+                text: componentBinding(.hst),
                 field: .hst,
                 focus: $focusedField,
                 moneyInput: model.hstInput,
@@ -561,14 +661,14 @@ struct ConfirmReceiptView: View {
             )
             SuggestedFieldRow(
                 label: "Subtotal",
-                text: $model.subtotalText,
+                text: componentBinding(.subtotal),
                 field: .subtotal,
                 focus: $focusedField,
                 moneyInput: model.subtotalInput
             )
             SuggestedFieldRow(
                 label: "Tip",
-                text: $model.tipText,
+                text: componentBinding(.tip),
                 field: .tip,
                 focus: $focusedField,
                 moneyInput: model.tipInput
@@ -579,7 +679,7 @@ struct ConfirmReceiptView: View {
             // derived fill.
             SuggestedFieldRow(
                 label: "Other fees",
-                text: $model.otherFeesText,
+                text: componentBinding(.otherFees),
                 field: .otherFees,
                 focus: $focusedField,
                 moneyInput: model.otherFeesInput
@@ -623,11 +723,13 @@ struct ConfirmReceiptView: View {
     private var saveSection: some View {
         Section {
             Button {
-                Task {
-                    if await model.save() {
-                        logSave()
-                        await onSaved()
-                    }
+                // The acknowledgement is asked BEFORE the save, never
+                // after: the dialog's "Save anyway" runs the same
+                // `saveReceipt()` this branch would have.
+                if model.saveNeedsAcknowledgement {
+                    acknowledgingMismatch = true
+                } else {
+                    Task { await saveReceipt() }
                 }
             } label: {
                 if model.isSaving {
@@ -641,6 +743,29 @@ struct ConfirmReceiptView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(!model.canSave || model.isSaving)
+
+            // "Let me enter partial info incrementally without saving the
+            // receipt as confirmed" (the owner, 2026-09-01). Under the Save
+            // button and quieter than it, because confirming is still what
+            // this screen is for - and distinct from the toolbar's
+            // "Later", which stays what it has always been: the exit that
+            // keeps the receipt pending and DISCARDS what was typed.
+            if showsSaveForLater {
+                Button {
+                    Task { await saveForLater() }
+                } label: {
+                    Text("Save for later")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.isSaving)
+                .accessibilityIdentifier("saveForLater")
+
+                Text("Keeps this receipt pending and remembers what you have filled in.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+            }
 
             if let reason = model.saveBlocker {
                 // The §10A.1 rule: a disabled save states its reason below

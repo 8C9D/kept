@@ -84,6 +84,7 @@ final class OutboxControllerTests: XCTestCase {
         progress: OutboxItem.Progress,
         ocrAttempts: Int = 0,
         confirmation: ConfirmedReceiptFields? = nil,
+        partial: PendingReceiptFields? = nil,
         blockedMessage: String? = nil
     ) -> OutboxItem {
         OutboxItem(
@@ -95,6 +96,7 @@ final class OutboxControllerTests: XCTestCase {
             progress: progress,
             ocrAttempts: ocrAttempts,
             confirmation: confirmation,
+            partial: partial,
             blockedMessage: blockedMessage
         )
     }
@@ -207,6 +209,77 @@ final class OutboxControllerTests: XCTestCase {
         XCTAssertNil(body["vendorTaxNumber"])
         XCTAssertNil(body["otherTaxCents"])
         XCTAssertNil(body["isBusiness"])
+    }
+
+    /// The capture screen's "Later" reaching the wire (2026-09-01). Each
+    /// column is decided by the REVIEWED SET, never by whether the typed
+    /// value happens to be nil: what a human looked at goes in, and
+    /// everything else keeps sending the parser's snapshot exactly as it
+    /// did before this existed.
+    func testAPendingCreateWritesTheReviewedColumnsAndParsesTheRest() async throws {
+        let partial = PendingReceiptFields(
+            reviewedFields: [.vendor, .hstCents, .totalCents, .category],
+            purchasedAt: "2026-01-20",
+            vendor: "Maple Foods",
+            subtotalCents: nil,
+            // Reviewed and deliberately blank: the person looked, the
+            // paper has no tax line, and the parser's guess must NOT come
+            // back in behind them.
+            hstCents: nil,
+            tipCents: nil,
+            otherFeesCents: nil,
+            totalCents: 12000,
+            category: "groceries",
+            paymentMethod: nil,
+            notes: nil
+        )
+        let controller = await makeController()
+        try await controller.enqueue(
+            imageData: Data("page one bytes".utf8),
+            parsed: Self.parsedFixture,
+            confirmation: nil,
+            partial: partial
+        )
+        await settle(controller)
+
+        let request = try XCTUnwrap(api.createReceiptCalls.first)
+        XCTAssertEqual(request.vendor, "Maple Foods")
+        XCTAssertEqual(request.totalCents, 12000)
+        XCTAssertEqual(request.category, "groceries")
+        XCTAssertNil(request.hstCents, "reviewed and blank must not fall back to the parser")
+        // Unreviewed: the parser's date, not the one sitting unused in the
+        // partial - the person never looked at that box.
+        XCTAssertEqual(request.purchasedAt, "2026-01-14")
+        XCTAssertEqual(request.reviewedFields, [.vendor, .hstCents, .totalCents, .category])
+        // The parser's record is immutable and rides along untouched: it
+        // is the §7.3 accuracy measurement, not a draft.
+        XCTAssertEqual(request.ocrSuggestions.vendor, "MAPLE FOODS MARKET")
+        XCTAssertEqual(request.ocrSuggestions.totalCents, 11300)
+
+        // Still pending on the wire: only a human's confirmation may set
+        // the key that makes a receipt exportable.
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: APIClient.encoder.encode(request)) as? [String: Any]
+        )
+        XCTAssertNil(body["status"])
+        XCTAssertEqual(body["reviewedFields"] as? [String], ["vendor", "hstCents", "totalCents", "category"])
+    }
+
+    /// With nothing half-typed, the body carries no `reviewedFields` key
+    /// at all - an absence, not an empty array, so a create from this
+    /// build is byte-identical to one from the last where nobody touched
+    /// the form.
+    func testAPendingCreateWithNothingReviewedSendsNoReviewedFieldsKey() async throws {
+        let controller = await makeController()
+        try await controller.enqueue(imageData: Data("page one bytes".utf8))
+        await settle(controller)
+
+        let request = try XCTUnwrap(api.createReceiptCalls.first)
+        XCTAssertNil(request.reviewedFields)
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: APIClient.encoder.encode(request)) as? [String: Any]
+        )
+        XCTAssertFalse(body.keys.contains("reviewedFields"))
     }
 
     func testCreateCarriesParsedSuggestionsRawTextAndCaptureTimes() async throws {

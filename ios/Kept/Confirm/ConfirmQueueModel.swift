@@ -85,6 +85,19 @@ final class ConfirmQueueModel: ObservableObject {
         await advanceAfterHandling()
     }
 
+    /// Called by the view after "Save for later" wrote the half-filled
+    /// form (2026-09-01). The receipt is still PENDING, so this behaves
+    /// exactly like "Later" rather than like a save: the id joins
+    /// `setAsideIds` so the queue stops re-offering it this sitting, the
+    /// §5.2a badge keeps counting it, and the done screen names it among
+    /// the ones set aside. What changed is that the person's typing
+    /// survived; what did not change is that they have not confirmed
+    /// anything. Two names over one implementation because the call sites
+    /// mean different things and should read that way.
+    func saveCurrentForLater() async {
+        await setAsideCurrent()
+    }
+
     /// Called by the view after the current form's receipt is deleted
     /// (2026-09-01). Identical bookkeeping to a save, deliberately: the
     /// row is no longer pending either way, so `loadNext()` will not

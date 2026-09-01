@@ -421,11 +421,28 @@ enum ReceiptParser {
             if taxTier(of: line.text) != nil { continue }
             if containsWord("tip", in: line.text) || containsWord("gratuity", in: line.text) { continue }
             guard let amount = ReceiptAmount.lastLabelledAmount(in: line.text) else { continue }
+            if lowered.contains("rounding"), abs(amount) > maxRoundingAdjustmentCents { continue }
             sum += amount
             found = true
         }
         return found ? sum : nil
     }
+
+    /// What a cash-rounding line can possibly be worth (2026-09-01).
+    ///
+    /// Canada withdrew the penny, so a cash total is rounded to the
+    /// nearest nickel and the adjustment is at most two cents in either
+    /// direction; four is generous room for an OCR digit that came back
+    /// slightly wrong and still a real rounding line.
+    ///
+    /// The guard exists because the fee heuristic read `Rounding 40.02` off
+    /// a Five Guys slip whose whole bill was $12.55 and offered $40.02 of
+    /// "other fees" - the printed text is `$0.02` mangled by OCR into a
+    /// leading 4, and no arithmetic check catches it because other fees is
+    /// a residual field nothing else corroborates. Every other label here
+    /// names a charge that can legitimately be any size; this one cannot,
+    /// so it is the one that gets a bound.
+    private static let maxRoundingAdjustmentCents = 4
 
     // MARK: - Payment method (2026-09-01)
 
@@ -434,26 +451,65 @@ enum ReceiptParser {
     /// card type prints once near the transaction record and again in the
     /// EMV block below it, and they always agree.
     private static func paymentMethod(in lines: [RecognizedLine]) -> String? {
-        // Longest first, so "MASTER CARD" is not read as two words and
-        // "AMERICAN EXPRESS" is not missed for "AMEX".
-        let labels: [(pattern: String, canonical: String)] = [
-            ("american express", "AMEX"),
-            ("master card", "MASTERCARD"),
-            ("mastercard", "MASTERCARD"),
-            ("apple pay", "APPLE PAY"),
-            ("interac", "INTERAC"),
-            ("visa", "VISA"),
-            ("amex", "AMEX"),
-            ("debit", "DEBIT"),
-            ("cash", "CASH"),
-        ]
         for line in lines {
             let lowered = line.text.lowercased()
-            for label in labels where containsPhrase(label.pattern, in: lowered) {
+            // A line that names two or more different methods is a MENU of
+            // what the till accepts, not a record of what was used
+            // (2026-09-01) - UNIQLO prints `Credit / Debit Card /
+            // Contactless $124.00` under a "Payment Method" heading, and
+            // reading "DEBIT" off it claims a fact about the transaction
+            // that the paper does not state. Skip the line and keep
+            // looking; a slip that also prints the real card type prints
+            // it on a line of its own.
+            if namedPaymentMethods(in: lowered).count >= 2 { continue }
+            for label in paymentMethodLabels where containsPhrase(label.pattern, in: lowered) {
                 return label.canonical
             }
         }
         return nil
+    }
+
+    /// Longest first, so "MASTER CARD" is not read as two words and
+    /// "AMERICAN EXPRESS" is not missed for "AMEX".
+    private static let paymentMethodLabels: [(pattern: String, canonical: String)] = [
+        ("american express", "AMEX"),
+        ("master card", "MASTERCARD"),
+        ("mastercard", "MASTERCARD"),
+        ("apple pay", "APPLE PAY"),
+        ("interac", "INTERAC"),
+        ("visa", "VISA"),
+        ("amex", "AMEX"),
+        ("debit", "DEBIT"),
+        ("cash", "CASH"),
+    ]
+
+    /// Every method name the menu guard counts - the labels above plus two
+    /// this parser will never SUGGEST but which are unmistakably method
+    /// names when a line is listing them.
+    ///
+    /// `credit` is deliberately absent from `paymentMethodLabels` and
+    /// present here: a Food Basics slip prints `CREDIT CR 24.18` two lines
+    /// above `Account: MASTERCARD`, so returning "CREDIT" there would lose
+    /// the card brand the person actually used - but on `Credit / Debit
+    /// Card / Contactless` it is exactly the second name that proves the
+    /// line is a menu. `contactless` is the same kind of word.
+    private static let paymentMethodMenuNames: [(pattern: String, family: String)] = [
+        ("american express", "AMEX"),
+        ("master card", "MASTERCARD"),
+        ("mastercard", "MASTERCARD"),
+        ("apple pay", "APPLE PAY"),
+        ("interac", "INTERAC"),
+        ("visa", "VISA"),
+        ("amex", "AMEX"),
+        ("debit", "DEBIT"),
+        ("cash", "CASH"),
+        ("credit", "CREDIT"),
+        ("contactless", "CONTACTLESS"),
+    ]
+
+    /// The distinct method families one already-lowercased line names.
+    private static func namedPaymentMethods(in lowered: String) -> Set<String> {
+        Set(paymentMethodMenuNames.filter { containsPhrase($0.pattern, in: lowered) }.map(\.family))
     }
 
     // MARK: - Vendor

@@ -64,6 +64,7 @@ final class FileOutboxStoreTests: XCTestCase {
             progress: progress,
             ocrAttempts: 0,
             confirmation: nil,
+            partial: nil,
             blockedMessage: nil
         )
     }
@@ -94,6 +95,7 @@ final class FileOutboxStoreTests: XCTestCase {
                 paymentMethod: nil,
                 notes: nil
             ),
+            partial: nil,
             blockedMessage: "a reason"
         )
         try await store.add(captured, imageData: Data("first image".utf8))
@@ -104,6 +106,42 @@ final class FileOutboxStoreTests: XCTestCase {
         XCTAssertEqual(loaded.unreadableCount, 0)
         let image = try await store.imageData(itemId: captured.id)
         XCTAssertEqual(image, Data("first image".utf8))
+    }
+
+    /// The other half of the 2026-09-01 addition: a half-filled form
+    /// queued by "Later" has to survive the disk, or the app being killed
+    /// before the drain runs costs exactly the typing this feature exists
+    /// to keep.
+    func testAPartiallyFilledItemRoundTripsThroughTheStore() async throws {
+        let partial = PendingReceiptFields(
+            reviewedFields: [.vendor, .totalCents],
+            purchasedAt: "2026-08-20",
+            vendor: "Maple Foods",
+            subtotalCents: nil,
+            hstCents: nil,
+            tipCents: nil,
+            otherFeesCents: nil,
+            totalCents: 11300,
+            category: nil,
+            paymentMethod: nil,
+            notes: nil
+        )
+        let item = OutboxItem(
+            id: UUID(),
+            userId: UUID(),
+            sequence: 3,
+            capturedAt: Date(timeIntervalSince1970: 1_775_000_000),
+            sha256: "abc123",
+            progress: .captured,
+            ocrAttempts: 0,
+            confirmation: nil,
+            partial: partial,
+            blockedMessage: nil
+        )
+        try await store.add(item, imageData: Data("half filled".utf8))
+
+        let loaded = try await store.loadAll()
+        XCTAssertEqual(loaded.items.first?.partial, partial)
     }
 
     /// The upgrade path, on the one piece of state that survives an app
@@ -187,6 +225,13 @@ final class FileOutboxStoreTests: XCTestCase {
         // now proven for an added field too.
         XCTAssertNil(confirmation.tipCents)
         XCTAssertNil(confirmation.otherFeesCents)
+        // And again for the two keys added 2026-09-01, on the same
+        // guarantee: neither `partial` (the capture screen's "Later"
+        // carrying what was typed) nor `reviewedFields` existed when this
+        // item was written, and an item that decoded as unreadable because
+        // of them would be a receipt lost to an app update.
+        XCTAssertNil(item.partial)
+        XCTAssertNil(confirmation.reviewedFields)
         guard case .uploaded(let parsed, let objectKey) = item.progress else {
             return XCTFail("Expected .uploaded, got \(item.progress)")
         }

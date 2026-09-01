@@ -179,6 +179,24 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             case .paymentMethod: return .paymentMethod
             }
         }
+
+        /// The server's `reviewedFields` name for this field
+        /// (ReviewedField.swift, 2026-09-01) - the iOS half of the web
+        /// form's `REVIEWED_FIELD_BY_DRAFT_KEY`, total in both directions
+        /// so no screen has to spell `hstCents` for a box labelled HST.
+        var reviewedField: ReviewedField {
+            switch self {
+            case .total: return .totalCents
+            case .date: return .purchasedAt
+            case .vendor: return .vendor
+            case .hst: return .hstCents
+            case .subtotal: return .subtotalCents
+            case .tip: return .tipCents
+            case .otherFees: return .otherFeesCents
+            case .category: return .category
+            case .paymentMethod: return .paymentMethod
+            }
+        }
     }
 
     /// Every field on the form that raises a keyboard, which the view's
@@ -238,6 +256,48 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             case .category: return .category
             case .paymentMethod: return .paymentMethod
             case .notes: return .notes
+            }
+        }
+
+        /// The server's `reviewedFields` name for this field
+        /// (2026-09-01). Every keyboard field has one, `notes` included -
+        /// which is exactly why this exists alongside
+        /// `SuggestedField.reviewedField`: `notes` carries no suggestion
+        /// and so has no SuggestedField case, but a person who typed a
+        /// note has unquestionably reviewed that field and a save-for-
+        /// later that dropped it would throw the note away.
+        var reviewedField: ReviewedField {
+            switch self {
+            case .total: return .totalCents
+            case .vendor: return .vendor
+            case .hst: return .hstCents
+            case .subtotal: return .subtotalCents
+            case .tip: return .tipCents
+            case .otherFees: return .otherFeesCents
+            case .category: return .category
+            case .paymentMethod: return .paymentMethod
+            case .notes: return .notes
+            }
+        }
+    }
+
+    /// The four boxes that ADD UP to the total, as opposed to the total
+    /// itself - the verbatim mirror of the web form's
+    /// `ComponentAmountField` (ReceiptForm.tsx, 2026-09-01). Named because
+    /// the total-tracking rule treats them as one group and the total as
+    /// the thing they move.
+    enum ComponentAmountField: CaseIterable, Equatable {
+        case subtotal, hst, tip, otherFees
+
+        /// Which SuggestedField this box carries, so the tracking rule and
+        /// the chip share the bookkeeping every other suggestion source
+        /// on this screen already uses.
+        var suggestedField: SuggestedField {
+            switch self {
+            case .subtotal: return .subtotal
+            case .hst: return .hst
+            case .tip: return .tip
+            case .otherFees: return .otherFees
             }
         }
     }
@@ -419,6 +479,15 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// before it exists is to not save it.
     private let deleteAction: (() async throws -> Void)?
 
+    /// Writing the half-filled form without confirming it (2026-09-01).
+    /// Injected exactly the way `saveAction` and `deleteAction` are, so
+    /// this model still holds no `KeptAPI` of its own and stays testable
+    /// with no server (spec §10.2). Nil for a capture-time confirm: there
+    /// is no server row to write half of, and that screen's "Later"
+    /// already queues the scan pending with whatever was typed
+    /// (`pendingReceiptFields()` below).
+    private let saveForLaterAction: ((SaveForLaterRequest) async throws -> Void)?
+
     // MARK: - Possible duplicates (proposal #8, 2026-08-28)
 
     /// GET /api/receipts/possible-duplicates's matches for whatever the
@@ -467,6 +536,12 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             suggestions: purpose == .edit
                 ? nil
                 : receipt.suggestions.map(ConfirmSuggestionSet.init(merged:)),
+            // What a human already looked at on an earlier sitting
+            // (2026-09-01, server migration 0009). The server already
+            // withholds a reviewed field's suggestion; carrying the set
+            // here is what makes the prefill, the notes and the save agree
+            // with it on this side too.
+            reviewedFields: ReviewedField.set(fromWire: receipt.reviewedFields),
             existing: ExistingValues(
                 purchasedAt: receipt.purchasedAt,
                 vendor: receipt.vendor,
@@ -496,6 +571,14 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
                     excludeId: id
                 )) ?? []
             },
+            // "Save for later" (2026-09-01): the same PATCH route with no
+            // `status`, carrying only what a human has looked at. Only a
+            // server-backed form gets it - a capture-time confirm has no
+            // row to write half of, and its own "Later" already queues the
+            // scan pending.
+            saveForLaterAction: { request in
+                _ = try await api.saveReceiptForLater(id: id, request)
+            },
             // The same route ReceiptDetailModel.delete(id:) calls, so
             // "delete" means one thing in this app: a soft delete, the row
             // and its image kept for retention (spec §10B). Only the
@@ -523,6 +606,9 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             imageSource: .local(draft.imageData),
             ocrFailureNote: draft.ocrFailureNote,
             suggestions: ConfirmSuggestionSet(parse: draft.suggestions),
+            // Nothing has been reviewed yet and there is no row to have
+            // recorded it on - this receipt does not exist server-side.
+            reviewedFields: [],
             existing: ExistingValues(
                 purchasedAt: ReceiptFormat.calendarDate(of: draft.capturedAt)
             ),
@@ -566,6 +652,19 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// suggestion covers. Exactly the suggested fields start unreviewed;
     /// the date always does (always prefilled - parsed, or the capture-day
     /// fallback, which is additionally called out).
+    ///
+    /// ⚠ **2026-09-01, `reviewedFields`:** a field the receipt already
+    /// records as REVIEWED is the human's, and the row wins outright for
+    /// it - a "save for later" wrote those values, and re-offering the
+    /// parser's guess over a value someone typed last Tuesday is exactly
+    /// the defect the reviewed set exists to prevent. Belt and braces: the
+    /// server also stops serving `suggestions.<field>` for every reviewed
+    /// field, so this normally re-states an absence rather than overriding
+    /// a present suggestion. It is written anyway because the two rules
+    /// must agree even if one end changes - and because a client that
+    /// relies on the server having remembered is a client that shows the
+    /// wrong value the day it has not. Verbatim the web form's
+    /// `draftFromPending` rule.
     private init(
         receiptId: UUID?,
         currency: String,
@@ -573,9 +672,11 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         imageSource: ReceiptImageSource?,
         ocrFailureNote: String?,
         suggestions: ConfirmSuggestionSet?,
+        reviewedFields: Set<ReviewedField>,
         existing: ExistingValues,
         saveAction: @escaping (ConfirmedReceiptFields) async throws -> Void,
         duplicateCheckAction: ((_ purchasedAt: String, _ totalCents: Int, _ vendor: String?) async -> [Receipt])?,
+        saveForLaterAction: ((SaveForLaterRequest) async throws -> Void)? = nil,
         deleteAction: (() async throws -> Void)? = nil
     ) {
         self.receiptId = receiptId
@@ -585,35 +686,54 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         self.ocrFailureNote = ocrFailureNote
         self.saveAction = saveAction
         self.duplicateCheckAction = duplicateCheckAction
+        self.saveForLaterAction = saveForLaterAction
         self.deleteAction = deleteAction
+        self.storedReviewedFields = reviewedFields
 
-        // Each "seed" is exactly what prefills the field (suggestion over
-        // the row's own copy) - captured here, once, so it can also seed
-        // the suggestion-outcome snapshot below without recomputing the
-        // same expression twice and risking the two drifting apart.
-        let seedTotalCents = suggestions?.totalCents ?? existing.totalCents
+        /// A suggestion outranks the row's copy (§7.3) EXCEPT on a field
+        /// the receipt records as reviewed, where the row is a human's own
+        /// value and nothing may sit over it. A local function rather than
+        /// eight copies of the same ternary; it captures the parameter,
+        /// never `self`, which is not yet initialized here.
+        func seed<Value>(_ field: ReviewedField, suggested: Value?, row: Value?) -> Value? {
+            reviewedFields.contains(field) ? row : (suggested ?? row)
+        }
+
+        // Each "seed" is exactly what prefills the field - captured here,
+        // once, so it can also seed the suggestion-outcome snapshot below
+        // without recomputing the same expression twice and risking the
+        // two drifting apart.
+        let seedTotalCents = seed(.totalCents, suggested: suggestions?.totalCents, row: existing.totalCents)
         totalText = seedTotalCents.map(MoneyInput.text(fromCents:)) ?? ""
         // Parsed date, or the existing one (the row's, or the capture
         // day) - both through the same UTC-pinned round trip the picker
         // renders in.
-        let seedPurchasedAtIso = suggestions?.purchasedAt ?? existing.purchasedAt
+        let seedPurchasedAtIso = seed(
+            .purchasedAt, suggested: suggestions?.purchasedAt, row: existing.purchasedAt
+        ) ?? existing.purchasedAt
         purchasedDate = ReceiptFormat.pickerDate(fromIso: seedPurchasedAtIso) ?? Date()
-        let seedVendor = suggestions?.vendor ?? existing.vendor
+        let seedVendor = seed(.vendor, suggested: suggestions?.vendor, row: existing.vendor)
         vendorText = seedVendor ?? ""
-        let seedHstCents = suggestions?.hstCents ?? existing.hstCents
+        let seedHstCents = seed(.hstCents, suggested: suggestions?.hstCents, row: existing.hstCents)
         hstText = seedHstCents.map(MoneyInput.text(fromCents:)) ?? ""
-        let seedSubtotalCents = suggestions?.subtotalCents ?? existing.subtotalCents
+        let seedSubtotalCents = seed(
+            .subtotalCents, suggested: suggestions?.subtotalCents, row: existing.subtotalCents
+        )
         subtotalText = seedSubtotalCents.map(MoneyInput.text(fromCents:)) ?? ""
-        let seedTipCents = suggestions?.tipCents ?? existing.tipCents
+        let seedTipCents = seed(.tipCents, suggested: suggestions?.tipCents, row: existing.tipCents)
         tipText = seedTipCents.map(MoneyInput.text(fromCents:)) ?? ""
         // Other fees and payment method gained suggestion sources
         // 2026-09-01 (ReceiptSuggestions' own comments carry the evidence
         // that reversed the "no suggestion, deliberately" ruling); like
         // every other field here, a suggestion outranks the row's copy.
-        let seedOtherFeesCents = suggestions?.otherFeesCents ?? existing.otherFeesCents
+        let seedOtherFeesCents = seed(
+            .otherFeesCents, suggested: suggestions?.otherFeesCents, row: existing.otherFeesCents
+        )
         otherFeesText = seedOtherFeesCents.map(MoneyInput.text(fromCents:)) ?? ""
         categoryText = existing.category ?? ""
-        let seedPaymentMethod = suggestions?.paymentMethod ?? existing.paymentMethod
+        let seedPaymentMethod = seed(
+            .paymentMethod, suggested: suggestions?.paymentMethod, row: existing.paymentMethod
+        )
         paymentMethodText = seedPaymentMethod ?? ""
         notesText = existing.notes ?? ""
 
@@ -647,7 +767,10 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
                 if suggestions.tipCents != nil { unreviewed.insert(.tip) }
                 if suggestions.otherFeesCents != nil { unreviewed.insert(.otherFees) }
                 if suggestions.paymentMethod != nil { unreviewed.insert(.paymentMethod) }
-                dateIsCaptureDayFallback = suggestions.purchasedAt == nil
+                // A reviewed date came off the row, not off the paper, so
+                // no fabrication claim is made about it either.
+                dateIsCaptureDayFallback =
+                    suggestions.purchasedAt == nil && !reviewedFields.contains(.purchasedAt)
                 dateDisagreement = suggestions.dateDisagreement
                 hstDisagreement = suggestions.hstDisagreement
             } else {
@@ -663,6 +786,17 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
                 dateDisagreement = false
                 hstDisagreement = false
             }
+            // A reviewed field is never an unreviewed suggestion: a human
+            // looked at it and wrote what it says. The display half of the
+            // same rule `seed` above enforces on the value half, and
+            // likewise belt-and-braces - the server stops SERVING a
+            // suggestion for a reviewed field, so this usually removes
+            // nothing. Verbatim the web form's `suggestedFields` loop.
+            for reviewed in reviewedFields {
+                if let suggested = reviewed.suggestedField {
+                    unreviewed.remove(suggested)
+                }
+            }
             unreviewedFields = unreviewed
             suggestedFields = unreviewed
         }
@@ -676,8 +810,37 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// go quiet once a human has looked - the row tint it also used to
     /// drive was removed 2026-09-01.
     func markTouched(_ field: SuggestedField) {
-        unreviewedFields.remove(field)
+        clearSuggestionMarking(field)
         touchedFields.insert(field)
+        sessionReviewedFields.insert(field.reviewedField)
+    }
+
+    /// The same call for a field the keyboard can reach, whether or not it
+    /// carries a suggestion (2026-09-01). `notes` is the only field with
+    /// no SuggestedField at all, and it still has to reach
+    /// `sessionReviewedFields` - a person who typed a note has reviewed
+    /// that field, and a save-for-later that dropped it would throw the
+    /// note away. The view calls this from its focus handler so there is
+    /// one call site rather than a suggestion path and a notes path that
+    /// could drift.
+    func markTouched(editable field: EditableField) {
+        if let suggestion = field.suggestion {
+            markTouched(suggestion)
+        } else {
+            sessionReviewedFields.insert(field.reviewedField)
+        }
+    }
+
+    /// A field stops being marked as an unreviewed suggestion WITHOUT
+    /// anybody having looked at it - the one case being the total when
+    /// the tracking rule below recomputes it. Mirrors the web form's
+    /// `markTouched("total")` inside `editComponentAmount`, whose own
+    /// comment states the distinction: the number in that box is no
+    /// longer the parser's suggestion, so the notes let it go, but nobody
+    /// LOOKED at it - it just followed - so it stays out of
+    /// `touchedFields` and out of the reviewed set the save reports.
+    private func clearSuggestionMarking(_ field: SuggestedField) {
+        unreviewedFields.remove(field)
     }
 
     /// Which fields a human has actually put a finger on this session.
@@ -687,6 +850,32 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// `applyServerSuggestions(_:)` (2026-09-01) is the first caller that
     /// has to tell those two apart before it writes anything.
     private var touchedFields: Set<SuggestedField> = []
+
+    /// Which fields this SESSION has put a finger on, in the server's own
+    /// `reviewedFields` vocabulary (2026-09-01). Distinct from
+    /// `touchedFields` in exactly two ways, both deliberate: it also holds
+    /// `notes`, which carries no SuggestedField, and it is the half that
+    /// gets SENT.
+    private var sessionReviewedFields: Set<ReviewedField> = []
+
+    /// What the receipt already recorded as reviewed before this form
+    /// opened - the server's stored set, decoded from the response
+    /// (`Receipt.reviewedFields`). Empty for a capture-time confirm, which
+    /// has no server row yet, and for a response from before migration
+    /// 0009.
+    private let storedReviewedFields: Set<ReviewedField>
+
+    /// What a save reports as reviewed: the receipt's stored set unioned
+    /// with everything this session touched. The verbatim mirror of the
+    /// web form's `reviewedFieldsForSave`, including its reasoning for
+    /// being a UNION even though the PATCH replaces the stored set
+    /// outright - the person who opened this receipt today did not
+    /// un-review what they looked at last week, and a client that sent
+    /// only today's touches would silently un-review the rest and hand the
+    /// parser back a field it had already lost.
+    var reviewedFieldsForSave: [ReviewedField] {
+        ReviewedField.ordered(storedReviewedFields.union(sessionReviewedFields))
+    }
 
     func isUnreviewed(_ field: SuggestedField) -> Bool {
         unreviewedFields.contains(field)
@@ -727,33 +916,59 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         }
     }
 
+    /// Whether `field` still holds exactly the value a machine last put
+    /// in it - "nobody has changed this", which since 2026-09-01 is what
+    /// every inline note on this screen reads instead of "nobody has
+    /// focused this".
+    ///
+    /// **Why the rule changed** (the owner's diagnosis, 2026-09-01): the
+    /// notes cleared on `markTouched`, and the view calls that from the
+    /// focus handler - so the HST rate hint disappeared the moment you
+    /// tapped into HST to fix it, taking the number you were about to
+    /// check against with it. A note that vanishes at the instant it
+    /// becomes actionable is worse than no note. Focus is not a decision;
+    /// changing the value is. `markTouched` keeps its own meaning
+    /// untouched for telemetry and for `reviewedFields` - the two rules
+    /// were only ever conflated because one flag happened to serve both.
+    ///
+    /// Reuses `isSuggestionAccepted`, which is already exactly this
+    /// question - the save-time accept/override report asks "does the
+    /// field still hold what it was last suggested to be", and so does
+    /// this. One implementation, so a note and the telemetry beside it can
+    /// never disagree about whether the person changed something.
+    private func stillHoldsSuggestedValue(_ field: SuggestedField) -> Bool {
+        isSuggestionAccepted(field)
+    }
+
     /// The date-disagreement note (spec §7.2, §10A.1): shown while the
-    /// date is still unreviewed, gone the moment it is touched - the
-    /// note goes when the field is touched, because touched means a human
-    /// looked and decided. No separate dismissal, nothing persisted.
+    /// date still says what the parsers put there, gone once the value
+    /// changes. No separate dismissal, nothing persisted.
     var showsDateDisagreementNote: Bool {
-        dateDisagreement && isUnreviewed(.date)
+        dateDisagreement && stillHoldsSuggestedValue(.date)
     }
 
     /// The HST-disagreement note (§7.3, 2026-08-28): same rule as the
-    /// date's - shown while HST is still unreviewed, gone the moment it is
-    /// touched, no separate dismissal.
+    /// date's - shown while the HST box still holds the suggested amount,
+    /// gone once the value changes, no separate dismissal.
     var showsHstDisagreementNote: Bool {
-        hstDisagreement && isUnreviewed(.hst)
+        hstDisagreement && stillHoldsSuggestedValue(.hst)
     }
 
     /// The HST rate-plausibility hint (proposal #7, 2026-08-28) - the live
     /// mirror of the server's `checkHstRatePlausibility`
     /// (ReceiptArithmetic.swift carries the full reasoning for the ±0.25pp
-    /// band and why it must never widen). Tied to the SAME touched
-    /// lifecycle `showsHstDisagreementNote` above already uses: shown
-    /// while HST is still unreviewed, gone the moment it is touched - a
-    /// person who has just looked at the field has had their look. `centsOrNil` reads `.invalid` text
-    /// as absent, the same suppression `showsArithmeticWarning` already
-    /// applies to garbage input, so this never fires over unparseable
-    /// text.
+    /// band and why it must never widen). Tied to the SAME lifecycle
+    /// `showsHstDisagreementNote` above uses, and changed with it on
+    /// 2026-09-01: shown while the HST box still holds the amount a
+    /// machine put there, gone once the value changes. This is the note
+    /// the owner's diagnosis named - it is a hint about a number you are
+    /// being asked to check, and clearing it on focus deleted it at the
+    /// exact moment you tapped in to act on it. `centsOrNil` reads
+    /// `.invalid` text as absent, the same suppression
+    /// `showsArithmeticWarning` already applies to garbage input, so this
+    /// never fires over unparseable text.
     var showsHstRateHint: Bool {
-        isUnreviewed(.hst)
+        stillHoldsSuggestedValue(.hst)
             && ReceiptArithmetic.checkHstRatePlausibility(
                 subtotalCents: centsOrNil(subtotalInput),
                 hstCents: centsOrNil(hstInput)
@@ -913,6 +1128,299 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         }
     }
 
+    /// The sharper half of the same inequality (2026-09-01): the total is
+    /// LESS than the parts it is made of. The live mirror of the server's
+    /// `checkAmountFloor` - ReceiptArithmetic.swift carries the reasoning
+    /// for why this is a different fact from "these don't add up" and
+    /// worth saying differently. Suppressed over unparseable text by the
+    /// same rule everything else here is (`moneyFieldValues`).
+    var showsAmountFloorNote: Bool {
+        guard let fields = moneyFieldValues else { return false }
+        return ReceiptArithmetic.checkAmountFloor(
+            subtotalCents: fields.subtotal,
+            hstCents: fields.hst,
+            tipCents: fields.tip,
+            otherFeesCents: fields.otherFees,
+            totalCents: fields.total
+        ) == .totalBelowComponents
+    }
+
+    /// The ONE note the total card shows about the amounts, or nil.
+    ///
+    /// The floor note is rendered INSTEAD of the generic one rather than
+    /// beside it (2026-09-01, verbatim the web form's own precedence):
+    /// "the total is less than its parts" is a strict subset of "these do
+    /// not add up" and strictly more specific, and two warnings about one
+    /// arithmetic fact is how a form teaches people to stop reading its
+    /// warnings. The two underlying facts stay separately readable
+    /// (`showsAmountFloorNote`, `showsArithmeticWarning`); this is only
+    /// which of them gets the line.
+    ///
+    /// Both are prompts to look, never blocks - plenty of legitimate
+    /// receipts do not reconcile (spec §7.2, §10A.1), and one of them is
+    /// in production right now: a store-credit slip whose subtotal 104.93
+    /// + HST 13.65 sit against a total of 28.21, correct and permanent.
+    var amountsWarning: String? {
+        if showsAmountFloorNote {
+            return "Total is less than subtotal + HST + tip + fees. One of these numbers is wrong."
+        }
+        if showsArithmeticWarning {
+            return "These amounts don't add up to the total. Worth a look."
+        }
+        return nil
+    }
+
+    // MARK: - Total tracks its components (2026-09-01)
+
+    /// `subtotal + HST + tip + other fees` over the form as it stands, or
+    /// nil when there is no honest sum to state: a blank subtotal (nothing
+    /// to add to - the same "nothing to reconcile against" rule
+    /// `showsArithmeticWarning` follows) or any mid-keystroke unparseable
+    /// box, the total's included. Verbatim the web form's `componentSum`.
+    private var componentSum: Int? {
+        guard let fields = moneyFieldValues, let subtotal = fields.subtotal else { return nil }
+        return subtotal + (fields.hst ?? 0) + (fields.tip ?? 0) + (fields.otherFees ?? 0)
+    }
+
+    /// **Total tracks its components while consistent**, the live rule
+    /// that turns four boxes into one running bill (the owner, 2026-09-01:
+    /// "total should update when I change subtotal/HST/tip/other fees, but
+    /// I must still be able to edit total directly without it altering the
+    /// other fields"). The line-for-line mirror of the web form's
+    /// `applyComponentEdit` (ReceiptForm.tsx) - same oldSum/newSum
+    /// comparison, same "a blank total tracks too", same storable-range
+    /// refusal.
+    ///
+    /// Editing subtotal, HST, tip or other fees recomputes the total - but
+    /// ONLY when the total is blank or still equals what the components
+    /// said BEFORE this edit. The moment the total says something the
+    /// components do not, it is the person's own number (or the parser's
+    /// read of the printed total, which is the one figure OCR gets right
+    /// most often), and no keystroke elsewhere may quietly overwrite it.
+    /// Editing the total itself never changes any other field, in either
+    /// direction: the total is the anchor, and it is bound straight to
+    /// `totalText` with no rule attached.
+    ///
+    /// The four flows this is built from, all of them off a real form:
+    ///
+    /// - **A.** OCR found the total ($14.35) and nothing else. Typing a
+    ///   subtotal of $12.70 leaves the total alone - it came off the paper
+    ///   - and the HST chip below then offers the $1.65 difference.
+    /// - **B.** A blank form (a photograph the parsers got nothing from).
+    ///   Typing subtotal $12.70 makes the total $12.70; typing HST $1.65
+    ///   makes it $14.35. The total is never typed at all.
+    /// - **C.** $12.70 / $1.65 / $14.35, all consistent, and the HST is
+    ///   corrected to $1.60. The total follows to $14.30, because leaving
+    ///   $14.35 would create a mismatch the person did not ask for and
+    ///   would then have to fix by hand.
+    /// - **D.** The total is typed as $20.00 directly. Nothing else moves,
+    ///   and a later subtotal edit does not overwrite it - $20.00 is not
+    ///   what the components said, so the total is the person's.
+    ///
+    /// The view binds the four component boxes through this rather than to
+    /// their text properties, so typing and an amount chip take the same
+    /// path and cannot drift.
+    func editComponentAmount(_ field: ComponentAmountField, to text: String) {
+        let totalBeforeEdit = totalInput
+        let oldSum = componentSum ?? lastTrackedComponentSum
+        setComponentText(field, to: text)
+        guard let newSum = componentSum else {
+            // Nothing to track to - a blank subtotal, or a box
+            // mid-keystroke.
+            return
+        }
+        defer { lastTrackedComponentSum = newSum }
+        let tracks: Bool
+        switch totalBeforeEdit {
+        case .empty: tracks = true
+        case .invalid: tracks = false
+        case .cents(let total): tracks = oldSum != nil && total == oldSum
+        }
+        guard tracks, ReceiptArithmetic.isStorable(cents: newSum) else {
+            // Out of the storable range is the same refusal every other
+            // suggestion here makes, rather than writing a number the
+            // server would 400 on.
+            return
+        }
+        let tracked = MoneyInput.text(fromCents: newSum)
+        guard tracked != totalText else { return }
+        totalText = tracked
+        // The number in that box is no longer the parser's suggestion, so
+        // the notes let it go - but nobody looked at it, it just followed,
+        // so it stays out of the reviewed set the save reports.
+        clearSuggestionMarking(.total)
+    }
+
+    /// The last sum the four component boxes actually produced.
+    ///
+    /// ⚠ **Why the rule needs a memory at all** (2026-09-01, found by
+    /// running the form rather than by reading it - KeptUITests'
+    /// `ConfirmAmountsUITests`). Typing an amount passes through a state
+    /// no money parser accepts: "12.70" is typed as `1`, `12`, `12.`,
+    /// `12.7`, `12.70`, and `12.` is not a number. On the keystroke after
+    /// it, `componentSum` over the PRE-edit form is nil, and comparing the
+    /// total against nil says "these have diverged" - so the rule stood
+    /// down for the rest of the amount and a blank form typed with
+    /// subtotal 12.70 ended up with a total of $12.00, the sum as it stood
+    /// two keystrokes earlier. Visibly wrong, on the commonest action this
+    /// screen has.
+    ///
+    /// So a box that is momentarily unparseable SUSPENDS the decision
+    /// instead of cancelling it: the comparison falls back to the last sum
+    /// the boxes really did make. It is consulted in exactly one window -
+    /// the pre-edit form had an unreadable box and the post-edit form does
+    /// not - because every other path either returns early (`newSum` nil)
+    /// or has a real `oldSum` to use.
+    ///
+    /// The web form has the identical hole (`parseMoneyInput` rejects
+    /// "12." the same way, so `applyComponentEdit` sees a null `oldSum`
+    /// and stops tracking mid-amount). It is flagged in this batch's
+    /// report rather than fixed here: `web/` is another session's to
+    /// change.
+    private var lastTrackedComponentSum: Int?
+
+    private func setComponentText(_ field: ComponentAmountField, to text: String) {
+        switch field {
+        case .subtotal: subtotalText = text
+        case .hst: hstText = text
+        case .tip: tipText = text
+        case .otherFees: otherFeesText = text
+        }
+    }
+
+    /// The current text of one component box - what the view's binding
+    /// reads, paired with `editComponentAmount` as its setter.
+    func componentText(_ field: ComponentAmountField) -> String {
+        switch field {
+        case .subtotal: return subtotalText
+        case .hst: return hstText
+        case .tip: return tipText
+        case .otherFees: return otherFeesText
+        }
+    }
+
+    // MARK: - The HST chip (2026-09-01)
+
+    /// The one currency Ontario's 13% can be a fact about, mirrored from
+    /// the web form's `HST_RATE_CURRENCY`. `currency` is the server's
+    /// three-letter code, validated `/^[A-Z]{3}$/` on every write and
+    /// defaulted to CAD on the column itself, so this compares exactly
+    /// rather than case-folding: there is no lowercase "cad" to miss.
+    static let hstRateCurrency = "CAD"
+
+    /// A one-tap HST offer with its arithmetic stated. Two kinds, never
+    /// both at once - see `hstSuggestionChip`.
+    struct AmountChip: Equatable {
+        enum Kind: Equatable {
+            /// The difference the receipt's own numbers determine.
+            case fromTotal
+            /// The default rate applied to the subtotal - a guess about
+            /// the world rather than about this receipt.
+            case atDefaultRate
+        }
+
+        let kind: Kind
+        let cents: Int
+    }
+
+    /// The HST offer, when HST is blank and a subtotal is present - the
+    /// shape every receipt whose tax line the parsers missed arrives in.
+    /// Verbatim the web form's `hstSuggestionChip`.
+    ///
+    /// Two offers, never both, because they answer the same question from
+    /// different evidence and showing a pair would make the person
+    /// adjudicate between two numbers this form invented:
+    ///
+    /// - The receipt states a total: the difference is the tax, and that
+    ///   difference is a fact about the numbers on screen (`.fromTotal` -
+    ///   this is the widened `deriveMissingAmount` restated for one
+    ///   field). Offered only when it is POSITIVE: a zero or negative
+    ///   difference is evidence one of the other boxes is wrong, not an
+    ///   HST amount anyone could act on.
+    /// - Otherwise the default rate (`.atDefaultRate`), which says so in
+    ///   its own label - and which is therefore the only one of the two a
+    ///   `currency` can disqualify.
+    ///
+    /// ⚠ **Currency gates the default-rate offer only.** Ontario's 13% is
+    /// a fact about a Canadian sale; on a US receipt it is not a weaker
+    /// guess, it is about a different country's tax system, and a chip
+    /// reading "HST at 13% of subtotal" beside a USD total is simply wrong
+    /// - the one thing a suggestion on this form may never be. The
+    /// `.fromTotal` branch stays currency-agnostic and deliberately: it
+    /// applies no rate and assumes no jurisdiction, it subtracts the
+    /// numbers already on screen from each other and says so in its
+    /// formula.
+    ///
+    /// Never auto-applied.
+    var hstSuggestionChip: AmountChip? {
+        guard let fields = moneyFieldValues else { return nil }
+        guard fields.hst == nil, let subtotal = fields.subtotal else { return nil }
+        if let total = fields.total {
+            let remainder = total - subtotal - (fields.tip ?? 0) - (fields.otherFees ?? 0)
+            if remainder > 0, ReceiptArithmetic.isStorable(cents: remainder) {
+                return AmountChip(kind: .fromTotal, cents: remainder)
+            }
+        }
+        guard currency == Self.hstRateCurrency else {
+            // A non-CAD receipt gets the arithmetic offer above if it
+            // qualifies and nothing at all otherwise - never a rate from
+            // another country's tax system. Checked here rather than
+            // inside `suggestDefaultRateHst`, which mirrors a server
+            // function that takes a rate in basis points and has no
+            // business knowing about currencies.
+            return nil
+        }
+        guard let suggested = ReceiptArithmetic.suggestDefaultRateHst(subtotalCents: subtotal) else {
+            return nil
+        }
+        return AmountChip(kind: .atDefaultRate, cents: suggested.hstCents)
+    }
+
+    /// The chip's own words - named, not bare, the same rule
+    /// `derivableFillLabel` follows and for the same stated reason: a
+    /// person must be able to read what a tap will do before they make it.
+    var hstSuggestionChipLabel: String? {
+        guard let chip = hstSuggestionChip else { return nil }
+        let amount = ReceiptFormat.money(cents: chip.cents, currency: currency)
+        switch chip.kind {
+        case .fromTotal:
+            return "HST = Total − Subtotal − Tip − Other fees (\(amount))"
+        case .atDefaultRate:
+            let rate = ReceiptArithmetic.defaultHstRateBps / 100
+            return "HST at \(rate)% of subtotal (\(amount))"
+        }
+    }
+
+    /// Applies the chip, which differs from `applyDerivedFill()` above in
+    /// two deliberate ways, both of them the web form's
+    /// (`applyAmountChip`).
+    ///
+    /// It marks HST TOUCHED. A fill offers the one value the other four
+    /// boxes determine, and proposal #1's own risk mitigation is that it
+    /// lands unreviewed and stays unreviewed until a person looks at it. A
+    /// chip states a rule and its result - "HST at 13% of subtotal =
+    /// $1.65" - and the person picked it over typing anything else; that
+    /// choice is the looking, and it belongs in the reviewed set the save
+    /// reports.
+    ///
+    /// And it routes through `editComponentAmount`, so applying it moves
+    /// the total exactly the way typing the number would - which is what
+    /// "add 13% to this" means, and why the default-rate offer is safe to
+    /// make on a receipt whose total is already consistent with its
+    /// subtotal.
+    @discardableResult
+    func applyHstSuggestionChip() -> Bool {
+        guard let chip = hstSuggestionChip else { return false }
+        editComponentAmount(.hst, to: MoneyInput.text(fromCents: chip.cents))
+        // The same save-time accept/override enrolment every other
+        // machine-suggested amount gets, so tapping this is reported at
+        // save exactly like accepting a prefill.
+        initialSuggestedHstCents = chip.cents
+        suggestedFields.insert(.hst)
+        markTouched(.hst)
+        return true
+    }
+
     // MARK: - Derived amounts (proposal #1, 2026-08-28)
     //
     // The confirm screen's own mirror of the server's `deriveMissingAmount`
@@ -971,8 +1479,19 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// `ReceiptArithmetic`'s own five fields the way a hand-maintained
     /// switch elsewhere in this screen already warns against (SuggestedField's
     /// own history).
+    ///
+    /// Nil for HST while `hstSuggestionChip` has something to say
+    /// (2026-09-01): the two answer the same question - what goes in the
+    /// blank HST box - and the chip is the better-worded of the pair,
+    /// because it names the default-rate case the fill cannot reach at
+    /// all. Where both apply the chip wins and the fill is suppressed for
+    /// HST alone; every other field's fill is untouched. Verbatim the web
+    /// form's `derived?.field === "hst" && hstChip === null` render gate,
+    /// and like the web this suppresses the OFFER, not the derivation -
+    /// `derivableFill` still says what the arithmetic gives.
     var derivableFillLabel: String? {
         guard let derived = derivableFill else { return nil }
+        if derived.field == .hst, hstSuggestionChip != nil { return nil }
         let amount = ReceiptFormat.money(cents: derived.cents, currency: currency)
         switch derived.field {
         case .subtotal: return "Subtotal = Total − HST − Tip − Other fees (\(amount))"
@@ -1345,6 +1864,80 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         saveBlocker == nil
     }
 
+    // MARK: - Acknowledging a large mismatch (2026-09-01)
+
+    /// A mismatch smaller than this is not worth stopping anyone over:
+    /// a merchant's own rounding line, a coupon printed without an
+    /// amount, a cent of independent rounding between the tax line and
+    /// the total.
+    private static let acknowledgementFloorCents = 100
+    /// …and above a dollar, proportion is the better measure: a $2 gap on
+    /// a $12 lunch is a different animal from a $2 gap on a $400 grocery
+    /// run.
+    private static let acknowledgementRateBps = 500
+
+    /// How far the five boxes are from balancing right now, or nil when
+    /// there is nothing to compare (no subtotal, no total, or a box
+    /// mid-keystroke - the same suppression every other check here
+    /// applies). Always non-negative: which direction the gap runs is
+    /// `showsAmountFloorNote`'s question, not this one's.
+    private var arithmeticGapCents: Int? {
+        guard let fields = moneyFieldValues,
+              let subtotal = fields.subtotal, let total = fields.total
+        else { return nil }
+        let components = subtotal + (fields.hst ?? 0) + (fields.tip ?? 0) + (fields.otherFees ?? 0)
+        return abs(total - components)
+    }
+
+    /// Whether Save should stop and ask first (2026-09-01).
+    ///
+    /// **The evidence.** The advisory warning fired on all four real data
+    /// errors in production and was ticked straight past every time - one
+    /// of them a $218.94 Costco purchase confirmed at $8.50, its subtotal
+    /// and HST both correct on the same slip. A note that is always
+    /// dismissible and never in the way is a note that stops being read;
+    /// the remedy is one extra tap on the receipts that are actually
+    /// impossible, not a louder note on all of them.
+    ///
+    /// Fires on either of the two facts worth a tap: the total is below
+    /// its own components (`checkAmountFloor` - no receipt does that), or
+    /// the gap exceeds the larger of $1.00 and 5% of the total.
+    ///
+    /// ⚠ **`.confirm` only, and `.edit` is exempt deliberately.** An
+    /// already-confirmed receipt can legitimately not reconcile and stay
+    /// that way forever: production holds a store-credit slip whose
+    /// subtotal 104.93 + HST 13.65 sit against a total of 28.21, which is
+    /// what the paper says. Making someone acknowledge that every time
+    /// they fix a typo in its category would train the acknowledgement out
+    /// of meaning anything, which is the very failure this exists to
+    /// correct.
+    ///
+    /// Never a block: the dialog's other button saves anyway. Constraint 2
+    /// cuts both ways - a person who reads the paper and types what it
+    /// says must always be able to save it.
+    var saveNeedsAcknowledgement: Bool {
+        guard purpose == .confirm else { return false }
+        if showsAmountFloorNote { return true }
+        guard let gap = arithmeticGapCents, let fields = moneyFieldValues, let total = fields.total else {
+            return false
+        }
+        // Integer arithmetic, never a float: 5% of the total in basis
+        // points, floored, against the flat dollar floor. A total large
+        // enough to overflow the multiply is one no threshold could be
+        // exceeded on, so the flat floor stands alone there.
+        let (scaled, overflowed) = abs(total).multipliedReportingOverflow(by: Self.acknowledgementRateBps)
+        let proportional = overflowed ? Int.max : scaled / 10_000
+        return gap > max(Self.acknowledgementFloorCents, proportional)
+    }
+
+    /// What the acknowledgement dialog asks, with the gap named - the same
+    /// "state the arithmetic, never just a button" rule every affordance
+    /// on this screen follows.
+    var saveAcknowledgementMessage: String? {
+        guard saveNeedsAcknowledgement, let gap = arithmeticGapCents else { return nil }
+        return "These amounts don't add up (off by \(ReceiptFormat.money(cents: gap, currency: currency))). Save anyway?"
+    }
+
     /// Whether this form can offer to bin the receipt instead of
     /// confirming it (2026-09-01).
     ///
@@ -1416,6 +2009,101 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
                 otherFeesCents: centsOrNil(otherFeesInput),
                 category: normalized(categoryText),
                 paymentMethod: normalized(paymentMethodText),
+                notes: normalized(notesText),
+                // Rides along harmlessly on a confirmation (2026-09-01): a
+                // confirmed receipt is served no suggestions at all, so
+                // nothing consumes the set. Sent anyway so the two writes
+                // this form can make differ in as little as possible -
+                // the web's `patchForConfirm` makes the same call.
+                reviewedFields: reviewedFieldsForSave
+            ))
+            hasSaved = true
+            return true
+        } catch {
+            saveError = error.localizedDescription
+            return false
+        }
+    }
+
+    // MARK: - Save for later (2026-09-01)
+
+    /// Whether this form can write what is on it without confirming it.
+    /// Server-backed `.confirm` forms only: a capture-time confirm has no
+    /// row to half-write (its "Later" queues the whole scan pending
+    /// instead, carrying `pendingReceiptFields()`), and `.edit` opens on a
+    /// receipt that is already confirmed, where "later" means nothing.
+    var canSaveForLater: Bool {
+        saveForLaterAction != nil && purpose == .confirm
+    }
+
+    /// Why a save-for-later cannot go through, or nil.
+    ///
+    /// Deliberately NOT `saveBlocker`: a blank total is the entire point
+    /// of this action - "let me enter partial info incrementally without
+    /// saving the receipt as confirmed" (the owner, 2026-09-01) - and the
+    /// server leaves `totalCents` nullable exactly as long as the receipt
+    /// stays pending. What it does share is the refusal to write text it
+    /// could not read: a form that quietly saves around an amount it
+    /// cannot parse is the error-masking this repo hunts for, and the web
+    /// makes the identical call (`patchForSaveForLater` still runs the
+    /// money parser over every box and throws with the field named).
+    var saveForLaterBlocker: String? {
+        if totalInput == .invalid { return "The total isn't a valid amount." }
+        if hstInput == .invalid { return "HST isn't a valid amount." }
+        if subtotalInput == .invalid { return "The subtotal isn't a valid amount." }
+        if tipInput == .invalid { return "The tip isn't a valid amount." }
+        if otherFeesInput == .invalid { return "Other fees aren't a valid amount." }
+        return nil
+    }
+
+    /// The half-way write: the REVIEWED fields' values and the reviewed
+    /// set, and deliberately no `status`. The receipt stays pending, keeps
+    /// its place in the queue and in the Home badge's count, and the
+    /// fields just written stop being re-suggested.
+    ///
+    /// It is the write for a receipt someone got halfway through - the
+    /// vendor and total are on the screen, the category needs a decision
+    /// they cannot make now - and until this existed the only two ways out
+    /// of this form were "confirm a receipt you are not sure about" and
+    /// "lose what you typed" (the toolbar's "Later", which discards).
+    ///
+    /// ⚠ **Only the reviewed fields' values**, which is what makes it a
+    /// halfway save rather than a quiet full one. This form is PREFILLED
+    /// from the merge, so writing every field would put the parser's
+    /// guesses into the row for everything nobody touched - the suggested
+    /// total, the suggested vendor - and those values would stop being
+    /// suggestions and start being the record. That is exactly what "no
+    /// OCR value saves without a human confirming it" (constraint 2)
+    /// forbids, and a save-for-later is by definition the moment nobody
+    /// has confirmed them yet.
+    ///
+    /// ⚠ Not a confirmation and never a substitute for one. Nothing with
+    /// `status = 'pending'` may appear in an export, and this write leaves
+    /// it pending on purpose.
+    func saveForLater() async -> Bool {
+        guard let saveForLaterAction, purpose == .confirm else { return false }
+        if let blocker = saveForLaterBlocker {
+            saveError = blocker
+            return false
+        }
+        guard !isSaving else { return false }
+
+        isSaving = true
+        saveError = nil
+        defer { isSaving = false }
+
+        do {
+            try await saveForLaterAction(SaveForLaterRequest(
+                reviewedFields: reviewedFieldsForSave,
+                purchasedAt: ReceiptFormat.isoDate(fromPicker: purchasedDate),
+                vendor: normalized(vendorText),
+                subtotalCents: centsOrNil(subtotalInput),
+                hstCents: centsOrNil(hstInput),
+                tipCents: centsOrNil(tipInput),
+                otherFeesCents: centsOrNil(otherFeesInput),
+                totalCents: centsOrNil(totalInput),
+                category: normalized(categoryText),
+                paymentMethod: normalized(paymentMethodText),
                 notes: normalized(notesText)
             ))
             hasSaved = true
@@ -1424,6 +2112,37 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             saveError = error.localizedDescription
             return false
         }
+    }
+
+    /// The same half-filled form, for a receipt that does not exist
+    /// server-side yet: the capture screen's "Later" (2026-09-01).
+    ///
+    /// Until now that exit discarded whatever had been typed - the scan
+    /// was queued pending carrying the parser's snapshot alone, and the
+    /// vendor someone had just corrected was gone. This hands those values
+    /// to the outbox so the create writes them into the row and reports
+    /// them reviewed, exactly as a save-for-later PATCH would on a receipt
+    /// that had already uploaded.
+    ///
+    /// `nil` when nothing has been reviewed at all, which is the ordinary
+    /// case (a person who scans and immediately taps Later): the create
+    /// body is then byte-identical to what it was before this existed.
+    func pendingReceiptFields() -> PendingReceiptFields? {
+        let reviewed = reviewedFieldsForSave
+        guard !reviewed.isEmpty else { return nil }
+        return PendingReceiptFields(
+            reviewedFields: reviewed,
+            purchasedAt: ReceiptFormat.isoDate(fromPicker: purchasedDate),
+            vendor: normalized(vendorText),
+            subtotalCents: centsOrNil(subtotalInput),
+            hstCents: centsOrNil(hstInput),
+            tipCents: centsOrNil(tipInput),
+            otherFeesCents: centsOrNil(otherFeesInput),
+            totalCents: centsOrNil(totalInput),
+            category: normalized(categoryText),
+            paymentMethod: normalized(paymentMethodText),
+            notes: normalized(notesText)
+        )
     }
 
     private func centsOrNil(_ input: MoneyInput) -> Int? {
@@ -1445,6 +2164,28 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 /// here rather than on ReceiptArithmetic.swift's own enum, so that file
 /// stays exactly what §10.2 asks of a pure computation module (no
 /// knowledge of ConfirmReceiptModel or the view layer above it).
+/// Which SuggestedField a server-side reviewed-field name refers to -
+/// nil for `notes`, the one field on the form no suggestion has ever
+/// covered. Kept here rather than on ReviewedField.swift for the same
+/// reason as the extension below: that file mirrors a server vocabulary
+/// and has no business knowing about this screen's own enums.
+private extension ReviewedField {
+    var suggestedField: ConfirmReceiptModel.SuggestedField? {
+        switch self {
+        case .purchasedAt: return .date
+        case .vendor: return .vendor
+        case .subtotalCents: return .subtotal
+        case .hstCents: return .hst
+        case .tipCents: return .tip
+        case .otherFeesCents: return .otherFees
+        case .totalCents: return .total
+        case .category: return .category
+        case .paymentMethod: return .paymentMethod
+        case .notes: return nil
+        }
+    }
+}
+
 private extension DerivableMoneyField {
     var suggestedField: ConfirmReceiptModel.SuggestedField {
         switch self {

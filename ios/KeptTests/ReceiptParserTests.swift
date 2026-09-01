@@ -596,6 +596,30 @@ final class ReceiptDateReadingTests: XCTestCase {
         XCTAssertEqual(best(["Nov 6, 2022 3:14 PM"], captured: "2026-09-01T12:00:00"), "2022-11-06")
     }
 
+    /// Age is a penalty between the bounds and a veto outside them
+    /// (2026-09-01, third pass). CRA's retention window is six years, so
+    /// nobody is capturing a receipt older than that for tax; a seventh
+    /// year is slack. `04/07/28` is the case that needed it: two of its
+    /// three readings are after the capture and struck out, and the
+    /// survivor - 2004-07-28 - is unopposed, so it wins on any score at
+    /// all and a receipt scanned in 2026 gets a purchase date from
+    /// twenty-two years ago.
+    func testAReadingOlderThanTheRetentionWindowIsDiscarded() {
+        XCTAssertNil(best(["Ref 04/07/28"], captured: "2026-08-30T12:00:00"))
+        // Wrong in a way a person can see and fix beats wrong in a way
+        // that looks like an answer: with no reading at all, the confirm
+        // screen falls back to the capture day and says so on screen.
+        XCTAssertNil(best(["1998-04-11"], captured: "2026-08-30T12:00:00"))
+    }
+
+    /// The bound is seven WHOLE years, counted the way the age penalty
+    /// already counts them: a receipt seven years and a week old is still
+    /// read, and one eight years old is not.
+    func testTheBoundIsSevenWholeYears() {
+        XCTAssertEqual(best(["2019-08-25"], captured: "2026-09-01T12:00:00"), "2019-08-25")
+        XCTAssertNil(best(["2018-08-25"], captured: "2026-09-01T12:00:00"))
+    }
+
     /// What the age penalty still has to do: `TIMED ORDER 7/17/20` reads as
     /// 2020 and must lose to the `PAID 7/17/2026` printed below it - by six
     /// years of distance and a decoy word, not by a cutoff.

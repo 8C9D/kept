@@ -18,7 +18,12 @@ enum Fixtures {
         paymentMethod: String? = nil,
         notes: String? = nil,
         status: ReceiptStatus = .confirmed,
-        suggestions: MergedSuggestions? = nil
+        suggestions: MergedSuggestions? = nil,
+        /// The server's `reviewedFields` (2026-09-01, migration 0009) as
+        /// the wire carries it - strings, so a fixture can also state what
+        /// a pre-migration response looked like (nil) or what an unknown
+        /// name would do.
+        reviewedFields: [String]? = nil
     ) -> Receipt {
         Receipt(
             id: id,
@@ -37,7 +42,8 @@ enum Fixtures {
             status: status,
             suggestions: suggestions,
             createdAt: Date(timeIntervalSince1970: 1_774_000_000),
-            updatedAt: Date(timeIntervalSince1970: 1_774_000_000)
+            updatedAt: Date(timeIntervalSince1970: 1_774_000_000),
+            reviewedFields: reviewedFields
         )
     }
 

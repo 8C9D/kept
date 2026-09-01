@@ -101,6 +101,12 @@ struct CreateReceiptRequest: Encodable, Equatable {
     /// produces a body the server's strict schema accepts.
     let ocrSource: String?
     let ocrSuggestions: OcrSuggestionsPayload
+    /// Which fields a human had already looked at when this receipt was
+    /// queued (2026-09-01) - the capture-time confirm form's "Later" exit
+    /// carries them, and a confirmed capture reports them for symmetry.
+    /// Absent (never an empty array) when nobody reviewed anything, which
+    /// is the ordinary batch-scan case.
+    let reviewedFields: [ReviewedField]?
     let image: Image
 
     struct Image: Encodable, Equatable {
@@ -126,9 +132,11 @@ struct CreateReceiptRequest: Encodable, Equatable {
         ocrRawText: String?,
         ocrSource: String? = nil,
         ocrSuggestions: OcrSuggestionsPayload,
+        reviewedFields: [ReviewedField]? = nil,
         image: Image
     ) {
         self.ocrSource = ocrSource
+        self.reviewedFields = reviewedFields
         self.purchasedAt = purchasedAt
         self.capturedAt = capturedAt
         self.vendor = vendor
@@ -166,6 +174,7 @@ struct CreateReceiptRequest: Encodable, Equatable {
         try container.encodeIfPresent(ocrRawText, forKey: .ocrRawText)
         try container.encodeIfPresent(ocrSource, forKey: .ocrSource)
         try container.encode(ocrSuggestions, forKey: .ocrSuggestions)
+        try container.encodeIfPresent(reviewedFields, forKey: .reviewedFields)
         try container.encode(image, forKey: .image)
     }
 
@@ -173,7 +182,7 @@ struct CreateReceiptRequest: Encodable, Equatable {
         case purchasedAt, capturedAt, vendor
         case subtotalCents, hstCents, totalCents, tipCents, otherFeesCents
         case category, paymentMethod, notes, status
-        case ocrRawText, ocrSource, ocrSuggestions, image
+        case ocrRawText, ocrSource, ocrSuggestions, reviewedFields, image
     }
 }
 
@@ -250,11 +259,18 @@ struct ConfirmReceiptRequest: Encodable, Equatable {
     let category: String?
     let paymentMethod: String?
     let notes: String?
+    /// Which fields a human looked at on the way here (2026-09-01).
+    /// Harmless on a confirmation - a confirmed receipt is served no
+    /// suggestions, so nothing consumes the set - and sent anyway so this
+    /// request and `SaveForLaterRequest` below differ in as little as
+    /// possible. Absent for an item queued before the field existed.
+    let reviewedFields: [ReviewedField]?
 
     /// The PATCH body from what the confirm form produced - the same
     /// fields the capture-time path stores on a queued item, so the two
     /// save routes cannot drift apart.
     init(_ fields: ConfirmedReceiptFields) {
+        reviewedFields = fields.reviewedFields
         purchasedAt = fields.purchasedAt
         vendor = fields.vendor
         subtotalCents = fields.subtotalCents
@@ -283,12 +299,137 @@ struct ConfirmReceiptRequest: Encodable, Equatable {
         try container.encode(category, forKey: .category)
         try container.encode(paymentMethod, forKey: .paymentMethod)
         try container.encode(notes, forKey: .notes)
+        // The one key here that is absent rather than explicitly null when
+        // it has no value: an item queued before this field existed has
+        // nothing to say about what was reviewed, which is not the same
+        // claim as "nothing was".
+        try container.encodeIfPresent(reviewedFields, forKey: .reviewedFields)
         try container.encode("confirmed", forKey: .status)
     }
 
     private enum CodingKeys: String, CodingKey {
         case purchasedAt, vendor
         case subtotalCents, hstCents, totalCents, tipCents, otherFeesCents
-        case category, paymentMethod, notes, status
+        case category, paymentMethod, notes, reviewedFields, status
+    }
+}
+
+/// PATCH /api/receipts/:id from the confirm screen's **Save for later**
+/// (2026-09-01): the values of the fields a human has actually looked at,
+/// the reviewed set itself, and deliberately **no `status`** - a PATCH
+/// without one leaves the receipt pending, which is the whole point.
+///
+/// the owner's ask, verbatim: "let me enter partial info incrementally
+/// without saving the receipt as confirmed."
+///
+/// ⚠ **Absent keys, never explicit nulls, for everything unreviewed** -
+/// the opposite of `ConfirmReceiptRequest` above, and deliberately, the
+/// same distinction `QuickConfirmRequest` draws. That request is the whole
+/// reviewed form, where a blank field means "clear it"; this one carries
+/// only the fields a person has looked at, so anything it does not carry
+/// must be left exactly as it is rather than wiped. Writing an untouched
+/// suggested value into the row is precisely what constraint 2 forbids: it
+/// would stop being a suggestion and start being the record, with nobody
+/// having confirmed it.
+///
+/// A reviewed field that is BLANK still sends an explicit null, which is
+/// why the money and text fields are double optionals here: absent means
+/// "not reviewed, leave it alone", present-and-null means "a person looked
+/// at this and there is nothing on the paper - clear it". Collapsing the
+/// two would make a cleared field un-clearable, and the row would keep
+/// re-offering the value the person had just deleted.
+///
+/// ⚠ Not a confirmation and never a substitute for one. Nothing with
+/// `status = 'pending'` may appear in an export, and this leaves it
+/// pending on purpose.
+struct SaveForLaterRequest: Encodable, Equatable {
+    /// Replaces the stored set outright (the server's update schema says
+    /// so in its own comment); the client sends the full set it knows
+    /// about, which `ConfirmReceiptModel.reviewedFieldsForSave` builds as
+    /// the union of what was already stored and what this sitting touched.
+    let reviewedFields: [ReviewedField]
+    /// Present only when reviewed - and never null: the server's
+    /// `purchasedAt` is not a nullable column, and the picker always holds
+    /// a date.
+    private let purchasedAt: String?
+    private let vendor: String??
+    private let subtotalCents: Int??
+    private let hstCents: Int??
+    private let tipCents: Int??
+    private let otherFeesCents: Int??
+    private let totalCents: Int??
+    private let category: String??
+    private let paymentMethod: String??
+    private let notes: String??
+
+    /// Takes every field's CURRENT value and keeps only the reviewed ones
+    /// - the filtering lives here rather than at the call site so a
+    /// caller cannot accidentally hand over a narrower set of values than
+    /// the reviewed set claims, or a wider one than constraint 2 allows.
+    init(
+        reviewedFields: [ReviewedField],
+        purchasedAt: String,
+        vendor: String?,
+        subtotalCents: Int?,
+        hstCents: Int?,
+        tipCents: Int?,
+        otherFeesCents: Int?,
+        totalCents: Int?,
+        category: String?,
+        paymentMethod: String?,
+        notes: String?
+    ) {
+        let reviewed = Set(reviewedFields)
+        func kept<Value>(_ field: ReviewedField, _ value: Value?) -> Value?? {
+            reviewed.contains(field) ? .some(value) : .none
+        }
+        self.reviewedFields = reviewedFields
+        self.purchasedAt = reviewed.contains(.purchasedAt) ? purchasedAt : nil
+        self.vendor = kept(.vendor, vendor)
+        self.subtotalCents = kept(.subtotalCents, subtotalCents)
+        self.hstCents = kept(.hstCents, hstCents)
+        self.tipCents = kept(.tipCents, tipCents)
+        self.otherFeesCents = kept(.otherFeesCents, otherFeesCents)
+        self.totalCents = kept(.totalCents, totalCents)
+        self.category = kept(.category, category)
+        self.paymentMethod = kept(.paymentMethod, paymentMethod)
+        self.notes = kept(.notes, notes)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(reviewedFields, forKey: .reviewedFields)
+        try container.encodeIfPresent(purchasedAt, forKey: .purchasedAt)
+        try encode(vendor, forKey: .vendor, into: &container)
+        try encode(subtotalCents, forKey: .subtotalCents, into: &container)
+        try encode(hstCents, forKey: .hstCents, into: &container)
+        try encode(tipCents, forKey: .tipCents, into: &container)
+        try encode(otherFeesCents, forKey: .otherFeesCents, into: &container)
+        try encode(totalCents, forKey: .totalCents, into: &container)
+        try encode(category, forKey: .category, into: &container)
+        try encode(paymentMethod, forKey: .paymentMethod, into: &container)
+        try encode(notes, forKey: .notes, into: &container)
+    }
+
+    /// The three-way write the double optional exists for: absent, an
+    /// explicit null, or the value. One function so all nine fields
+    /// cannot drift on which of the three they mean.
+    private func encode<Value: Encodable>(
+        _ value: Value??,
+        forKey key: CodingKeys,
+        into container: inout KeyedEncodingContainer<CodingKeys>
+    ) throws {
+        guard let value else { return }
+        if let value {
+            try container.encode(value, forKey: key)
+        } else {
+            try container.encodeNil(forKey: key)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case reviewedFields, purchasedAt, vendor
+        case subtotalCents, hstCents, tipCents, otherFeesCents, totalCents
+        case category, paymentMethod, notes
     }
 }

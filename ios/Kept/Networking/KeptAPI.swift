@@ -65,6 +65,16 @@ protocol KeptAPI: Sendable {
     func uploadImage(to target: UploadTarget, data: Data, contentType: ImageUploadContentType) async throws
     func createReceipt(_ request: CreateReceiptRequest) async throws -> Receipt
     func confirmReceipt(id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt
+    /// PATCH /api/receipts/:id from the confirm screen's "Save for later"
+    /// (2026-09-01) - the same route as `confirmReceipt`, with **no
+    /// `status`**, so the receipt stays pending and keeps its place in the
+    /// queue and in the Home badge's count. Its own method rather than a
+    /// `ConfirmReceiptRequest` for the reason that request's own doc
+    /// comment gives: it encodes every field explicitly, nulls included,
+    /// because a confirm IS the person accepting the whole form - reusing
+    /// it here would write the parser's untouched guesses into the row,
+    /// which is exactly what constraint 2 forbids.
+    func saveReceiptForLater(id: UUID, _ request: SaveForLaterRequest) async throws -> Receipt
     /// Soft delete (spec §10B): tombstones the row and its image, excluded
     /// from every list, count and export from that moment on, bytes kept
     /// for CRA's six-year retention. Not the account-deletion hard delete.
@@ -259,6 +269,10 @@ extension APIClient: KeptAPI {
     }
 
     func confirmReceipt(id: UUID, _ request: ConfirmReceiptRequest) async throws -> Receipt {
+        try await patch("/api/receipts/\(id.uuidString.lowercased())", body: request)
+    }
+
+    func saveReceiptForLater(id: UUID, _ request: SaveForLaterRequest) async throws -> Receipt {
         try await patch("/api/receipts/\(id.uuidString.lowercased())", body: request)
     }
 

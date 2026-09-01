@@ -51,6 +51,22 @@ struct OutboxItem: Codable, Equatable, Identifiable, Sendable {
     /// lands already done and never joins the pending queue. Optional so
     /// items persisted before this field existed decode as unconfirmed.
     let confirmation: ConfirmedReceiptFields?
+    /// What a human had typed into the capture-time confirm form when they
+    /// left it with "Later" (2026-09-01) - the values for the fields they
+    /// actually looked at, and which fields those were. The create writes
+    /// those into the row and reports them reviewed; every other column
+    /// keeps carrying the parser's snapshot, exactly as before.
+    ///
+    /// Optional, and never written by any earlier build: an item queued
+    /// before this field existed carries no such key, and the synthesized
+    /// decoder reads a missing key on an Optional property as nil - so a
+    /// receipt captured before the update still drains afterwards instead
+    /// of being stranded on the phone. `confirmation` and this are
+    /// mutually exclusive in practice (one is the Save exit, the other the
+    /// Later exit) but nothing here enforces that: the drain reads
+    /// `confirmation` first and a confirmed create needs nothing from
+    /// here.
+    let partial: PendingReceiptFields?
     /// Non-nil when a permanent failure (an unretryable 4xx) stopped this
     /// item. It stays visible on Home with the reason and waits for a
     /// human: manual retry or discard - never an automatic loop, never a
@@ -95,4 +111,74 @@ struct ConfirmedReceiptFields: Codable, Equatable, Sendable {
     let category: String?
     let paymentMethod: String?
     let notes: String?
+    /// Which fields the person actually looked at on the way to confirming
+    /// (2026-09-01, `ReviewedField`). Inert on a confirmed receipt - the
+    /// server serves no suggestions for one, so nothing consumes the set -
+    /// and carried anyway so a confirm and a save-for-later differ in as
+    /// little as possible. Optional for the same forward-compatibility
+    /// reason `tipCents` is: an item a pre-2026-09-01 build wrote to disk
+    /// decodes with the key absent and uploads unchanged.
+    var reviewedFields: [ReviewedField]?
+
+    init(
+        purchasedAt: String,
+        vendor: String?,
+        subtotalCents: Int?,
+        hstCents: Int?,
+        totalCents: Int,
+        tipCents: Int?,
+        otherFeesCents: Int?,
+        category: String?,
+        paymentMethod: String?,
+        notes: String?,
+        reviewedFields: [ReviewedField]? = nil
+    ) {
+        self.purchasedAt = purchasedAt
+        self.vendor = vendor
+        self.subtotalCents = subtotalCents
+        self.hstCents = hstCents
+        self.totalCents = totalCents
+        self.tipCents = tipCents
+        self.otherFeesCents = otherFeesCents
+        self.category = category
+        self.paymentMethod = paymentMethod
+        self.notes = notes
+        self.reviewedFields = reviewedFields
+    }
+}
+
+/// What a human had typed into a capture-time confirm form before leaving
+/// it with "Later" (2026-09-01) - the values, plus which fields they had
+/// actually reviewed.
+///
+/// The pending twin of `ConfirmedReceiptFields`: same ten fields, every
+/// one of them optional (a half-filled form has no required anything, and
+/// the server leaves `totalCents` nullable exactly as long as the receipt
+/// stays pending), plus the reviewed set that says which of the values are
+/// a human's and which are simply blank.
+///
+/// ⚠ `reviewedFields` is what the create reads, never the values' own
+/// nil-ness. "Reviewed and deliberately blank" and "not reviewed" are
+/// different facts about the same nil: the first must leave the column
+/// empty, the second must let the parser's snapshot fill it, and a create
+/// that inferred one from the other would quietly overwrite a cleared
+/// field with the guess the person had just deleted.
+struct PendingReceiptFields: Codable, Equatable, Sendable {
+    let reviewedFields: [ReviewedField]
+    let purchasedAt: String
+    let vendor: String?
+    let subtotalCents: Int?
+    let hstCents: Int?
+    let tipCents: Int?
+    let otherFeesCents: Int?
+    let totalCents: Int?
+    let category: String?
+    let paymentMethod: String?
+    let notes: String?
+
+    /// Whether the person reviewed this field - the one question the
+    /// create asks of this type per column.
+    func reviewed(_ field: ReviewedField) -> Bool {
+        reviewedFields.contains(field)
+    }
 }

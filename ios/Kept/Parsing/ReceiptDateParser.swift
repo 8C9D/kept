@@ -152,12 +152,16 @@ enum ReceiptDateParser {
     /// A reading AFTER the capture date is discarded outright: a receipt is
     /// photographed after it is printed, and that one fact rules out the
     /// MUJI slip's month-first reading and every sweepstakes deadline in
-    /// the restore. There is deliberately no lower bound (2026-09-01,
-    /// second pass): a backlog of emailed receipts going back to 2022 was
-    /// imported the same day, and a 2022 receipt scanned in 2026 is an
-    /// ordinary thing to do - the date is on the paper and discarding it
-    /// would replace a right answer with the capture day. Age is a
-    /// penalty, not a veto. What survives is scored:
+    /// the restore.
+    ///
+    /// A reading more than `maxReceiptAgeYears` BEFORE it is discarded too
+    /// (2026-09-01, third pass - see that constant for the reasoning and
+    /// for why the bound is seven years rather than none). Between the two
+    /// bounds, age is a penalty and not a veto: an emailed backlog going
+    /// back to 2022 was imported the same day this parser was reworked,
+    /// and a 2022 receipt scanned in 2026 is an ordinary thing to do - the
+    /// date is on the paper and discarding it would replace a right answer
+    /// with the capture day. What survives is scored:
     ///
     /// - **+3** a token with exactly one valid reading, **+1** one with
     ///   more than one - a date that could honestly mean two days is
@@ -177,6 +181,26 @@ enum ReceiptDateParser {
     ///   from a backlog.
     ///
     /// Ties go to the earlier line, where the header prints.
+    ///
+    /// How far back a reading can be and still be a purchase date
+    /// (2026-09-01, third pass). CRA's retention window is six years, so a
+    /// receipt older than that is one nobody is capturing for tax;
+    /// allowing a seventh gives the window a full year of slack and still
+    /// rules out the readings that go badly wrong. `04/07/28` on an
+    /// otherwise date-less slip is the case: it has three readings, two of
+    /// them after the capture and struck out by the bound above, and the
+    /// survivor is 2004-07-28 - unopposed, so it wins on any score at all
+    /// and a receipt captured in 2026 gets a purchase date from twenty-two
+    /// years ago. With the floor it yields no reading, the capture-day
+    /// fallback applies, and the confirm screen says out loud that it is
+    /// showing the day of the scan (`dateIsCaptureDayFallback`) - which is
+    /// wrong in a way a person can see and fix, rather than wrong in a way
+    /// that looks like an answer.
+    ///
+    /// It stays a bound on READINGS, not a bound on receipts: nothing
+    /// stops anyone confirming any date they like on the form.
+    private static let maxReceiptAgeYears = 7
+
     static func bestDate(inLines lines: [String], capturedAt: Date) -> String? {
         let captureDay = calendarDay(of: capturedAt)
 
@@ -194,11 +218,13 @@ enum ReceiptDateParser {
             var seenOnThisLine: Set<String> = []
             for reading in readings(in: text) {
                 guard reading.iso <= captureDay else { continue }
+                let age = yearsBetween(reading.iso, and: captureDay)
+                guard age <= Self.maxReceiptAgeYears else { continue }
                 guard seenOnThisLine.insert(reading.iso).inserted else { continue }
                 var score = reading.isUnambiguous ? 3 : 1
                 if hasTime { score += 1 }
                 if isDecoy { score -= 3 }
-                score -= yearsBetween(reading.iso, and: captureDay)
+                score -= age
                 candidates.append(Candidate(iso: reading.iso, lineIndex: index, score: score))
             }
         }
