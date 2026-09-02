@@ -33,6 +33,23 @@ Images never transit the API: the client PUTs straight to object storage through
 - **Two owner-held keys are still unminted**, and both are traps rather than status: the R2 `kept-backups` token, without which the nightly backup agent refuses every night - so what protects the data between hand-run dumps is Neon's 6-hour window and nothing else; and the Sign in with Apple `.p8` with its three `APPLE_*` secrets, without which account deletion still deletes but revokes nothing (Runbook §0).
 - What was decided, what deployed when, and what stays deferred on which trigger live in `docs/DECISIONS.md` (newest-first), with the per-wave gate reports in `docs/gates/` and the hardening ledgers in `PROD-READINESS*.md`. This section does not restate them.
 
+## Receipt intake
+
+Receipts also arrive from outside the camera: manually downloaded PDFs, email receipts, vendor purchase-history pages.
+Each such batch gets a **receipt import workspace** at `~/.kept/imports/<date>-<slug>/`, deliberately outside this repository, because a workspace holds real purchase records for real people.
+This mirrors `~/.kept/reviews/`, which holds the per-user receipt reviews for the same reason.
+The `imports/` line in `.gitignore` is a guard against an accidental in-repo workspace, not a pointer to one - the data itself is never in the repo, gitignored or otherwise.
+
+A workspace holds one directory per source - `downloads/`, `gmail/`, `outlook/`, `vendor/`, whatever the batch drew from.
+Inside each source directory: the raw source document, a per-receipt JSON of the extracted fields, a `manifest.json` recording what that extraction pass found and what it skipped and why (a gap-filling second pass writes `manifest-pass2.json`), and `ledger.jsonl`.
+`ledger.jsonl` is one line per production write - source file, receipt id, R2 object key, sha256, total, currency, no token - and it is what makes the importer idempotent: an existing ledger entry blocks a second write of the same source file, so re-running the importer cannot double-import.
+At the workspace root: `import-one.mjs` (the importer), `html-to-pdf.sh` (a headless-Chrome converter, needed because the API accepts only PDF/JPEG/PNG), `import-queue.json` and `review-table.md` for the batched human review, `decisions.json` recording every dedupe, drop and flag with its reasoning, and `IMPORT-REPORT.md` as the human-readable summary of the run.
+`~/.kept/imports/2026-09-01-receipt-backfill/` is the worked example of this shape.
+
+Two rules govern every import and are worth stating because they are the ones easy to get wrong.
+Constraint 2 ("No OCR value saves without a human confirming it") applies here too - every imported receipt is shown to the owner before it is written, same as a camera capture.
+`ocr_raw_text` and `ocr_suggestions` must never be written by an import: those columns are an immutable record of what a parser suggested at camera capture and feed the parse-accuracy measurement, and an import is not a camera capture.
+
 ## Build and test
 
 Per-directory commands and the notes that make them work live in `server/CLAUDE.md`, `ios/CLAUDE.md`, and `web/CLAUDE.md`.
