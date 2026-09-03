@@ -308,8 +308,8 @@ async function revokeAppleTokens(
 }
 
 /**
- * How many object deletions are in flight at once. A year of a business's
- * receipts is hundreds of objects, so one at a time would hold the request
+ * How many object deletions are in flight at once. A year of a small
+ * business's receipts is hundreds of objects, so one at a time would hold the request
  * open for minutes; all at once would open hundreds of sockets to R2 in a
  * process provisioned at 2 GB. Sixteen is a judgement between the two,
  * written down as one.

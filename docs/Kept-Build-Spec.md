@@ -7,7 +7,7 @@
 
 ## 1 · What this is and how we know it worked
 
-**The problem.** Receipts accumulate. Paper ones pile up in a room, emailed PDFs bury themselves in an inbox, and at year-end both have to be excavated. The business's receipts have the same shape as the owner's, at higher volume.
+**The problem.** Receipts accumulate. Paper ones pile up in a room, emailed PDFs bury themselves in an inbox, and at year-end both have to be excavated. A small business's receipts have the same shape as a household's, at higher volume.
 
 **The success test — one sentence.** *A receipt is captured in under a minute and never thought about again.*
 

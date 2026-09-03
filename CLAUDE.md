@@ -5,7 +5,7 @@ It is the authority for the entire project.
 
 ## What this is
 
-Kept is a receipt-capture app for the owner and a second user's business: an iPhone client that scans a receipt, shows the OCR guesses in an editable form, and a backend that stores the record and generates the year-end export an accountant can import.
+Kept is a general-purpose receipt-capture app, in production use by the owner and a second user: an iPhone client that scans a receipt, shows the OCR guesses in an editable form, and a backend that stores the record and generates the year-end export an accountant can import.
 `README.md` is the entry point for a reader arriving at the repository; this file and `docs/` are the depth behind it.
 
 The iOS app is a capture-and-confirm client and all domain logic lives in the backend.

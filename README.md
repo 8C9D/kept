@@ -1,6 +1,6 @@
 # Kept
 
-Kept is a receipt-capture system for a small business's bookkeeping. You scan a
+Kept is a receipt-capture system for small-business bookkeeping. You scan a
 paper receipt with your phone, the app reads it on-device and shows you what it
 read as an editable form, and once you confirm the numbers the record is the
 server's. At year end the server assembles the whole period into a single
