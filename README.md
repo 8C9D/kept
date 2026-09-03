@@ -254,7 +254,8 @@ ios/          SwiftUI client — Capture, Confirm, Outbox, Parsing, Networking, 
 server/       Hono API — routes/, domain/, export/, parse/, storage/, auth/, db/
 web/          React client (see web/README.md for the deployment order)
 docs/         Kept-Build-Spec.md (the authority), DECISIONS.md (append-only log),
-              Runbook.md (deploy, migrate, roll back, back up, restore), gates/
+              Runbook.md (deploy, migrate, roll back, back up, restore), gates/,
+              security/, app-review/, prod-readiness/ (hardening ledgers + reviews)
 ```
 
 `docs/Kept-Build-Spec.md` is the current state of the design and

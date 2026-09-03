@@ -16,3 +16,6 @@ web/dist/
 
 # Receipt import workspaces hold real purchase records; they live in ~/.kept/imports/, never here.
 imports/
+
+# Per-machine Claude Code permission grants
+.claude/settings.local.json
