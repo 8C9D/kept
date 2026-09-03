@@ -286,10 +286,12 @@ directly out of `user_events`.
 - **`POST /api/receipts/parse` writing nothing is pinned by an integration
   test that reads the receipts table afterwards** — the only honest way to
   assert an absence of writes.
-- **The iOS parser rewrite is pinned against the real population**
-  (`ReceiptParserProductionTests.swift` + `Support/ProductionReceipts.swift`),
-  so the before/after numbers in §2 are reproducible from the repository
-  rather than quoted from a session.
+- **The iOS parser rewrite was pinned against the real population** by a
+  fixture file quoting production receipts verbatim. Those fixtures and
+  their tests were removed from the repository and its history on
+  2026-09-02 because they carried real purchase records, so the
+  before/after numbers in §2 are quoted from that session rather than
+  reproducible here.
 - **The investigation itself was read-only and against a restored copy.**
   Production was not written to at any point today by this workstream.
 - **Two backups were taken and restore-verified** (Runbook §4): morning,

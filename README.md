@@ -245,7 +245,7 @@ built bundle rather than the source.
 | Data | Postgres (Neon in production), S3-compatible object storage (Cloudflare R2; MinIO locally) |
 | Web | React 19, Vite |
 | Infra | Fly.io origin, Cloudflare proxy + rate limiting + Pages, GitHub Actions |
-| Tests | vitest (416 backend + 38 web cases), XCTest (251 Swift cases, unit + UI) |
+| Tests | vitest (416 backend + 38 web cases), XCTest (632 unit cases, plus UI tests) |
 
 ## Repository map
 
