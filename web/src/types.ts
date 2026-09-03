@@ -479,7 +479,3 @@ export interface UserEvent {
 export interface PostEventsRequest {
   events: UserEvent[];
 }
-
-export interface PostEventsResponse {
-  accepted: number;
-}
