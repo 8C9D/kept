@@ -1,0 +1,58 @@
+# Production compose for the Kept API origin on the Oracle Cloud VM
+# (docs/proposals/2026-09-03-free-hosting.md). It is the successor to
+# server/fly.toml, and the reasoning that file carried lives here now so it
+# survives the move:
+#
+# - Never stopped for idleness and never scaled to zero: a cold start on
+#   pull-to-refresh reads as the iOS client's 10 s honest-failure timeout.
+#   `restart: unless-stopped` is Docker's form of "restart a machine whose
+#   process exits", which the boot probes in src/index.ts rely on - they
+#   exit 1 rather than serve when Neon or R2 does not answer.
+# - The healthcheck is liveness only (docs/DECISIONS.md, 2026-08-15):
+#   GET /health answers a constant 200 from the process itself and touches
+#   neither Neon nor R2, so it never keeps Neon's autosuspending compute
+#   awake. start_period covers the boot probes' worst case (five 5 s
+#   database attempts a second apart, then a 10 s storage cap). node:24-slim
+#   ships no curl, so the probe is node's own fetch.
+# - 2 GB, measured rather than guessed: a 250 MiB export peaks at 891 MiB
+#   RSS (spec §4.2), and exports are serialized one-per-user.
+# - The port is bound to loopback only. The only way in is the Cloudflare
+#   Tunnel: cloudflared runs as a host systemd service and forwards
+#   api.keptapp.net to localhost:3000, so the origin has no public port at
+#   all. EDGE_SHARED_SECRET stays set as defence in depth.
+# - stop_grace_period is Docker's kill_timeout. src/index.ts drains for 3 s
+#   and closes the pool for 1 s inside it; 10 s (Docker's default too) leaves
+#   the same headroom Fly's 5 s did, doubled.
+#
+# Secrets are read from /etc/kept/kept.env (mode 0600), the same names Fly
+# secrets held; server/ops/prod/kept.env.example lists them. Deploy with
+# server/ops/prod/deploy.sh from the laptop; never `docker compose up` a
+# build by hand on the VM without tagging it, or rollback has nothing to
+# roll back to.
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: kept-api:${KEPT_IMAGE_TAG:-untagged}
+    env_file: /etc/kept/kept.env
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+    mem_limit: 2g
+    stop_grace_period: 10s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
