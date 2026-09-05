@@ -3,8 +3,8 @@
 Wave 7 (spec §7A): sign-in, the receipts table with inline editing and
 filters, detail with the image beside the fields, the confirm queue, the
 multi-file backlog upload, and the year-end export. Built and gated against
-local dev 2026-08-21 (`docs/gates/wave-7.md`); production sign-in waits on
-the Apple Services ID below.
+local dev 2026-08-21; production sign-in waits on the Apple Services ID
+below.
 
 ## Develop
 

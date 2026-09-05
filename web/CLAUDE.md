@@ -1,6 +1,6 @@
 # Kept web - agent notes
 
-Gated locally; production enablement is the owner's, ordered in `README.md`.
+Production enablement steps are ordered in `README.md`.
 The session is the same bearer JWT iOS uses, and the API origin is baked per build rather than configured at runtime.
 
 ## Build and test

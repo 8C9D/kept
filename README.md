@@ -12,11 +12,6 @@ Cloudflare; the iPhone build is on TestFlight and in use.
 The success test the whole design answers to: a receipt is captured in under a
 minute and never thought about again.
 
-## Screenshots
-
-*Not yet in the repository.* Three are worth adding here: the scan, the confirm
-screen with its per-field suggestions, and the year-end export.
-
 ## Architecture
 
 Three deployables and one rule about where thinking happens.
@@ -253,9 +248,8 @@ built bundle rather than the source.
 ios/          SwiftUI client — Capture, Confirm, Outbox, Parsing, Networking, Session
 server/       Hono API — routes/, domain/, export/, parse/, storage/, auth/, db/
 web/          React client (see web/README.md for the deployment order)
-docs/         Kept-Build-Spec.md (the authority), DECISIONS.md (append-only log),
-              Runbook.md (deploy, migrate, roll back, back up, restore), gates/,
-              security/, app-review/, prod-readiness/ (hardening ledgers + reviews)
+docs/         Kept-Build-Spec.md (the design), DECISIONS.md (append-only decision log),
+              Runbook.md (deploy, migrate, roll back, back up, restore), security/
 ```
 
 `docs/Kept-Build-Spec.md` is the current state of the design and

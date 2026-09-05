@@ -6,7 +6,8 @@
 	step, like migrations.
 
 	Before installing:
-	  1. Replace __REPO__ with the absolute path to this checkout.
+	  1. Replace __REPO__ with the absolute path to this checkout and
+	     __HOME__ with your home directory.
 	  2. Create ~/.kept/backup.env (chmod 600) holding the five variables
 	     db:backup requires: DATABASE_URL and the four BACKUP_STORAGE_*.
 	     Secrets live in that file, never in this plist.
@@ -43,8 +44,8 @@
 		<integer>0</integer>
 	</dict>
 	<key>StandardOutPath</key>
-	<string>/Users/<user>/Library/Logs/kept-backup.log</string>
+	<string>__HOME__/Library/Logs/kept-backup.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/<user>/Library/Logs/kept-backup.log</string>
+	<string>__HOME__/Library/Logs/kept-backup.log</string>
 </dict>
 </plist>
