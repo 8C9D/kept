@@ -4,6 +4,8 @@ node_modules/
 *.log
 .DS_Store
 xcuserdata/
+# Local signing settings (DEVELOPMENT_TEAM); copy from the .example
+ios/Config/Signing.local.xcconfig
 *.xcresult
 # Local agent tooling (project-scoped MCP config), not project source.
 .mcp.json

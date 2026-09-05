@@ -1,0 +1,5 @@
+// Shared build settings for every configuration.
+// Signing identity is machine-local: copy Signing.local.xcconfig.example to
+// Signing.local.xcconfig and set DEVELOPMENT_TEAM. The include is optional, so
+// CI and simulator builds work without it.
+#include? "Signing.local.xcconfig"

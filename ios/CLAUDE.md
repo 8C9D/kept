@@ -2,6 +2,10 @@
 
 A capture-and-confirm surface only. Domain logic belongs to the server, deliberately - see the root `CLAUDE.md`.
 
+## Signing
+
+The team is not in the repo: copy `Config/Signing.local.xcconfig.example` to `Config/Signing.local.xcconfig` (gitignored) and set `DEVELOPMENT_TEAM`. `Config/Base.xcconfig` includes it optionally, so simulator builds and CI need nothing. The export options plist carries no `teamID`; the export uses the archive's team.
+
 ## Tests
 
 - `xcodebuild test -project Kept.xcodeproj -scheme Kept -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:KeptTests`
@@ -20,7 +24,7 @@ xcodebuild -exportArchive -archivePath <path>.xcarchive \
   -exportOptionsPlist <opts>.plist -exportPath <out> -allowProvisioningUpdates
 ```
 
-The options plist is checked in as `ios/ExportOptions.plist` (2026-09-01): `method=app-store-connect`, `teamID=<team-id>`, `signingStyle=automatic`, `destination=upload`, `uploadSymbols=true`, and `manageAppVersionAndBuildNumber=false` - without the last, Xcode may rewrite the build number you just set. With `destination=upload` the export leaves **nothing** at `-exportPath`; to inspect the signed `.ipa`, export the same archive a second time with `destination=export` (a `sed` on that one key) and read that copy - it is a sibling of the uploaded bytes, not the bytes themselves, and say so when you record it.
+The options plist is checked in as `ios/ExportOptions.plist` (2026-09-01): `method=app-store-connect`, `signingStyle=automatic`, `destination=upload`, `uploadSymbols=true`, and `manageAppVersionAndBuildNumber=false` - without the last, Xcode may rewrite the build number you just set. With `destination=upload` the export leaves **nothing** at `-exportPath`; to inspect the signed `.ipa`, export the same archive a second time with `destination=export` (a `sed` on that one key) and read that copy - it is a sibling of the uploaded bytes, not the bytes themselves, and say so when you record it.
 
 **No App Store Connect API key is required, and the org has none** (Users and Access → Integrations offers only *Request Access*). `-allowProvisioningUpdates` mints cloud-managed distribution signing instead.
 

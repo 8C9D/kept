@@ -29,9 +29,9 @@ built bundle at the gate, wave-6 style).
 `public/privacy/index.html` is the privacy policy the App Store record
 requires, served at `/privacy` in dev and copied verbatim into `dist/privacy/`
 by the build. Its contents mirror the published App Store privacy label - if
-the label ever changes, this page changes in the same commit. One
-placeholder is deliberate: the contact address, which the owner fills in before
-the page goes live.
+the label ever changes, this page changes in the same commit. The contact
+address is `privacy@keptapp.net`, forwarded to the owner's inbox by Cloudflare
+Email Routing on the zone.
 
 ## Putting it on keptapp.net (the owner's, in this order)
 
@@ -75,9 +75,7 @@ the page goes live.
    Cloudflare's email obfuscation. Redeploys:
    `npx wrangler pages deploy dist --project-name=keptapp-web --branch=main`.*
 5. The privacy policy URL for App Store Connect is then
-   `https://keptapp.net/privacy` (wave-6 §3 step 18) - fill the contact
-   address in `public/privacy/index.html` and rebuild before the upload
-   that goes live.
+   `https://keptapp.net/privacy`.
 
 Re-uploading `dist/` is the whole deploy story. The API address is baked
 into the bundle (`https://api.keptapp.net`, same ruling as the iOS
