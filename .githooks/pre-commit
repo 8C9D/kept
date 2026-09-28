@@ -1,8 +1,22 @@
 #!/bin/sh
 # Block commits that stage secrets. Installed 2026-08-07 (secret-exposure audit).
+#
+# core.hooksPath=.githooks replaces the machine-wide hooks in
+# ~/dev/dotfiles/git-hooks, so this also runs that pre-commit (Neon passwords,
+# credentialed postgres URLs) after gitleaks. Either one failing blocks the
+# commit; both run so one attempt reports everything.
+global="$HOME/dev/dotfiles/git-hooks/pre-commit"
 if ! command -v gitleaks >/dev/null 2>&1; then
   echo "pre-commit: gitleaks not found; refusing to commit without a secret scan." >&2
   echo "Install it (brew install gitleaks) or bypass once with --no-verify." >&2
   exit 1
 fi
-exec gitleaks git --pre-commit --staged --redact --no-banner
+if [ ! -x "$global" ]; then
+  echo "pre-commit: global hook $global is missing or not executable;" >&2
+  echo "refusing to commit without it. Restore ~/dev/dotfiles or bypass once with --no-verify." >&2
+  exit 1
+fi
+status=0
+gitleaks git --pre-commit --staged --redact --no-banner || status=$?
+"$global" "$@" || { rc=$?; [ "$status" -eq 0 ] && status=$rc; }
+exit "$status"
