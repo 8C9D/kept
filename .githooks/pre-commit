@@ -17,6 +17,6 @@ if [ ! -x "$global" ]; then
   exit 1
 fi
 status=0
-gitleaks git --pre-commit --staged --redact --no-banner || status=$?
+gitleaks git --pre-commit --staged --redact --no-banner --log-level warn || status=$?
 "$global" "$@" || { rc=$?; [ "$status" -eq 0 ] && status=$rc; }
 exit "$status"
