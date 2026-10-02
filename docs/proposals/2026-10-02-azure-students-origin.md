@@ -1,6 +1,6 @@
 # Moving the API origin to an Azure for Students VM — plan, 2026-10-02, nothing run
 
-**Status, 2026-10-02:** plan only. The owner ruled Oracle out (`2026-09-03-free-hosting.md`, status note), asked for the free option that best fits the app, and is signing up for Azure for Students himself. **Nothing has been deployed, no DNS has changed, no secret has moved; Fly still serves production.** When the migration is actually run it gets a `docs/DECISIONS.md` entry and the spec §4.2 deployment row is amended in the same commit.
+**Status, 2026-10-02:** steps 1-3 of §5 are done: the subscription exists, the VM `kept-api` is running in West US and bootstrapped, and the image build was rehearsed on it. The API is **not** deployed there: the env file is the unfilled template and the tunnel has no connector. **No DNS has changed, no secret has moved; Fly still serves production.** When the migration is actually run it gets a `docs/DECISIONS.md` entry and the spec §4.2 deployment row is amended in the same commit.
 
 The requirements any host must keep are §1 of `2026-09-03-free-hosting.md` and are not repeated here.
 
@@ -12,7 +12,7 @@ It is the only free option left that is always on, gives CPU after the response,
 
 | Host | Why not |
 |---|---|
-| Google Cloud `e2-micro` | The VM is always free but its external IPv4 is billed at $0.005/h (about $3.65/month), and IPv6-only is impossible: the Neon endpoint and `appleid.apple.com` have no AAAA record (checked 2026-10-02). Cheapest permanent option, not free. |
+| Google Cloud `e2-micro` | The VM is always free but its external IPv4 is billed at $0.005/h (about $3.65/month), and IPv6-only is impossible: `appleid.apple.com` (Sign in with Apple's keys) and `github.com` (the deploy's source) have no AAAA record (checked 2026-10-02; the Neon endpoint does have one). Cheapest permanent option, not free. |
 | Google Cloud Run | Free, 2 GiB, but scales to zero and throttles CPU after the response; needs a Worker in front and code changes for exports and the sweep. |
 | Render / Koyeb free | 512 MB and 0.1 CPU; Render sleeps after 15 minutes. |
 | Fly at 1 GB | About $9.60/month list in `yyz`. |
@@ -33,8 +33,8 @@ The export byte budget is **not** lowered by this plan. An export that large wou
 
 ## 3 · The VM
 
-- **Size:** `Standard_B2ats_v2` (2 vCPU, 1 GiB, x86) if the subscription has quota for it; `Standard_B1s` (1 vCPU, 1 GiB) otherwise. Student subscriptions are reported to lack B2 v2 quota in some regions.
-- **Region:** the allowed region nearest Neon (`aws-us-east-2`, Ohio): East US 2, then East US, then Central US, then Canada Central. Student subscriptions carry an allowed-regions policy; the list is visible only after signup.
+- **Region: West US.** The subscription's allowed-regions policy permits only West US, Mexico Central, Denmark East, Belgium Central and France Central, so nothing near Neon (`aws-us-east-2`, Ohio) is available. Measured from the VM, a TCP connect to the Neon endpoint takes about 61 ms, against roughly 15 ms from Toronto: every database round trip is about 45 ms slower than on Fly. Request latency through `api-next` is to be measured before cutover (§5 step 7).
+- **Size: `Standard_B2pts_v2`** (2 vCPU, 1 GiB, Arm), the only free size offered in West US on this subscription. The image and scripts were Arm-ready already.
 - **Image:** Ubuntu Server 24.04 LTS. **Disk:** 64 GB P6 Premium SSD (the free size).
 - **Network:** one Standard static public IPv4, needed for outbound traffic and SSH. It is not free: about $3.65/month, roughly $44 of the $100 yearly credit. Inbound rule: SSH (22) only, key-only. No 80/443; the Cloudflare Tunnel is the only way in to the API.
 - **Budget alert** on the subscription at $60 of credit used.
@@ -43,9 +43,9 @@ The export byte budget is **not** lowered by this plan. An export that large wou
 
 Small, and all in `server/ops/prod/`:
 
-- `docker-compose.prod.yml`: `mem_limit: 2g` becomes `mem_limit: 900m` with `memswap_limit: 2g`, and the "2 GB, measured" comment is rewritten with §2's reasoning.
-- `bootstrap-vm.sh`: create a 2 GB swapfile; drop "aarch64" and the `ubuntu` user from the header (Azure's default user is `azureuser`; the script already uses `$USER`).
-- `deploy.sh`: unchanged. **To rehearse:** the image build (`npm ci` under `docker build`) on a 1 GiB machine. If it is killed or takes minutes, build on the laptop for `linux/amd64` and ship it with `docker save | ssh … docker load` instead.
+- `docker-compose.prod.yml`: `mem_limit: 2g` became `mem_limit: 900m` with `memswap_limit: 2g`, and the "2 GB, measured" comment was rewritten with §2's reasoning.
+- `bootstrap-vm.sh`: creates a 2 GB swapfile; the header no longer assumes an architecture or the `ubuntu` user (Azure's default user is `azureuser`; the script uses `$USER`).
+- `deploy.sh`: unchanged. The image build was rehearsed on the VM: 40 s, no out-of-memory kill, 602 MB image.
 - `server/fly.toml` and the test that reads it stay until Fly is destroyed.
 
 Runbook, root `CLAUDE.md` topology, README and spec §4.2 change in the migration commit, as listed in `2026-09-03-free-hosting.md` §3 ("What changes in the Runbook" applies as written; the host is the only difference).
@@ -54,9 +54,9 @@ Runbook, root `CLAUDE.md` topology, README and spec §4.2 change in the migratio
 
 Owner's steps are marked **(owner)**. Everything else can be done in a session once the owner asks for it.
 
-1. **(owner)** Sign up for Azure for Students with the school email. This is the real eligibility check.
-2. **(owner)** Create the VM per §3 with a new SSH public key (generated locally at that point), and set the budget alert. Or hand a session Azure CLI access to do it.
-3. Run `bootstrap-vm.sh` over SSH; confirm Docker, compose and `cloudflared` versions and that swap is active.
+1. **Done 2026-10-02.** Signed up; academic verification passed.
+2. **Done 2026-10-02.** VM created per §3 with the Azure CLI (resource group `kept-prod`). **Still owed:** the budget alert.
+3. **Done 2026-10-02.** `bootstrap-vm.sh` run over SSH; swap active, Docker 29.8.2, compose v5.6.0, `cloudflared` 2026.9.3, repository cloned, env file is the unfilled template.
 4. **(owner)** Fill `/etc/kept/kept.env` on the VM with the values Fly holds (`kept.env.example` lists the names). No secret passes through a session.
 5. **(owner)** `sudo cloudflared service install <token>` for the existing tunnel `kept-api`, and extend the edge-secret Transform Rule to `api-next.keptapp.net` in the dashboard.
 6. `deploy.sh <host> <commit>` with the commit Fly is running. No `--migrate`: the schema is already current.
@@ -75,10 +75,8 @@ Owner's steps are marked **(owner)**. Everything else can be done in a session o
 
 ## 7 · Not verified
 
-- That this school domain passes Azure's automatic student verification.
-- Which regions and VM sizes the student subscription allows.
 - That the free VM hours and P6 disks reset on yearly renewal (secondary sources only). If they do not, year two costs about $91 for a B1s plus $44 for the IP, more than the $100 credit.
-- Image build time and memory on a 1 GiB VM.
+- Request latency through the tunnel from West US, and whether it is acceptable in the app.
 - Sweep behaviour with two origins overlapping at cutover.
 
 ## Sources

@@ -14,8 +14,12 @@
 #   awake. start_period covers the boot probes' worst case (five 5 s
 #   database attempts a second apart, then a 10 s storage cap). node:24-slim
 #   ships no curl, so the probe is node's own fetch.
-# - 2 GB, measured rather than guessed: a 250 MiB export peaks at 891 MiB
-#   RSS (spec §4.2), and exports are serialized one-per-user.
+# - 900 MB of RAM plus swap up to 2 GB in total, on a 1 GiB VM
+#   (docs/proposals/2026-10-02-azure-students-origin.md §2): a 250 MiB
+#   export peaks at 891 MiB RSS (spec §4.2) and exports are serialized
+#   one-per-user, so an export at the full budget leans on the swapfile
+#   bootstrap-vm.sh creates instead of being killed. Real exports are far
+#   smaller: every production image together was 155 MB on 2026-09-01.
 # - The port is bound to loopback only. The only way in is the Cloudflare
 #   Tunnel: cloudflared runs as a host systemd service and forwards
 #   api.keptapp.net to localhost:3000, so the origin has no public port at
@@ -39,7 +43,8 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     restart: unless-stopped
-    mem_limit: 2g
+    mem_limit: 900m
+    memswap_limit: 2g
     stop_grace_period: 10s
     healthcheck:
       test:

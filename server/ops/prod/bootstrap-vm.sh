@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# One-time bootstrap of the production VM (Ubuntu 24.04, aarch64) for the
-# Kept API origin. Run once, as the default `ubuntu` user, over ssh:
+# One-time bootstrap of the production VM (Ubuntu 24.04) for the Kept API
+# origin. Run once, as the VM's default user, over ssh:
 #
-#   ssh ubuntu@<vm> bash -s < server/ops/prod/bootstrap-vm.sh
+#   ssh <user>@<vm> bash -s < server/ops/prod/bootstrap-vm.sh
 #
-# Installs Docker (Docker's repository: Ubuntu's docker.io lags and ships no
-# compose plugin), cloudflared (Cloudflare's repository), and unattended
-# security upgrades; clones the repository to /opt/kept; creates /etc/kept
-# for the env file. Idempotent: safe to re-run.
+# Creates a 2 GB swapfile (the VM has 1 GiB of RAM; the compose file's
+# memswap_limit relies on it), installs Docker (Docker's repository:
+# Ubuntu's docker.io lags and ships no compose plugin), cloudflared
+# (Cloudflare's repository), and unattended security upgrades; clones the
+# repository to /opt/kept; creates /etc/kept for the env file. Idempotent:
+# safe to re-run.
 #
 # Two things it deliberately does NOT do, because both need a value only the
 # operator holds:
@@ -18,6 +20,15 @@
 # without a reachable database and bucket.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+
+# Swap
+if [ ! -f /swapfile ]; then
+  sudo fallocate -l 2G /swapfile
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile > /dev/null
+  echo "/swapfile none swap sw 0 0" | sudo tee -a /etc/fstab > /dev/null
+fi
+sudo swapon --show | grep -q /swapfile || sudo swapon /swapfile
 
 sudo apt-get update -q
 sudo apt-get install -y -q ca-certificates curl git unattended-upgrades
