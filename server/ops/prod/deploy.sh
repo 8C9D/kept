@@ -37,7 +37,9 @@ fi
 ssh "$HOST" bash -s -- "$COMMIT" "$MIGRATE" <<'REMOTE'
 set -euo pipefail
 COMMIT=$1
-MIGRATE=$2
+# ssh joins its arguments into one string, so an empty second argument never
+# arrives; without the default, `set -u` aborts every deploy without --migrate.
+MIGRATE=${2:-}
 cd /opt/kept
 git fetch --quiet origin
 git checkout --quiet --detach "$COMMIT"
