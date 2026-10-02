@@ -1,4 +1,4 @@
-# Production compose for the Kept API origin on the Oracle Cloud VM
+# Production compose for the Kept API origin on a VM behind a Cloudflare Tunnel
 # (docs/proposals/2026-09-03-free-hosting.md). It is the successor to
 # server/fly.toml, and the reasoning that file carried lives here now so it
 # survives the move:

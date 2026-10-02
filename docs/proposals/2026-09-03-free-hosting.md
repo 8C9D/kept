@@ -1,5 +1,7 @@
 # Moving the API origin off Fly to free hosting — assessed 2026-09-03, not yet migrated
 
+**Status, 2026-10-02: the Oracle path is abandoned.** 1,572 launch attempts between 2026-09-04 and 2026-09-07 all returned "Out of host capacity" in `ca-toronto-1`, no VM was ever created, and the owner ruled Oracle out. The API is still on Fly. §1 (what the deployment needs) and `server/ops/prod/` still apply to any VM host; §3's Oracle-specific parts do not. A replacement host has not been decided.
+
 **Status, 2026-09-03:** assessment only. The owner asked for a recommendation, not a migration, and chose the preferred path the same day: **Oracle Cloud Always Free Arm VM, container unchanged, reached through a Cloudflare Tunnel**, with the Oracle account upgraded to Pay As You Go so idle reclamation cannot stop the machine, and a cutover rehearsed on a temporary hostname before the CNAME moves. **Nothing has been deployed, no DNS has changed, no secret has moved.** When the migration is actually run it gets a `docs/DECISIONS.md` entry and the spec §4.2 deployment row is amended in the same commit, per the doc-ownership rule; this file is the reasoning that entry will point at.
 
 **Why now.** The Fly machine `keptapp-api` (`server/fly.toml`: `shared-cpu-1x`, 2 GB, never scaled to zero) costs about $14/month at list price, for an API serving two people. Fly no longer offers a free allowance.
