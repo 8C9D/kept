@@ -6,8 +6,9 @@ read as an editable form, and once you confirm the numbers the record is the
 server's. At year end the server assembles the whole period into a single
 archive an accountant can open. About 34,000 lines of Swift and TypeScript: a
 SwiftUI iPhone client, a browser client, and the backend that owns every rule
-either of them displays. The backend runs in production on Fly.io behind
-Cloudflare; the iPhone build is on TestFlight and in use.
+either of them displays. The backend runs in production in Docker on one
+small VM behind a Cloudflare Tunnel; the iPhone build is on TestFlight and in
+use.
 
 The success test the whole design answers to: a receipt is captured in under a
 minute and never thought about again.
@@ -29,7 +30,7 @@ Three deployables and one rule about where thinking happens.
         x-kept-edge-secret injection)
                     │
                     ▼
-          API — Hono on Node (Fly.io)
+     API — Hono on Node (Docker, VM, tunnel)
        HST arithmetic · validation · export
        fiscal periods · filename derivation
             │                     │
@@ -239,7 +240,7 @@ built bundle rather than the source.
 | Backend | TypeScript, Hono on Node 24, Drizzle ORM, Zod, `jose`, ExcelJS, Anthropic SDK |
 | Data | Postgres (Neon in production), S3-compatible object storage (Cloudflare R2; MinIO locally) |
 | Web | React 19, Vite |
-| Infra | Fly.io origin, Cloudflare proxy + rate limiting + Pages, GitHub Actions |
+| Infra | Docker on a VM behind a Cloudflare Tunnel, Cloudflare proxy + rate limiting + Pages, GitHub Actions |
 | Tests | vitest (416 backend + 38 web cases), XCTest (632 unit cases, plus UI tests) |
 
 ## Repository map

@@ -1,6 +1,8 @@
-# Moving the API origin to an Azure for Students VM — plan, 2026-10-02, nothing run
+# Moving the API origin to an Azure for Students VM — plan, 2026-10-02
 
-**Status, 2026-10-02:** steps 1-3 of §5 are done: the subscription exists, the VM `kept-api` is running in West US and bootstrapped, and the image build was rehearsed on it. The API is **not** deployed there: the env file is the unfilled template and the tunnel has no connector. **No DNS has changed, no secret has moved; Fly still serves production.** When the migration is actually run it gets a `docs/DECISIONS.md` entry and the spec §4.2 deployment row is amended in the same commit.
+**Status, 2026-10-03:** done through step 9. The VM serves `api.keptapp.net`, Fly is at zero machines and kept until no earlier than 2026-11-02, step 10 is owed then. Record: `docs/DECISIONS.md` 2026-10-02; the Runbook is current. One correction to step 8 as written: a tunnel route cannot be added while a DNS record of that name exists, so the CNAME is deleted first and the route's save creates it (Runbook §5).
+
+**Status, 2026-10-02 (superseded):** steps 1-3 of §5 are done: the subscription exists, the VM `kept-api` is running in West US and bootstrapped, and the image build was rehearsed on it. The API is **not** deployed there: the env file is the unfilled template and the tunnel has no connector. **No DNS has changed, no secret has moved; Fly still serves production.** When the migration is actually run it gets a `docs/DECISIONS.md` entry and the spec §4.2 deployment row is amended in the same commit.
 
 The requirements any host must keep are §1 of `2026-09-03-free-hosting.md` and are not repeated here.
 

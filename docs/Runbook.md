@@ -16,11 +16,12 @@ Spec §4.2 has the reasoning; this file has the commands.
 
 | Thing | Where it lives | Who can see it |
 |---|---|---|
-| Application secrets | Fly secrets (`fly secrets list` shows names, never values) | The owner |
+| Application secrets | `/etc/kept/kept.env` on the production VM, mode 0600 (`server/ops/prod/kept.env.example` lists the names) | The owner |
+| The origin itself | One Ubuntu VM on the owner's Azure subscription, SSH only, reachable over HTTP only through Cloudflare Tunnel `kept-api` *(since 2026-10-02; Fly `keptapp-api` before that, kept at zero machines as the fallback)* | The owner |
 | Local development config | `server/.env.local`, gitignored | The owner |
 | Database | Neon | The owner |
 | Receipt images and export zips | Cloudflare R2, bucket `kept` | The owner |
-| DNS, proxy, rate limiter | Cloudflare, zone `keptapp.net` | The owner |
+| DNS, proxy, rate limiter, tunnel | Cloudflare, zone `keptapp.net`; the tunnel under Zero Trust → Networks → Connectors | The owner |
 
 No secret value appears in this repository, in this file, or in any log.
 
@@ -43,7 +44,7 @@ A missing one stops the process at startup with the name in the message, rather 
 | `STORAGE_ACCESS_KEY_ID` | yes in production | R2 API token access key |
 | `STORAGE_SECRET_ACCESS_KEY` | yes in production | R2 API token secret |
 | `STORAGE_REGION` | no | Defaults to `auto`, which is right for R2 |
-| `EDGE_SHARED_SECRET` | no, but see below | Any random string. When set, the origin serves only requests carrying it in `x-kept-edge-secret`, which Cloudflare adds. Unset, the origin answers anyone who finds its `fly.dev` hostname |
+| `EDGE_SHARED_SECRET` | no, but see below | Any random string. When set, the origin serves only requests carrying it in `x-kept-edge-secret`, which Cloudflare adds. Unset, the origin answers anyone who reaches it around the edge - behind the tunnel nobody can, but the Fly fallback's `fly.dev` hostname is public (§5) |
 | `APPLE_WEB_CLIENT_ID` | no; required for web sign-in | The Apple Services ID the web client's Sign in with Apple mints tokens against (`com.arthurzhang.kept.web`). Unset, the verifier accepts exactly the iOS audience - the pre-wave-7 behaviour |
 | `WEB_ORIGIN` | no; required for the web client | Comma-separated browser origins granted CORS (`https://keptapp.net` once web/ is deployed). Unset in production nothing is granted; unset in development the Vite origin `http://localhost:5173` is the default |
 | `APPLE_TEAM_ID` | no; **all three or none**, and see below | The 10-character Team ID, the client secret's issuer |
@@ -59,12 +60,14 @@ Deliberately **not** boot-blocking in production, unlike `ANTHROPIC_API_KEY`: th
 To set them:
 
 ```bash
-fly secrets set APPLE_TEAM_ID=XXXXXXXXXX APPLE_SIGN_IN_KEY_ID=YYYYYYYYYY
-fly secrets set APPLE_SIGN_IN_PRIVATE_KEY="$(cat ~/Downloads/AuthKey_YYYYYYYYYY.p8)"
+# in /etc/kept/kept.env on the VM (§0, "Change a secret"); the key's newlines become \n in the one-line value
+APPLE_TEAM_ID=XXXXXXXXXX
+APPLE_SIGN_IN_KEY_ID=YYYYYYYYYY
+APPLE_SIGN_IN_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----
 ```
 
 `client_id` is not among them: the revoker uses `APPLE_CLIENT_ID`, because native iOS authorization uses the **bundle id** as its client identifier and a Services ID there earns `invalid_client` from Apple.
-Confirm it took by watching the boot log for the absence of the DISABLED line - `fly logs` after the restart `fly secrets set` performs on its own.
+Confirm it took by watching the boot log for the absence of the DISABLED line after `docker compose up -d`.
 
 **Under `NODE_ENV=production` the server additionally refuses to start** if storage is unconfigured (there is no MinIO to fall back to), if `STORAGE_ENDPOINT` is not https (presigned URLs inherit it, so plain http would send receipt images in the clear), if `DATABASE_URL` is a loopback address, if the session secret is under 32 characters, or if `ANTHROPIC_API_KEY` is unset.
 
@@ -75,22 +78,25 @@ A wrong `DATABASE_URL` password produced a process that printed `Kept API listen
 - **Object storage** is probed read-only with a 10-second cap: one `GetObject` on `.startup-probe/reachability`, a key that cannot exist, treating "no such key" as success - never a `HeadBucket` (bucket metadata is a permission the R2 token is not known to carry) and never a create. If it does not answer, the process names the endpoint and bucket and exits 1. *(This sentence said `HeadBucket` until 2026-08-15; the probe moved off it on 2026-08-11 and the code's own refusal message was corrected in round 3, but this line was missed.)*
 
 Both refusals happen **before the port is bound**, so a machine in this state is not listening at all, rather than listening and failing.
-⚠ Neither of these is an "environment variable is missing" refusal, so when §7 step 2 sends you to `fly logs`, expect one of these two sentences as well as the variable-name ones.
+⚠ Neither of these is an "environment variable is missing" refusal, so when §7 step 2 sends you to the container log, expect one of these two sentences as well as the variable-name ones.
 
 ---
 
 ## 1 · Deploy
 
-From `server/`:
+From the laptop, with the VM's ssh alias and the commit to ship:
 
 ```sh
-fly deploy
+server/ops/prod/deploy.sh <ssh-host> <commit-ish>            # add --migrate when the commit carries one (§2)
 ```
 
-That builds `Dockerfile`, ships it, and rolls the machine.
+On the VM that fetches and checks out the commit under `/opt/kept`, builds `server/Dockerfile` tagged with the short sha, and `docker compose up -d`s it under `server/ops/prod/docker-compose.prod.yml`, which replaces the running container and leaves the old image on disk for §3.
 The image runs the same entrypoint local development runs (`node --import tsx src/index.ts`) - deliberately, so the deployed process is not a second code shape that only exists in production.
+Ship the commit that is on `main`; the VM builds from the repository, not from the laptop's working tree.
 
-**Migrations do not run on deploy.** See §2.
+**Migrations do not run on deploy** unless you pass `--migrate`, and then they run from the image being deployed, before the swap. See §2.
+
+*Until 2026-10-02 this section read `fly deploy` from `server/`; the Fly app still exists at zero machines and `server/fly.toml` still describes it, so that command still works as the fallback (§5) and nowhere else.*
 
 ⚠ **The 2026-09-01 batch had an order, and it was not the default one.** Executed in full the same afternoon (`docs/DECISIONS.md`, 2026-09-01, last entry) - kept here because the next batch that pairs a migration with code that reads it will need the same sequence. In sequence:
 
@@ -109,20 +115,19 @@ The image runs the same entrypoint local development runs (`node --import tsx sr
 An exit code is not evidence, and neither is a health check that proves only that a process is listening.
 
 ```sh
-fly status                       # one machine, state "started"
-fly checks list                  # the /health HTTP check "passing"
-fly logs                         # expect: Kept API listening on port 3000
+ssh <ssh-host> docker compose -f /opt/kept/server/ops/prod/docker-compose.prod.yml ps          # api "healthy"
+ssh <ssh-host> docker compose -f /opt/kept/server/ops/prod/docker-compose.prod.yml logs --tail 50 api   # expect: Kept API listening on port 3000
 curl -i https://api.keptapp.net/api/me
 ```
 
-`fly checks list` reports the `GET /health` liveness check (added 2026-08-15).
+The compose healthcheck is `GET /health` (added 2026-08-15, carried over).
 It proves only that the process is up and answering HTTP - deliberately, so it never keeps Neon's autosuspending compute awake (docs/DECISIONS.md, 2026-08-15).
-The `curl` below stays the real proof that routing, TLS and the app all ran.
+The `curl` below stays the real proof that routing, TLS, the tunnel and the app all ran.
 
 The last one must answer **401** with a JSON body `{"error":{"code":"unauthorized",...}}` and a `Cache-Control: no-store` header.
 A 401 is the correct answer - it proves routing, TLS, the app, and the auth middleware all ran.
 A 403 with `{"error":{"code":"forbidden"}}` means `EDGE_SHARED_SECRET` is set on the origin but Cloudflare is not adding the header; fix the transform rule (§5) rather than unsetting the secret.
-A 502 or a Cloudflare error page means the origin is down - check `fly logs` for a startup refusal, which names what is missing.
+A 502 or a Cloudflare error page means the origin is down - check the container log for a startup refusal, which names what is missing. A **530** is the tunnel with no connector behind it (`systemctl status cloudflared` on the VM); a **404** with no JSON body is the tunnel answering a hostname it has no published route for (§5).
 
 ### First deploy only: the operator checklist *(added 2026-08-15)*
 
@@ -164,11 +169,17 @@ Executed 2026-08-16: the Neon project `kept` was created on Free, on Postgres 16
 
 ### Change a secret
 
+Edit `/etc/kept/kept.env` on the VM (mode 0600, never echoed), then restart the container and watch the boot log for the same lines as a deploy:
+
 ```sh
-fly secrets set SESSION_JWT_SECRET="$(openssl rand -base64 48)"
+ssh <ssh-host>
+sudoedit /etc/kept/kept.env
+docker compose -f /opt/kept/server/ops/prod/docker-compose.prod.yml up -d
+docker compose -f /opt/kept/server/ops/prod/docker-compose.prod.yml logs --tail 30 api
 ```
 
-`fly secrets set` restarts the machine by itself.
+`up -d` recreates the container when its environment changed; nothing re-reads the file without it.
+*(On Fly this was `fly secrets set NAME=value`, which restarted the machine by itself.)*
 ⚠ Changing `SESSION_JWT_SECRET` invalidates every existing session; everyone signs in again.
 To sign one person out without touching the secret, bump their `token_version` instead (§6).
 
@@ -179,10 +190,16 @@ To sign one person out without touching the secret, bump their `token_version` i
 **Migrations are run deliberately, never on boot.** A process that migrates as it starts will, on the day a migration is wrong, run it once per restart while the app is down.
 
 ```sh
-fly ssh console -C "npm run db:migrate"
+server/ops/prod/deploy.sh <ssh-host> <commit-ish> --migrate
 ```
 
-`drizzle-kit migrate` reads `DATABASE_URL` from the machine's environment, applies only what has not been applied, and records each one.
+With `--migrate`, the script builds the new image on the VM and runs `npm run db:migrate` **from that new image**, with the VM's env file, before the running container is swapped - so the migration a deploy needs is run from the image that contains it, which is the sequence 2026-09-01 needed and the Fly machine could not provide. `drizzle-kit migrate` applies only what has not been applied and records each one. Verify by reading `drizzle.__drizzle_migrations` and the schema itself, never by the migrate command's exit line.
+
+*Everything below this line up to "Take a backup first" is the Fly-era history that shaped the rule above. It is kept because the laptop path is still the alternative, and because the rule about which half of a deploy a migration belongs in has not changed.*
+
+```sh
+fly ssh console -C "npm run db:migrate"        # Fly era, and the trap described next
+```
 
 ⚠ **This command has not worked from the owner's Mac since 2026-08-26.** The WireGuard tunnel establishes and then times out probing the internal API; `fly doctor` reports the gateway ping failing with "no response from gateway received" while authentication and the agent pass. It is *not* simply blocked UDP - WireGuard-over-websockets on TCP/443 fails identically. The diagnosis is unfinished (`docs/DECISIONS.md`, 2026-08-26).
 **Update 2026-09-01: the tunnel worked again that afternoon, and it did not help.** `fly ssh console -C "npm run db:migrate"` connected, ran, and reported success - inside the **v8 image**, which shipped `0000` through `0008` and did not contain `0009`. It applied nothing. For any migration that must run *before* its deploy (§1's ordering note), the machine cannot run it whatever the tunnel does, because the file is not there; the laptop path below is the only path, not a fallback. Verify by reading `drizzle.__drizzle_migrations` and the schema itself, never by the migrate command's exit line.
@@ -193,9 +210,9 @@ Migration 0005 ran instead from the laptop, pointing `drizzle-kit` at Neon's **d
 npm run db:migrate
 ```
 
-Prefer the `fly ssh console` form when it works - it runs inside the machine, against the environment the app itself uses, with no production URL on the laptop's shell. Use the fallback knowingly, and take the §4 backup first either way.
+Prefer `deploy.sh --migrate` - it runs on the VM, from the image being deployed, against the environment the app itself uses, with no production URL on the laptop's shell. Use the laptop path knowingly, and take the §4 backup first either way.
 
-Run it **after** `fly deploy` when a migration only adds things (a new nullable column, a new table, a new index), and **before** the deploy when new code cannot run without it.
+Run it **after** the deploy when a migration only adds things (a new nullable column, a new table, a new index), and **before** the deploy when new code cannot run without it - which `deploy.sh --migrate` does by construction.
 Wave 6 needs neither: the schema is unchanged since `0003_one-active-export-per-user`.
 
 ⚠ **Not every migration is purely additive, and the rule above is a default, not a guarantee about what any given migration does.** Migration `0008_receipt-images-page-partial.sql` (2026-08-28, `docs/proposals/2026-08-28-ux-enhancements.md` proposal #6, built and applied to the local database only - not yet run against production) is the migration to have in mind before reading the two bullets above as if every migration were additive. It does not add anything: it `DROP CONSTRAINT`s the existing plain unique constraint on `receipt_images (receipt_id, page)` and recreates it as `CREATE UNIQUE INDEX … WHERE deleted_at IS NULL`, in the same transaction. Two things follow that a `new nullable column` does not carry. **First**, changing an existing constraint rather than adding one means it belongs in the **before-deploy** half of the rule above: the new route this migration exists for (`PUT /api/receipts/:id/images/:page`, replacing a page's image) would 23505 against its own just-soft-deleted predecessor on every single call under the old plain constraint - not misbehave at the edges, fail outright, the first time anyone used it. **Second**, `CREATE UNIQUE INDEX` without `CONCURRENTLY` takes an `ACCESS EXCLUSIVE` lock on `receipt_images` for the statement's duration, briefly blocking every read and write on that table - trivial at today's row count, but the kind of cost an `ADD COLUMN` (instant regardless of table size in modern Postgres) does not carry, and worth knowing about before assuming every future migration is as cheap as the last few have been.
@@ -221,9 +238,12 @@ Because (2) is expensive, the backup in §4 is not optional ceremony before a mi
 The app and the database roll back separately, and the app is the easy half.
 
 ```sh
-fly releases                     # find the previous version
-fly releases rollback            # or: fly deploy --image <previous image ref>
+git log --oneline -5 main                                   # find the previous commit
+server/ops/prod/deploy.sh <ssh-host> <previous commit>      # no --migrate
 ```
+
+The previous image is already on the VM, tagged by short sha, so the swap is immediate; `docker image ls kept-api` on the VM shows what is there to roll back to.
+*(Fly era: `fly releases` then `fly releases rollback`.)*
 
 ⚠ **Rolling the app back past a migration does not roll the migration back.** Old code against a new schema is usually fine here (the migrations so far have all been additive) but is not guaranteed. If the rollback crosses a migration that removed or narrowed something, restore instead.
 
@@ -363,11 +383,11 @@ Then drop the scratch database.
 
 ### If you actually have to restore for real
 
-1. Stop the app so nothing writes during the restore: `fly scale count 0`.
+1. Stop the app so nothing writes during the restore: `docker compose -f /opt/kept/server/ops/prod/docker-compose.prod.yml stop api` on the VM.
 2. Restore into a **new** database, never over the damaged one - the damaged one is evidence, and it may hold rows the backup does not.
 3. Verify it with `npm run db:verify-restore` as above.
-4. Point the app at it: `fly secrets set DATABASE_URL="<new url>"`.
-5. `fly scale count 1`, then re-run the §1 confirmation.
+4. Point the app at it: edit `DATABASE_URL` in `/etc/kept/kept.env` (§0, "Change a secret").
+5. `docker compose ... up -d api`, then re-run the §1 confirmation.
 
 ---
 
@@ -375,11 +395,13 @@ Then drop the scratch database.
 
 Cloudflare is in front of the origin for two things: **the rate limiter** §10B has asked for since the beginning, and DDoS protection.
 
-- **DNS.** `api.keptapp.net` is a proxied (orange-cloud) CNAME to the Fly app hostname. Proxied is the whole point; grey-cloud sends traffic straight to the origin and none of the below applies.
+- **DNS.** `api.keptapp.net` is a proxied (orange-cloud) CNAME to Cloudflare Tunnel `kept-api` (`<tunnel-id>.cfargotunnel.com`), created by the tunnel's own route form, not by hand. Proxied is the whole point; grey-cloud sends traffic straight to the origin and none of the below applies. *(2026-08-16 to 2026-10-02 the target was `keptapp-api.fly.dev`.)*
+- **The tunnel.** Zero Trust → Networks → Connectors → `kept-api` → Published application routes: `api.keptapp.net` → `http://localhost:3000`, catch-all 404. `api-next.keptapp.net` is the rehearsal hostname with the same route and the same Transform Rule; it is removed after 30 stable days. The connector is `cloudflared` as a systemd service on the VM (`systemctl status cloudflared`); the dashboard shows its connections. ⚠ **A route cannot be added while a DNS record of that name exists**, and a hostname the tunnel has no route for answers **404** with no body - which is exactly what happened at cutover when the `api` CNAME was repointed by hand first. The order is: delete the DNS record, add the route, confirm the record the form created is proxied. The reverse order is half an hour of 404.
+- **Falling back to Fly** (until the app is destroyed, no earlier than 2026-11-02): `fly scale count 1 -a keptapp-api`, wait for `fly status` to show the machine started, then in DNS delete the Tunnel CNAME `api` and add a proxied CNAME `api` → `keptapp-api.fly.dev`. The `_acme-challenge.api` CNAME and `_fly-ownership.api` TXT are what Fly's certificate for `api.keptapp.net` needs and are kept for this; do not delete them before the app.
 - **Rate limiting rule.** One rule, on `api.keptapp.net`, counting by IP. The Free plan allows exactly one rate limiting rule with a 10-second window, which is enough: the endpoint worth limiting is `POST /api/auth/apple`, the only route reachable without a session.
-- **The origin lock.** A Transform Rule adds a request header `x-kept-edge-secret` with the value of `EDGE_SHARED_SECRET`. Without this, `keptapp-api.fly.dev` remains reachable directly and the rate limiter guards one door of a two-door building. Set the Fly secret and the transform rule together, in that order (origin first tolerates the header before it requires it; the reverse locks you out for the seconds in between).
+- **The origin lock.** A Transform Rule adds a request header `x-kept-edge-secret` with the value of `EDGE_SHARED_SECRET`; its expression names both `api.keptapp.net` and `api-next.keptapp.net`. Behind the tunnel the lock is structural - the VM has no public HTTP port, so there is no second door - and the secret stays as defence in depth and as what keeps the Fly fallback (`keptapp-api.fly.dev`) from being reachable around the edge. Set the origin's secret and the transform rule together, in that order (origin first tolerates the header before it requires it; the reverse locks you out for the seconds in between).
 
-Rotating the edge secret: set the new value in the Cloudflare transform rule first, then `fly secrets set EDGE_SHARED_SECRET=...`. Requests carrying an old value are refused with 403, not 500.
+Rotating the edge secret: set the new value in the Cloudflare transform rule first, then in `/etc/kept/kept.env` and `docker compose up -d` (§0). Requests carrying an old value are refused with 403, not 500. ⚠ The rules overview page in the dashboard prints the header's **value** in plain text; the secret's current value was displayed in one session that way on 2026-10-02 and the owner chose not to rotate (`docs/DECISIONS.md` 2026-10-02).
 
 ### The R2 lifecycle rule
 
@@ -399,7 +421,7 @@ An expired zip is not a lost export: `GET /api/export/:id` reports the job as `e
 UPDATE users SET token_version = token_version + 1 WHERE id = '<user id>';
 ```
 
-**Look at what is in there.** `fly ssh console` then `psql "$DATABASE_URL"`, or the Neon console.
+**Look at what is in there.** The Neon console, or `psql` from the laptop with the `DATABASE_URL` that `~/.kept/backup.env` carries (§4). The VM has no `psql`; read production from the laptop, not from the container.
 
 **Parser accuracy** (§7.3's measurement, which accrues through ordinary use):
 
@@ -452,11 +474,11 @@ Symptoms come from the phone: pull-to-refresh fails within 10 seconds with a sta
 In order:
 
 1. `curl -i https://api.keptapp.net/api/me` - 401 means the server is fine and the problem is the phone's network.
-2. `fly status` and `fly logs` - a startup refusal names either the environment variable that is missing or wrong, or the backing service that did not answer (§0).
+2. On the VM, `docker compose -f /opt/kept/server/ops/prod/docker-compose.prod.yml ps` and `... logs --tail 100 api` - a startup refusal names either the environment variable that is missing or wrong, or the backing service that did not answer (§0). `systemctl status cloudflared` is the other half: the app can be healthy and unreachable if the connector is down (a **530** at the edge).
    A machine that keeps restarting with `Database at ... did not answer` or `Object storage did not answer at ...` is telling you the secret is wrong or the service is down, not that the app is broken.
-   `fly logs` also carries **one JSON line per request**: `{"msg":"request","method":...,"route":...,"status":...,"durationMs":...,"sessionPresented":...,"authenticated":...}`.
+   The container log also carries **one JSON line per request**: `{"msg":"request","method":...,"route":...,"status":...,"durationMs":...,"sessionPresented":...,"authenticated":...}`.
    `sessionPresented` is whether a bearer credential arrived at all; `authenticated` is whether it was accepted - "the client stopped sending a token" and "we are rejecting every token" separate on the first, not the second.
-   Expect a steady `route: "/health"` line every 30 seconds: that is Fly's liveness check (§1), not traffic.
+   Expect a steady `route: "/health"` line every 30 seconds: that is the compose healthcheck (§1), not traffic.
    That is how you tell "the phone is not reaching us at all" (no lines) from "we are refusing it" (401s) from "we are answering and the phone is unhappy" (200s).
    `route` is the matched pattern, never the requested path, and the line carries no receipt id, no search term, no user id and no token - so a request cannot be traced to a person from the log alone, deliberately.
    ⚠ A request refused **before** routing carries its own label since 2026-08-20: the edge-secret 403 logs `route: "refused:edge-secret"` and the 1 MiB body limit's 413 logs `route: "refused:body-limit"`, so a Cloudflare transform rule that stops adding the header shows up as a run of `refused:edge-secret` lines rather than blending into 404 noise. `route: "unmatched"` now means a genuine 404 and nothing else. *(Before this date all three shared `"unmatched"` and only the status code separated them.)*
