@@ -7,8 +7,9 @@
 # Creates a 2 GB swapfile (the VM has 1 GiB of RAM; the compose file's
 # memswap_limit relies on it), installs Docker (Docker's repository:
 # Ubuntu's docker.io lags and ships no compose plugin), cloudflared
-# (Cloudflare's repository), and unattended security upgrades; clones the
-# repository to /opt/kept; creates /etc/kept for the env file. Idempotent:
+# (Cloudflare's repository), and unattended upgrades for Ubuntu's security
+# pocket and cloudflared; clones the repository to /opt/kept; creates
+# /etc/kept for the env file. Idempotent:
 # safe to re-run.
 #
 # Two things it deliberately does NOT do, because both need a value only the
@@ -50,8 +51,16 @@ sudo apt-get update -q
 sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin cloudflared
 sudo usermod -aG docker "$USER"
 
-# Unattended security upgrades (Ubuntu's default configuration, enabled).
+# Unattended security upgrades (Ubuntu's default configuration, enabled),
+# plus cloudflared, whose repository the default leaves out. needrestart
+# restarts the service after an upgrade (docs/Runbook.md §5).
 sudo dpkg-reconfigure -f noninteractive unattended-upgrades
+sudo tee /etc/apt/apt.conf.d/51unattended-upgrades-cloudflared > /dev/null <<'EOF'
+// Kept: upgrade cloudflared from Cloudflare's repository too (docs/Runbook.md §5).
+Unattended-Upgrade::Origins-Pattern {
+	"origin=cloudflared,codename=any";
+};
+EOF
 
 # The repository and the configuration directory.
 if [ ! -d /opt/kept/.git ]; then
