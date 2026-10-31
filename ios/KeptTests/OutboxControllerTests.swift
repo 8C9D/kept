@@ -433,6 +433,258 @@ final class OutboxControllerTests: XCTestCase {
         XCTAssertEqual(controller.serverConfirmedCount, 1)
     }
 
+    // MARK: - Failures that are not about the item (2026-10-31)
+
+    /// The edge secret's refusal is JSON, so it arrives as a `requestFailed`
+    /// 403 for every request alike. Reading that as "this item is bad"
+    /// flipped the whole queue to Needs attention, one tap each to undo.
+    func testAnEdgeRefusalStopsTheQueueAndBlocksNothing() async throws {
+        api.uploadTargetHandler = { _ in
+            throw APIError.requestFailed(
+                code: "forbidden",
+                message: "Requests must arrive through the configured edge",
+                status: 403
+            )
+        }
+        let controller = await makeController()
+        try await controller.enqueue(imageData: Data("page one bytes".utf8))
+        try await controller.enqueue(imageData: Data("page two bytes".utf8))
+        await settle(controller)
+
+        XCTAssertEqual(api.uploadTargetCalls.count, 1, "a whole-queue stop, not one failure per item")
+        XCTAssertEqual(store.items.count, 2)
+        XCTAssertTrue(store.items.values.allSatisfy { $0.blockedMessage == nil })
+        XCTAssertEqual(
+            controller.entries.first?.status,
+            .waitingToRetry(message: "Requests must arrive through the configured edge")
+        )
+
+        // And it heals by itself the moment the edge does.
+        api.uploadTargetHandler = { _ in
+            UploadTarget(objectKey: "k", uploadUrl: URL(string: "https://storage.example/put")!)
+        }
+        controller.externalTrigger()
+        await settle(controller)
+        XCTAssertTrue(store.items.isEmpty)
+    }
+
+    func testServerStatusesThatAreNotAboutTheItemNeverBlockIt() async throws {
+        for status in [401, 403, 408, 429, 500, 502, 503] {
+            store = InMemoryOutboxStore()
+            api.createReceiptHandler = { _ in
+                throw APIError.requestFailed(code: "whatever", message: "not now", status: status)
+            }
+            let controller = await makeController()
+            try await controller.enqueue(imageData: Data("page bytes".utf8))
+            await settle(controller)
+
+            XCTAssertNil(store.items.values.first?.blockedMessage, "HTTP \(status) blocked the item")
+            XCTAssertEqual(store.items.count, 1, "HTTP \(status) lost the item")
+        }
+    }
+
+    /// A 401 about an older token, with a newer session on file: nobody
+    /// is coming to sign in and wake this queue, so it wakes itself.
+    func testARejectionWithASessionStillOnFileRetriesOnItsOwn() async throws {
+        var creates = 0
+        api.createReceiptHandler = { _ in
+            creates += 1
+            if creates == 1 { throw APIError.sessionRejected }
+            return Fixtures.receipt(status: .pending)
+        }
+        let controller = await makeController()
+        try await controller.enqueue(imageData: Data("page one bytes".utf8))
+        await settle(controller)
+        XCTAssertEqual(store.items.count, 1)
+
+        // The real backoff is two seconds; this waits it out rather than
+        // triggering, because the absence of a trigger is the point.
+        let deadline = Date().addingTimeInterval(4)
+        while !store.items.isEmpty, Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(store.items.isEmpty, "the queue never woke itself")
+    }
+
+    /// With no session on file the sign-in is what wakes it, and a retry
+    /// would only spin.
+    func testARejectionThatEndedTheSessionWaitsForSignIn() async throws {
+        api.createReceiptHandler = { [tokenStore] _ in
+            tokenStore?.stored = nil
+            throw APIError.sessionRejected
+        }
+        let controller = await makeController()
+        try await controller.enqueue(imageData: Data("page one bytes".utf8))
+        await settle(controller)
+
+        XCTAssertEqual(api.createReceiptCalls.count, 1)
+        try await Task.sleep(nanoseconds: 2_300_000_000)
+        XCTAssertEqual(api.createReceiptCalls.count, 1, "nothing to retry with until someone signs in")
+    }
+
+    // MARK: - A parse the server would refuse (2026-10-31)
+
+    /// An item an earlier build already wrote to disk: this parse rides in
+    /// `ocrSuggestions`, and one absurd value used to 400 the whole create.
+    func testAnUnstorableParseOnAQueuedItemIsDroppedRatherThanRefused() async {
+        let parsed = ParsedReceipt(
+            suggestions: ReceiptSuggestions(
+                totalCents: 12_345_678_901_234,
+                hstCents: 1300,
+                vendor: "MAPLE FOODS MARKET"
+            ),
+            ocrRawText: "TOTAL 123456789012.34"
+        )
+        let item = seededItem(progress: .uploaded(parsed, objectKey: "k"))
+        store.seed(item, imageData: Data("page".utf8))
+
+        let controller = await makeController()
+        await settle(controller)
+
+        let request = api.createReceiptCalls.first
+        XCTAssertNil(request?.totalCents)
+        XCTAssertNil(request?.ocrSuggestions.totalCents)
+        XCTAssertEqual(request?.hstCents, 1300)
+        XCTAssertEqual(request?.vendor, "MAPLE FOODS MARKET")
+        XCTAssertEqual(controller.serverConfirmedCount, 1)
+    }
+
+    // MARK: - Correcting a refused item (2026-10-31)
+
+    private func confirmedFields(totalCents: Int) -> ConfirmedReceiptFields {
+        ConfirmedReceiptFields(
+            purchasedAt: "2026-01-14",
+            vendor: "Maple Foods",
+            subtotalCents: nil,
+            hstCents: nil,
+            totalCents: totalCents,
+            tipCents: nil,
+            otherFeesCents: nil,
+            category: nil,
+            paymentMethod: nil,
+            notes: nil
+        )
+    }
+
+    /// Retry sent the same value into the same refusal and Discard threw
+    /// the scan away. The form reopens over the item instead, and what it
+    /// saves is what the create sends.
+    func testARefusedItemCanBeCorrectedAndThenLands() async throws {
+        let parsed = Self.parsedFixture
+        let item = seededItem(
+            progress: .uploaded(parsed, objectKey: "k"),
+            confirmation: confirmedFields(totalCents: 9_999_999_900),
+            blockedMessage: "totalCents is outside the storable amount range",
+            additionalPageCount: 1
+        )
+        store.seed(item, imageData: Data("page one".utf8), additionalPages: [Data("page two".utf8)])
+        api.addReceiptImageHandler = { _, objectKey, _ in
+            ReceiptImage(page: 2, downloadUrl: URL(string: "https://storage.example/\(objectKey)")!)
+        }
+        let controller = await makeController()
+        await settle(controller)
+
+        XCTAssertEqual(controller.entries.first?.canCorrect, true)
+        let draft = await controller.correctionDraft(forBlockedItem: item.id)
+        XCTAssertEqual(draft?.imageData, Data("page one".utf8))
+        XCTAssertEqual(draft?.additionalPages, [Data("page two".utf8)])
+        XCTAssertEqual(draft?.confirmation?.totalCents, 9_999_999_900)
+        XCTAssertEqual(draft?.suggestions, parsed.suggestions)
+
+        try await controller.correctBlockedItem(id: item.id, with: confirmedFields(totalCents: 9900))
+        await settle(controller)
+
+        XCTAssertEqual(api.createReceiptCalls.first?.totalCents, 9900)
+        XCTAssertEqual(api.createReceiptCalls.first?.status, .confirmed)
+        XCTAssertTrue(store.items.isEmpty)
+    }
+
+    /// The correction is on disk before anything else happens: a kill
+    /// straight after Save must not bring the refused value back.
+    func testACorrectionIsDurableBeforeTheDrain() async throws {
+        let item = seededItem(
+            progress: .uploaded(Self.parsedFixture, objectKey: "k"),
+            confirmation: confirmedFields(totalCents: 9_999_999_900),
+            blockedMessage: "refused"
+        )
+        store.seed(item, imageData: Data("page".utf8))
+        let controller = await makeController()
+        await settle(controller)
+
+        try await controller.correctBlockedItem(id: item.id, with: confirmedFields(totalCents: 9900))
+
+        XCTAssertEqual(store.updates.last?.confirmation?.totalCents, 9900)
+        XCTAssertNil(store.updates.last?.blockedMessage)
+    }
+
+    func testAFailedWriteKeepsTheItemBlockedAndTellsTheForm() async throws {
+        struct DiskFull: Error {}
+        let item = seededItem(
+            progress: .uploaded(Self.parsedFixture, objectKey: "k"),
+            confirmation: confirmedFields(totalCents: 9_999_999_900),
+            blockedMessage: "refused"
+        )
+        store.seed(item, imageData: Data("page".utf8))
+        let controller = await makeController()
+        await settle(controller)
+        store.updateError = DiskFull()
+
+        do {
+            try await controller.correctBlockedItem(id: item.id, with: confirmedFields(totalCents: 9900))
+            XCTFail("expected the failed write to reach the form")
+        } catch is DiskFull {
+            // Expected.
+        }
+        guard case .needsAttention = controller.entries.first?.status else {
+            return XCTFail("expected still blocked, got \(String(describing: controller.entries.first?.status))")
+        }
+    }
+
+    /// Before the create nothing has been refused about its fields, and
+    /// after it the receipt exists and any fix belongs on the receipt.
+    func testOnlyAnItemStoppedAtTheCreateOffersCorrection() async {
+        let missingImage = seededItem(
+            sequence: 1,
+            progress: .parsed(Self.parsedFixture),
+            blockedMessage: "The saved image for this receipt could not be read back from this phone."
+        )
+        let created = seededItem(
+            sequence: 2,
+            progress: .created(Self.parsedFixture, receiptId: UUID(), pagesAdded: 0),
+            blockedMessage: "Receipt not found",
+            additionalPageCount: 1
+        )
+        store.seed(missingImage, imageData: Data("a".utf8))
+        store.seed(created, imageData: Data("b".utf8), additionalPages: [Data("c".utf8)])
+        let controller = await makeController()
+        await settle(controller)
+
+        XCTAssertEqual(controller.entries.map(\.canCorrect), [false, false])
+        let draft = await controller.correctionDraft(forBlockedItem: missingImage.id)
+        XCTAssertNil(draft)
+    }
+
+    /// The bytes being gone is the one thing that can stop the form opening;
+    /// the row says so, the same rule a failed Retry follows.
+    func testACorrectionThatCannotOpenSaysWhyOnTheRow() async {
+        let item = seededItem(
+            progress: .uploaded(Self.parsedFixture, objectKey: "k"),
+            blockedMessage: "refused"
+        )
+        store.seed(item, imageData: Data("page".utf8))
+        let controller = await makeController()
+        await settle(controller)
+        store.removeImage(item.id)
+
+        let draft = await controller.correctionDraft(forBlockedItem: item.id)
+
+        XCTAssertNil(draft)
+        guard case .needsAttention(let message) = controller.entries.first?.status else {
+            return XCTFail("expected needsAttention")
+        }
+        XCTAssertTrue(message.hasPrefix("This receipt could not be opened"), message)
+    }
+
     // MARK: - §3: an item that can never succeed
 
     func testPermanent400BlocksTheItemButNotTheQueueBehindIt() async throws {
@@ -530,6 +782,35 @@ final class OutboxControllerTests: XCTestCase {
         XCTAssertEqual(Array(store.items.keys), [theirs.id])
         XCTAssertEqual(store.images.count, 1, "the other account's image is untouched")
         XCTAssertTrue(controller.entries.isEmpty, "the signed-in user's queue is empty")
+    }
+
+    /// Unreadable records are not in the queue, so walking it never met
+    /// them: a deleted account's images could stay on this phone behind a
+    /// record that failed to decode.
+    func testAccountDeletionClearsUnreadableRecordsToo() async {
+        store.loadAllResult = OutboxLoadResult(items: [], unreadableCount: 3)
+        store.removeUnreadableResult = 2
+        let controller = await makeController()
+        await settle(controller)
+        XCTAssertEqual(controller.unreadableCount, 3)
+
+        await controller.discardAll(ownedBy: Self.userA)
+
+        XCTAssertEqual(store.removeUnreadableCalls, [Self.userA])
+        XCTAssertEqual(controller.unreadableCount, 1, "what is left is stated, not assumed gone")
+    }
+
+    func testARecordThatWouldNotDeleteIsStated() async {
+        struct Refused: Error {}
+        store.loadAllResult = OutboxLoadResult(items: [], unreadableCount: 1)
+        store.removeUnreadableError = Refused()
+        let controller = await makeController()
+        await settle(controller)
+
+        await controller.discardAll(ownedBy: Self.userA)
+
+        XCTAssertEqual(controller.unreadableCount, 1)
+        XCTAssertEqual(controller.drainFailureNote, "1 queued receipt could not be removed from this phone.")
     }
 
     func testDiscardRefusesItemsThatAreNotBlocked() async throws {
@@ -957,10 +1238,90 @@ final class OutboxControllerTests: XCTestCase {
         XCTAssertTrue(controller.entries.isEmpty)
     }
 
+    /// A create whose response was lost, on a multi-page item: the retry
+    /// answers 409, and a current server says which receipt holds the
+    /// bytes. The rest of the pages go on that receipt, exactly as if the
+    /// create had answered. This used to dead-end at a block whose remedy
+    /// was a rescan, with Discard one tap from the only copy of those pages.
+    func testACreateDuplicateNamingTheReceiptCarriesOnWithThePages() async throws {
+        let existing = UUID()
+        api.createReceiptHandler = { _ in
+            throw APIError.duplicateImage(
+                existingReceiptId: existing,
+                message: "An identical image is already attached to one of your receipts"
+            )
+        }
+        api.addReceiptImageHandler = { _, objectKey, _ in
+            ReceiptImage(page: 2, downloadUrl: URL(string: "https://storage.example/\(objectKey)")!)
+        }
+        let controller = await makeController()
+
+        try await controller.enqueue(
+            document: .photo(
+                Data("page one".utf8),
+                additionalPages: [Data("page two".utf8), Data("page three".utf8)]
+            ),
+            parsed: Self.parsedFixture,
+            confirmation: nil,
+            partial: nil
+        )
+        await settle(controller)
+
+        XCTAssertEqual(api.addReceiptImageCalls.map(\.receiptId), [existing, existing])
+        XCTAssertTrue(store.items.isEmpty, "finished, so the local copy goes")
+        XCTAssertTrue(controller.entries.isEmpty)
+        XCTAssertEqual(controller.serverConfirmedCount, 1)
+    }
+
+    /// The same recovery survives a kill: `.created` is persisted before the
+    /// first page goes, so a relaunch resumes the pages, not the create.
+    func testACreateDuplicateNamingTheReceiptPersistsItsProgress() async throws {
+        let existing = UUID()
+        api.createReceiptHandler = { _ in
+            throw APIError.duplicateImage(existingReceiptId: existing, message: "duplicate")
+        }
+        api.addReceiptImageHandler = { _, _, _ in throw URLError(.notConnectedToInternet) }
+        let controller = await makeController()
+
+        try await controller.enqueue(
+            document: .photo(Data("page one".utf8), additionalPages: [Data("page two".utf8)]),
+            parsed: Self.parsedFixture,
+            confirmation: nil,
+            partial: nil
+        )
+        await settle(controller)
+
+        guard case .created(_, let receiptId, 0) = store.items.values.first?.progress else {
+            return XCTFail("expected .created, got \(String(describing: store.items.values.first?.progress))")
+        }
+        XCTAssertEqual(receiptId, existing)
+    }
+
+    /// A kill between the last page's persist and the removal. The receipt
+    /// is finished; resuming asked the store for a page past the end, and
+    /// its "missing image" answer blocked it with a false "could not be read
+    /// back from this phone".
+    func testAKillAfterTheLastPageFinishesTheItemInsteadOfBlockingIt() async throws {
+        let item = seededItem(
+            progress: .created(Self.parsedFixture, receiptId: UUID(), pagesAdded: 1),
+            additionalPageCount: 1
+        )
+        store.seed(item, imageData: Data("page one".utf8), additionalPages: [Data("page two".utf8)])
+
+        let controller = await makeController()
+        await settle(controller)
+
+        XCTAssertTrue(api.addReceiptImageCalls.isEmpty, "every page had already landed")
+        XCTAssertTrue(store.items.isEmpty)
+        XCTAssertTrue(controller.entries.isEmpty)
+        XCTAssertEqual(controller.serverConfirmedCount, 1)
+    }
+
     /// The one case the queue genuinely cannot finish on its own: a create
-    /// that answers 409, on an item with extra pages. The receipt exists
-    /// but the error carries no id, so the pages have nowhere to go. It
-    /// blocks with its remedy rather than dropping pages someone scanned.
+    /// that answers 409, on an item with extra pages, from a server that
+    /// names no receipt. The receipt exists but the pages have nowhere to
+    /// go. It blocks with its remedy rather than dropping pages someone
+    /// scanned.
     func testACreateDuplicateOnAMultiPageItemBlocksWithItsRemedy() async throws {
         api.createReceiptHandler = { _ in
             throw APIError.requestFailed(

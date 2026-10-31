@@ -155,6 +155,14 @@ enum ReceiptAmount {
         guard !multiplyOverflowed else { return nil }
         let (total, addOverflowed) = scaled.addingReportingOverflow(centPart)
         guard !addOverflowed else { return nil }
+        // And past what the server can store, the same answer for the same
+        // reason (2026-10-31). `TOTAL 123456789012.34` fits in Int and read
+        // as a real amount here - and because the raw parse rides in
+        // `ocrSuggestions`, whose schema bounds it like every other amount
+        // (`centsSchema`, http/schemas.ts), that one misread line 400'd the
+        // whole create and stranded the item. A receipt line nobody could
+        // store is no suggestion at all.
+        guard ReceiptArithmetic.isStorable(cents: total) else { return nil }
         return total
     }
 }

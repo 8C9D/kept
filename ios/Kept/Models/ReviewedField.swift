@@ -40,6 +40,16 @@ enum ReviewedField: String, Codable, Equatable, Hashable, CaseIterable, Sendable
     case paymentMethod
     case notes
 
+    /// The field a withheld amount names (2026-10-31). The withheld set
+    /// and the reviewed set are two records about the same boxes, and the
+    /// server's `amounts_need_review` check compares one against the other.
+    init(_ withheld: WithheldAmountField) {
+        switch withheld {
+        case .totalCents: self = .totalCents
+        case .subtotalCents: self = .subtotalCents
+        }
+    }
+
     /// A stored set, decoded from a receipt response's `reviewedFields`.
     ///
     /// A name this build does not know is DROPPED rather than carried:

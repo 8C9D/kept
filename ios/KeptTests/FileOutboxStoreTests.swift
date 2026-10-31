@@ -292,6 +292,49 @@ final class FileOutboxStoreTests: XCTestCase {
         )
     }
 
+    // MARK: - Account deletion's sweep (2026-10-31)
+
+    private func writeRawRecord(_ json: String?) throws -> URL {
+        let itemDirectory = directory.appending(path: UUID().uuidString.lowercased())
+        try FileManager.default.createDirectory(at: itemDirectory, withIntermediateDirectories: true)
+        try Data("image bytes".utf8).write(to: itemDirectory.appending(path: "image.jpg"))
+        if let json {
+            try Data(json.utf8).write(to: itemDirectory.appending(path: "item.json"))
+        }
+        return itemDirectory
+    }
+
+    private func exists(_ url: URL) -> Bool {
+        FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
+    }
+
+    /// Only a record that is provably someone else's survives. A readable
+    /// item is the queue's business, and the controller removes those by
+    /// owner; this reaches what the queue cannot see.
+    func testTheSweepRemovesWhatIsUnreadableAndLeavesWhatIsNot() async throws {
+        let owner = UUID()
+        let someoneElse = UUID()
+        let healthy = makeItem(sequence: 1)
+        try await store.add(healthy, imageData: Data("page".utf8))
+
+        let noCommit = try writeRawRecord(nil)
+        let garbage = try writeRawRecord("this is not json")
+        let brokenButMine = try writeRawRecord(#"{"userId":"\#(owner.uuidString)","future":true}"#)
+        let brokenButTheirs = try writeRawRecord(#"{"userId":"\#(someoneElse.uuidString)","future":true}"#)
+
+        let removed = try await store.removeUnreadable(ownedBy: owner)
+
+        XCTAssertEqual(removed, 3)
+        XCTAssertFalse(exists(noCommit), "a save that died partway is nobody's")
+        XCTAssertFalse(exists(garbage), "a record that names no one is treated as the deleter's")
+        XCTAssertFalse(exists(brokenButMine))
+        XCTAssertTrue(exists(brokenButTheirs), "it names another account, so it is not this deletion's")
+
+        let loaded = try await store.loadAll()
+        XCTAssertEqual(loaded.items.map(\.id), [healthy.id], "a readable item is never swept")
+        XCTAssertEqual(loaded.unreadableCount, 1)
+    }
+
     func testRemoveIsIdempotent() async throws {
         let item = makeItem()
         try await store.add(item, imageData: Data("image".utf8))

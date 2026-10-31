@@ -153,6 +153,7 @@ struct ReceiptDetailView: View {
                     }
                 )
             }
+            .holdsSession()
         }
         .sheet(item: $zoomedImages) { zoomed in
             ZoomableImageSheet(sources: zoomed.sources, initialPage: zoomed.page) {
@@ -176,6 +177,7 @@ struct ReceiptDetailView: View {
                     Task { await model.load(id: receipt.id) }
                 }
             }
+            .holdsSession()
         }
         // Asks before opening the scanner for a replace, in the receipt
         // delete dialog's own words where the point is the same: the

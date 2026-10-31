@@ -48,9 +48,7 @@ struct ConfirmSuggestionSet {
             otherFeesCents: merged.otherFeesCents?.value,
             totalCents: merged.totalCents.value
         )
-        var withheld = served
-        if merged.totalCents.withheld { withheld.insert(.totalCents) }
-        if merged.subtotalCents.withheld { withheld.insert(.subtotalCents) }
+        let withheld = served.union(merged.withheldAmounts)
         withheldAmounts = withheld
 
         vendor = merged.vendor.value
@@ -70,7 +68,12 @@ struct ConfirmSuggestionSet {
     /// (`ConfirmReceiptModel.applyServerSuggestions`). Both go through the
     /// same sanity rule for the same reason: a set of amounts that cannot
     /// be true is not made truer by which parser produced it.
-    init(parse: ReceiptSuggestions) {
+    ///
+    /// Bounded first (2026-10-31): the same refusal `ReceiptParser` makes of
+    /// its own output, applied to the server's answer too, so an amount no
+    /// column can hold never reaches the form as a chip or a prefill.
+    init(parse unbounded: ReceiptSuggestions) {
+        let parse = unbounded.withinServerBounds
         let withheld = Self.withhold(
             subtotalCents: parse.subtotalCents,
             hstCents: parse.hstCents,
@@ -125,7 +128,9 @@ struct ConfirmSuggestionSet {
 /// - a date the two parsers disagreed on carries an inline note with the
 ///   arithmetic warning's treatment, cleared by touching the field;
 /// - save is disabled until there is a valid total, with the reason
-///   stated;
+///   stated - and until every other box holds something the server can
+///   store (2026-10-31), so a refused value is told to the person looking
+///   at it instead of coming back as a 400 on a queued item;
 /// - a valid save hands the confirmed fields to whichever save path built
 ///   this model: a PATCH with status=confirmed for a server-side pending
 ///   receipt (the queue and the detail screen), or a durable outbox write
@@ -361,8 +366,10 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 
     /// True when no date was read off the paper and the prefill is the day
     /// of capture - the one suggestion that can be fabricated, so the view
-    /// says so out loud instead of passing it off as parsed.
-    let dateIsCaptureDayFallback: Bool
+    /// says so out loud instead of passing it off as parsed. No longer true
+    /// once the server's second opinion supplies a date (2026-10-31): the
+    /// note then contradicted the date printed directly above it.
+    @Published private(set) var dateIsCaptureDayFallback: Bool
 
     /// What to say when the arithmetic-sanity rule suppressed an amount
     /// (2026-09-01) - nil when it suppressed nothing, which is the ordinary
@@ -371,6 +378,18 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// because by then the note is describing a blank that no longer
     /// exists.
     private let withheldNoteText: String?
+
+    /// Which amounts this form opened without because they were withheld
+    /// (2026-10-31) - the set a confirmation reports as reviewed, see
+    /// `reviewedFieldsForConfirm`. Empty on every form with no suggestion
+    /// set, which is every `.edit`.
+    private let withheldFields: Set<ReviewedField>
+
+    /// Whether "Later" on this form carries what was typed with it - the
+    /// capture-time confirm, whose exit queues the receipt pending with
+    /// `pendingReceiptFields()`. False everywhere else: the queue's "Later"
+    /// discards by design, and so does closing a queued item's correction.
+    private let setAsideKeepsTyping: Bool
 
     /// The note under the total card when a suggested amount was withheld.
     /// A stated absence with a reason: "nothing was read" and "what was
@@ -393,10 +412,11 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
 
     // MARK: - The server's second opinion (2026-09-01)
 
-    /// A money field where the server's parse disagrees with a value this
-    /// form already has - offered as a one-tap chip rather than applied,
-    /// because overwriting a number already on screen is exactly what a
-    /// person would not expect a background request to do.
+    /// An amount the server's parse read that this form does not already
+    /// show - a blank box as well as a different number, since 2026-10-31 -
+    /// offered as a one-tap chip rather than applied, because a number
+    /// appearing or changing on its own is exactly what a person would not
+    /// expect a background request to do.
     struct ServerAmountAlternative: Equatable, Identifiable {
         let field: DerivableMoneyField
         let cents: Int
@@ -643,6 +663,51 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
             // through the confirm QUEUE, as where this actually bites, not
             // the in-the-moment single scan. nil makes
             // checkForPossibleDuplicates() a no-op.
+            duplicateCheckAction: nil,
+            setAsideKeepsTyping: true
+        )
+    }
+
+    /// A queued receipt the server refused to create (2026-10-31): the same
+    /// form, reopened over what the item already carries, so a value that
+    /// failed validation can be corrected rather than only retried into the
+    /// same refusal or discarded along with the scan.
+    ///
+    /// An item a person confirmed reopens as `.edit`, because every value
+    /// on it is theirs. One queued by "Later" or a batch page reopens as
+    /// `.confirm`, with the parse as suggestions under the fields they had
+    /// reviewed - the same rule the queue applies to the row it would have
+    /// become. Either way Save confirms it: there is no half-write of a row
+    /// that does not exist yet.
+    convenience init(
+        queued draft: QueuedReceiptDraft,
+        saveAction: @escaping (ConfirmedReceiptFields) async throws -> Void
+    ) {
+        let confirmed = draft.confirmation
+        let partial = draft.partial
+        self.init(
+            receiptId: nil,
+            currency: "CAD",
+            purpose: confirmed == nil ? .confirm : .edit,
+            imageSource: .local(draft.imageData),
+            extraImageSources: draft.additionalPages.map { .local($0) },
+            ocrFailureNote: nil,
+            suggestions: confirmed == nil ? ConfirmSuggestionSet(parse: draft.suggestions) : nil,
+            reviewedFields: Set(confirmed?.reviewedFields ?? partial?.reviewedFields ?? []),
+            existing: ExistingValues(
+                purchasedAt: confirmed?.purchasedAt ?? partial?.purchasedAt
+                    ?? ReceiptFormat.calendarDate(of: draft.capturedAt),
+                vendor: confirmed?.vendor ?? partial?.vendor,
+                totalCents: confirmed?.totalCents ?? partial?.totalCents,
+                hstCents: confirmed?.hstCents ?? partial?.hstCents,
+                subtotalCents: confirmed?.subtotalCents ?? partial?.subtotalCents,
+                tipCents: confirmed?.tipCents ?? partial?.tipCents,
+                otherFeesCents: confirmed?.otherFeesCents ?? partial?.otherFeesCents,
+                category: confirmed?.category ?? partial?.category,
+                paymentMethod: confirmed?.paymentMethod ?? partial?.paymentMethod,
+                notes: confirmed?.notes ?? partial?.notes
+            ),
+            saveAction: saveAction,
             duplicateCheckAction: nil
         )
     }
@@ -687,6 +752,16 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// relies on the server having remembered is a client that shows the
     /// wrong value the day it has not. Verbatim the web form's
     /// `draftFromPending` rule.
+    ///
+    /// ⚠ **2026-10-31, withheld amounts:** a total or subtotal withheld from
+    /// the suggestion set lands BLANK, and the row is not consulted for it.
+    /// Everywhere else an absent suggestion falls through to the row; here
+    /// that restored the very number the server had refused, because a
+    /// pending row's amounts are the capture-time snapshot that number came
+    /// from. The form then opened on $8.50 with nothing to say about it.
+    /// Reviewed still wins first: if a human wrote the amount, it is theirs
+    /// whatever a parser's sum thinks of it. Verbatim `draftFromPending`
+    /// again, in the same order.
     private init(
         receiptId: UUID?,
         currency: String,
@@ -700,7 +775,8 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         saveAction: @escaping (ConfirmedReceiptFields) async throws -> Void,
         duplicateCheckAction: ((_ purchasedAt: String, _ totalCents: Int, _ vendor: String?) async -> [Receipt])?,
         saveForLaterAction: ((SaveForLaterRequest) async throws -> Void)? = nil,
-        deleteAction: (() async throws -> Void)? = nil
+        deleteAction: (() async throws -> Void)? = nil,
+        setAsideKeepsTyping: Bool = false
     ) {
         self.receiptId = receiptId
         self.currency = currency
@@ -712,15 +788,22 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         self.duplicateCheckAction = duplicateCheckAction
         self.saveForLaterAction = saveForLaterAction
         self.deleteAction = deleteAction
+        self.setAsideKeepsTyping = setAsideKeepsTyping
         self.storedReviewedFields = reviewedFields
+        let withheldFields = Set((suggestions?.withheldAmounts ?? []).map(ReviewedField.init))
+        self.withheldFields = withheldFields
 
         /// A suggestion outranks the row's copy (§7.3) EXCEPT on a field
         /// the receipt records as reviewed, where the row is a human's own
-        /// value and nothing may sit over it. A local function rather than
-        /// eight copies of the same ternary; it captures the parameter,
-        /// never `self`, which is not yet initialized here.
+        /// value and nothing may sit over it, and on a withheld amount,
+        /// where the row is the refused number and nothing stands in for
+        /// it. A local function rather than eight copies of the same rule;
+        /// it captures the two locals, never `self`, which is not yet
+        /// initialized here.
         func seed<Value>(_ field: ReviewedField, suggested: Value?, row: Value?) -> Value? {
-            reviewedFields.contains(field) ? row : (suggested ?? row)
+            if reviewedFields.contains(field) { return row }
+            if withheldFields.contains(field) { return nil }
+            return suggested ?? row
         }
 
         // Each "seed" is exactly what prefills the field - captured here,
@@ -855,6 +938,43 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         }
     }
 
+    /// A person picked one of their own past values (2026-10-31).
+    ///
+    /// The pick is the look: only focus used to mark a field touched, and a
+    /// menu sets text without ever taking focus. So a picked vendor or
+    /// payment method still read as unreviewed - the server's second
+    /// opinion could overwrite it a moment later, and "Save for later" and
+    /// the capture screen's "Later" both left it behind, since each carries
+    /// only what was touched. Decided here rather than in the row so a
+    /// pick means one thing whichever control made it.
+    func usePastValue(_ value: String, for field: EditableField) {
+        switch field {
+        case .vendor: vendorText = value
+        case .category: categoryText = value
+        case .paymentMethod: paymentMethodText = value
+        case .total, .hst, .subtotal, .tip, .otherFees, .notes:
+            // No list of past values stands behind these.
+            return
+        }
+        markTouched(editable: field)
+    }
+
+    /// A person changed the date (2026-10-31) - what the DatePicker's
+    /// binding writes through, rather than an `onChange` on the value.
+    ///
+    /// `onChange` cannot tell who did it: the server's second opinion
+    /// replacing an untouched date fired the same handler, which marked it
+    /// reviewed and counted an edit, so the capture screen's "Later" sent
+    /// an LLM's date to the server as something a human had read off the
+    /// paper. `applyServerSuggestions` writes `purchasedDate` directly and
+    /// never comes through here.
+    func pickDate(_ date: Date) {
+        guard date != purchasedDate else { return }
+        purchasedDate = date
+        markTouched(.date)
+        recordDateEdited()
+    }
+
     /// A field stops being marked as an unreviewed suggestion WITHOUT
     /// anybody having looked at it - the one case being the total when
     /// the tracking rule below recomputes it. Mirrors the web form's
@@ -899,6 +1019,47 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// parser back a field it had already lost.
     var reviewedFieldsForSave: [ReviewedField] {
         ReviewedField.ordered(storedReviewedFields.union(sessionReviewedFields))
+    }
+
+    /// The same set for a CONFIRMATION, which also claims each amount this
+    /// form opened without because it was withheld and now holds a value
+    /// (2026-10-31).
+    ///
+    /// The server refuses pending -> confirmed with 409
+    /// `amounts_need_review` when a withheld amount carries a value and is
+    /// not in the reported set, and focus alone cannot be what satisfies
+    /// that here. The total that matters most is the one nobody focuses:
+    /// on the $218.94 receipt the fill button derives it from the subtotal
+    /// and HST, and on a blank form it tracks what is typed above it (flows
+    /// A-D). Asking someone to tap into a box they can already see filled
+    /// would be a rule nothing on screen could teach - it would read as a
+    /// server error with no way past it. The claim is honest for the reason
+    /// `ConfirmReceiptRequest` gives: a confirm is the person accepting the
+    /// whole form, and the form cannot hold the withheld number, because
+    /// `seed` blanks it. What it reports is a value that got there on this
+    /// form, by a person's own typing or tap.
+    ///
+    /// A withheld box left BLANK claims nothing. It sends an explicit null,
+    /// which passes the server's guard on its own: nothing the merge
+    /// refused is being promoted, so no review is needed to allow it, and
+    /// saying a person reviewed a box they never went near would be false.
+    ///
+    /// A save-for-later does not make this claim either - it is the write
+    /// that says nobody has decided yet.
+    var reviewedFieldsForConfirm: [ReviewedField] {
+        ReviewedField.ordered(
+            storedReviewedFields.union(sessionReviewedFields).union(withheldFieldsHoldingAValue)
+        )
+    }
+
+    private var withheldFieldsHoldingAValue: Set<ReviewedField> {
+        withheldFields.filter { field in
+            switch field {
+            case .totalCents: return totalInput != .empty
+            case .subtotalCents: return subtotalInput != .empty
+            default: return false
+            }
+        }
     }
 
     func isUnreviewed(_ field: SuggestedField) -> Bool {
@@ -1062,7 +1223,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         switch current {
         case .cents(let value): return value == initialCents
         case .empty: return initialCents == nil
-        case .invalid: return false
+        case .invalid, .outOfRange: return false
         }
     }
 
@@ -1148,7 +1309,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         switch input {
         case .empty: return 0
         case .cents(let value): return value
-        case .invalid: return nil
+        case .invalid, .outOfRange: return nil
         }
     }
 
@@ -1257,7 +1418,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         let tracks: Bool
         switch totalBeforeEdit {
         case .empty: tracks = true
-        case .invalid: tracks = false
+        case .invalid, .outOfRange: tracks = false
         case .cents(let total): tracks = oldSum != nil && total == oldSum
         }
         guard tracks, ReceiptArithmetic.isStorable(cents: newSum) else {
@@ -1310,6 +1471,27 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         case .tip: tipText = text
         case .otherFees: otherFeesText = text
         }
+    }
+
+    /// The keyboard bar's +/- button (2026-10-31): flips the sign of
+    /// whichever money box has focus. The components go through
+    /// `editComponentAmount`, so a refund's total follows its parts exactly
+    /// as it would had the digits been typed that way; the total is the
+    /// anchor, as it is for every other edit, and moves nothing.
+    func toggleSign(of field: EditableField) {
+        switch field {
+        case .total: totalText = MoneyInput.togglingSign(of: totalText)
+        case .subtotal: toggleComponentSign(.subtotal)
+        case .hst: toggleComponentSign(.hst)
+        case .tip: toggleComponentSign(.tip)
+        case .otherFees: toggleComponentSign(.otherFees)
+        case .vendor, .category, .paymentMethod, .notes:
+            return
+        }
+    }
+
+    private func toggleComponentSign(_ field: ComponentAmountField) {
+        editComponentAmount(field, to: MoneyInput.togglingSign(of: componentText(field)))
     }
 
     /// The current text of one component box - what the view's binding
@@ -1466,8 +1648,8 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// guessing at what the person meant to type rather than reading what
     /// is actually there.
     private var moneyFieldValues: (subtotal: Int?, hst: Int?, tip: Int?, otherFees: Int?, total: Int?)? {
-        if subtotalInput == .invalid || hstInput == .invalid || tipInput == .invalid
-            || otherFeesInput == .invalid || totalInput == .invalid {
+        if subtotalInput.isUnusable || hstInput.isUnusable || tipInput.isUnusable
+            || otherFeesInput.isUnusable || totalInput.isUnusable {
             return nil
         }
         func cents(_ input: MoneyInput) -> Int? {
@@ -1727,13 +1909,23 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     ///   field is still unreviewed and the server disagrees. The new value
     ///   becomes the suggestion of record (`initialSuggested*`), so the
     ///   save-time accept/override telemetry scores the person against
-    ///   what they were actually shown last.
-    /// - **Money fields**: filled only when the field is BLANK. When the
-    ///   form already shows an amount and the server disagrees, nothing is
-    ///   overwritten - the disagreement is offered as a chip
+    ///   what they were actually shown last. §7.2 rules these three this
+    ///   way by name.
+    /// - **Money fields**: never written. Wherever the server read an
+    ///   amount the form does not already show - a blank box, a withheld
+    ///   one, or a number that differs - it is offered as a chip
     ///   (`serverAmountAlternatives`) the person can tap. A number changing
     ///   under someone's eyes while they read a receipt is the one
     ///   behaviour this screen must never have.
+    ///
+    ///   ⚠ A BLANK box used to be filled directly (corrected 2026-10-31).
+    ///   §7.3 is explicit that the LLM's amounts reach a person "labelled,
+    ///   never into the field unasked", and for a reason this model cannot
+    ///   argue with: the blank is usually the case where the heuristic read
+    ///   nothing, the LLM is at its least checkable, and on an illegible
+    ///   photo it invented `1750 / 201 / 1549` outright. Filling the box
+    ///   also made a withheld total's "enter it from the paper" note vanish
+    ///   behind a number the note had just warned about.
     ///
     /// A no-op once the receipt is saving or saved: the values are durable
     /// by then and this arrives too late to matter.
@@ -1747,11 +1939,17 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         }
         if let purchasedAt = server.purchasedAt,
            !touchedFields.contains(.date),
-           let picked = ReceiptFormat.pickerDate(fromIso: purchasedAt),
-           purchasedAt != ReceiptFormat.isoDate(fromPicker: purchasedDate) {
-            purchasedDate = picked
-            initialSuggestedPurchasedAtIso = purchasedAt
-            markAsMachineSuggested(.date)
+           let picked = ReceiptFormat.pickerDate(fromIso: purchasedAt) {
+            // A date WAS found, even when it is the same day as the scan,
+            // so "no date was found on the receipt" is over either way. A
+            // touched date stays out of this branch: the box still shows
+            // what it showed, and the note still describes that.
+            dateIsCaptureDayFallback = false
+            if purchasedAt != ReceiptFormat.isoDate(fromPicker: purchasedDate) {
+                purchasedDate = picked
+                initialSuggestedPurchasedAtIso = purchasedAt
+                markAsMachineSuggested(.date)
+            }
         }
         if let paymentMethod = server.paymentMethod,
            !touchedFields.contains(.paymentMethod),
@@ -1765,13 +1963,14 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
         for entry in serverMoneyEntries(server) {
             guard let cents = entry.cents else { continue }
             guard !touchedFields.contains(entry.suggested) else { continue }
+            let adds: Bool
             switch entry.input {
-            case .empty:
-                applyMachineSuggestedAmount(entry.field, cents: cents)
-            case .cents(let current) where current != cents:
+            case .empty: adds = true
+            case .cents(let current): adds = current != cents
+            case .invalid, .outOfRange: adds = false
+            }
+            if adds {
                 alternatives.append(ServerAmountAlternative(field: entry.field, cents: cents))
-            case .cents, .invalid:
-                break
             }
         }
         serverAmountAlternatives = alternatives
@@ -1808,10 +2007,19 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// Applies one chip and removes it. The same bookkeeping every other
     /// machine-suggested amount gets, so tapping this is reported at save
     /// exactly like accepting a prefill.
+    ///
+    /// And the field is TOUCHED (2026-10-31), the rule `applyHstSuggestionChip`
+    /// states: a chip names its number and a person picked it, so that
+    /// choice is the looking. It matters more here than there, because
+    /// since the chips became the only way an LLM amount reaches a box, a
+    /// tapped chip that stayed unreviewed was dropped by the capture
+    /// screen's "Later", which carries only what was touched - the person
+    /// had chosen a number and the pending receipt never heard about it.
     @discardableResult
     func applyServerAlternative(_ alternative: ServerAmountAlternative) -> Bool {
         guard serverAmountAlternatives.contains(alternative) else { return false }
         applyMachineSuggestedAmount(alternative.field, cents: alternative.cents)
+        markTouched(alternative.field.suggestedField)
         serverAmountAlternatives.removeAll { $0 == alternative }
         return true
     }
@@ -1861,31 +2069,53 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// The reason save is disabled, stated below the button rather than
     /// left to be inferred (spec §10A.1) - or nil, meaning save away.
     var saveBlocker: String? {
-        switch totalInput {
-        case .empty:
-            return "Enter the total to save."
-        case .invalid:
-            return "The total isn't a valid amount."
-        case .cents:
-            break
+        totalInput == .empty ? "Enter the total to save." : unsavableFieldReason
+    }
+
+    /// The first box holding something no write could carry, named, or nil
+    /// (2026-10-31). The one list both blockers read, so the two cannot
+    /// disagree on what is sayable, and a new box cannot join one of them
+    /// only.
+    ///
+    /// Amounts as well as text are checked here rather than left for the
+    /// server's 400, because of where that 400 lands: a capture saves to the
+    /// outbox and returns at once, so the refusal arrives later on a queued
+    /// item with nobody looking at the form. The bounds are the server's own
+    /// (`ReceiptFieldLimits`, `ReceiptArithmetic.isStorable`).
+    private var unsavableFieldReason: String? {
+        let amounts: [(input: MoneyInput, invalid: String, tooLarge: String)] = [
+            (totalInput, "The total isn't a valid amount.", "The total is too large to save."),
+            (hstInput, "HST isn't a valid amount.", "HST is too large to save."),
+            (subtotalInput, "The subtotal isn't a valid amount.", "The subtotal is too large to save."),
+            (tipInput, "The tip isn't a valid amount.", "The tip is too large to save."),
+            (otherFeesInput, "Other fees aren't a valid amount.", "Other fees are too large to save."),
+        ]
+        for amount in amounts {
+            if amount.input == .invalid { return amount.invalid }
+            if amount.input == .outOfRange { return amount.tooLarge }
         }
-        if hstInput == .invalid {
-            return "HST isn't a valid amount."
-        }
-        if subtotalInput == .invalid {
-            return "The subtotal isn't a valid amount."
-        }
-        if tipInput == .invalid {
-            return "The tip isn't a valid amount."
-        }
-        if otherFeesInput == .invalid {
-            return "Other fees aren't a valid amount."
+        let texts: [(text: String, limit: Int, tooLong: String)] = [
+            (vendorText, ReceiptFieldLimits.vendor, "The vendor is too long"),
+            (categoryText, ReceiptFieldLimits.category, "The category is too long"),
+            (paymentMethodText, ReceiptFieldLimits.paymentMethod, "The payment method is too long"),
+            (notesText, ReceiptFieldLimits.notes, "The notes are too long"),
+        ]
+        for field in texts {
+            if let value = normalized(field.text), !ReceiptFieldLimits.fits(value, limit: field.limit) {
+                return "\(field.tooLong) (\(field.limit) characters at most)."
+            }
         }
         return nil
     }
 
     var canSave: Bool {
         saveBlocker == nil
+    }
+
+    /// The reason under Save has stopped being true - a session renewed
+    /// behind the form (2026-10-31).
+    func clearSaveError() {
+        saveError = nil
     }
 
     // MARK: - Acknowledging a large mismatch (2026-09-01)
@@ -2010,7 +2240,7 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// no success modal (spec §10A.1). Returns whether the receipt is now
     /// confirmed.
     func save() async -> Bool {
-        guard case .cents(let totalCents) = totalInput else {
+        guard saveBlocker == nil, case .cents(let totalCents) = totalInput else {
             // The UI disables save while saveBlocker is non-nil; reaching
             // here anyway is a wiring bug, surfaced as the stated reason.
             saveError = saveBlocker
@@ -2034,12 +2264,12 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
                 category: normalized(categoryText),
                 paymentMethod: normalized(paymentMethodText),
                 notes: normalized(notesText),
-                // Rides along harmlessly on a confirmation (2026-09-01): a
-                // confirmed receipt is served no suggestions at all, so
-                // nothing consumes the set. Sent anyway so the two writes
-                // this form can make differ in as little as possible -
-                // the web's `patchForConfirm` makes the same call.
-                reviewedFields: reviewedFieldsForSave
+                // Sent so the two writes this form can make differ in as
+                // little as possible - the web's `patchForConfirm` makes
+                // the same call. Since 2026-10-31 the server also reads it
+                // here, for `amounts_need_review`: see
+                // `reviewedFieldsForConfirm`.
+                reviewedFields: reviewedFieldsForConfirm
             ))
             hasSaved = true
             return true
@@ -2072,12 +2302,26 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// makes the identical call (`patchForSaveForLater` still runs the
     /// money parser over every box and throws with the field named).
     var saveForLaterBlocker: String? {
-        if totalInput == .invalid { return "The total isn't a valid amount." }
-        if hstInput == .invalid { return "HST isn't a valid amount." }
-        if subtotalInput == .invalid { return "The subtotal isn't a valid amount." }
-        if tipInput == .invalid { return "The tip isn't a valid amount." }
-        if otherFeesInput == .invalid { return "Other fees aren't a valid amount." }
-        return nil
+        unsavableFieldReason
+    }
+
+    /// Why the capture screen's "Later" cannot leave yet, or nil
+    /// (2026-10-31).
+    ///
+    /// That exit carries the fields a person touched (`pendingReceiptFields`),
+    /// and a touched box whose text will not parse has no value to carry:
+    /// `45,20` before the comma rule, a mid-keystroke `12.`, went out as
+    /// reviewed-and-empty, which kept neither the typing nor the parser's
+    /// suggestion it had replaced. Leaving the field out of the reviewed set
+    /// instead would have saved the suggestion and still thrown the typing
+    /// away in silence. Holding the exit is the one answer that loses
+    /// nothing: the form is still up, the scan is still in hand, and the
+    /// person is told which box to finish or clear.
+    ///
+    /// Nil on every other form. Their "Later" takes nothing with it, by
+    /// design, so there is nothing a bad box could damage.
+    var setAsideBlocker: String? {
+        setAsideKeepsTyping ? saveForLaterBlocker : nil
     }
 
     /// The half-way write: the REVIEWED fields' values and the reviewed
@@ -2151,6 +2395,9 @@ final class ConfirmReceiptModel: ObservableObject, Identifiable {
     /// `nil` when nothing has been reviewed at all, which is the ordinary
     /// case (a person who scans and immediately taps Later): the create
     /// body is then byte-identical to what it was before this existed.
+    ///
+    /// Only meaningful once `setAsideBlocker` is clear - `centsOrNil` reads
+    /// an unusable box as blank, and on this path blank is a claim.
     func pendingReceiptFields() -> PendingReceiptFields? {
         let reviewed = reviewedFieldsForSave
         guard !reviewed.isEmpty else { return nil }

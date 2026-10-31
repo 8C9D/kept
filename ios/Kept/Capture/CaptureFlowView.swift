@@ -73,10 +73,16 @@ struct CaptureFlowView: View {
                     // "the scanner itself errored", and losing that
                     // distinction in telemetry is the accepted trade.
                     onFinished(false)
-                case .scanned(let pages):
-                    eventLogger.log(.captureCompleted, count: pages.count)
+                case .encoding:
+                    // Off the scanner straight away: "Reading receipt…"
+                    // covers the encode as well as the read, and a tap on
+                    // Save never sits on a frozen camera.
                     stage = .handlingPages
-                    Task { await captureModel.savePages(pages) }
+                case .scanned(let scan):
+                    eventLogger.log(.captureCompleted, count: scan.pages.count)
+                    Task {
+                        await captureModel.savePages(scan.pages, scanFailureNote: scan.failureNote)
+                    }
                 }
             }
             .ignoresSafeArea()
@@ -93,7 +99,7 @@ struct CaptureFlowView: View {
     private var pagesBody: some View {
         switch captureModel.phase {
         case .choosingPageMode(let pageCount):
-            ScannedPagesChoiceView(pageCount: pageCount) {
+            ScannedPagesChoiceView(pageCount: pageCount, note: captureModel.scanFailureNote) {
                 Task { await captureModel.saveScannedPagesAsSeparateReceipts() }
             } onOneReceipt: {
                 Task { await captureModel.saveScannedPagesAsOneReceipt() }
@@ -145,6 +151,15 @@ struct CaptureFlowView: View {
         case .failed(let message):
             failedBody(message)
 
+        case .scanFailed(let message):
+            ScanFailedView(title: "Nothing was saved", message: message) {
+                captureModel.discardFailedScan()
+                stage = .scanning
+            } onCancel: {
+                // Nothing changed, so Home has nothing to refresh.
+                onFinished(false)
+            }
+
         case .saved:
             // Straight back to Home - the receipts are safe in the outbox,
             // and no success modal, ever (§10A.1).
@@ -178,6 +193,47 @@ struct CaptureFlowView: View {
     }
 }
 
+/// A scan that produced no usable page at all (2026-10-31), for the two
+/// flows that scan. Its own screen rather than either flow's failure screen,
+/// because those offer Try again, which resumes work - and with no page to
+/// resume it could only report that nothing had been done, successfully.
+/// What helps is the camera, so that is what is offered.
+struct ScanFailedView: View {
+    let title: String
+    let message: String
+    let onScanAgain: () -> Void
+    let onCancel: () -> Void
+
+    init(
+        title: String,
+        message: String,
+        onScanAgain: @escaping () -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.title = title
+        self.message = message
+        self.onScanAgain = onScanAgain
+        self.onCancel = onCancel
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Label(title, systemImage: "exclamationmark.triangle")
+                .font(.headline)
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button("Scan again", action: onScanAgain)
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("scan.again")
+            Button("Cancel", role: .cancel, action: onCancel)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 /// The question a multi-page scanning session has to answer before either
 /// path can start (2026-09-01, the owner's decision): N separate receipts -
 /// the backlog case this app was built for - or one receipt with N pages.
@@ -198,15 +254,21 @@ struct CaptureFlowView: View {
 /// nor a way to present `VNDocumentCameraViewController` at all.
 struct ScannedPagesChoiceView: View {
     let pageCount: Int
+    /// A page of this scan that could not be kept (2026-10-31). Said here
+    /// because a batch goes straight back to Home from this screen: it is
+    /// the last place the person is looking at this scan.
+    let note: String?
     let onSeparateReceipts: () -> Void
     let onOneReceipt: () -> Void
 
     init(
         pageCount: Int,
+        note: String? = nil,
         onSeparateReceipts: @escaping () -> Void,
         onOneReceipt: @escaping () -> Void
     ) {
         self.pageCount = pageCount
+        self.note = note
         self.onSeparateReceipts = onSeparateReceipts
         self.onOneReceipt = onOneReceipt
     }
@@ -222,6 +284,12 @@ struct ScannedPagesChoiceView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            if let note {
+                Label(note, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
             Button(action: onSeparateReceipts) {
                 Text("Save as \(pageCount) separate receipts")
                     .frame(maxWidth: .infinity)

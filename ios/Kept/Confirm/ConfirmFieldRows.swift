@@ -80,6 +80,11 @@ struct SuggestedFieldRow: View {
                         .font(.caption2)
                         .foregroundStyle(.orange)
                 }
+                if moneyInput == .outOfRange {
+                    Text("Too large to save")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
                 if let disagreementNote {
                     DisagreementNote(message: disagreementNote)
                 }
@@ -118,11 +123,13 @@ struct ReusableValueFieldRow: View {
     /// payment method, which are never suggested and so have nothing to
     /// be "found" in the first place.
     var placeholder: String = "None"
-    /// Called when a past value is picked from the menu - `option_reused`
-    /// (behavioural telemetry, 2026-08-28). Nil by default so a caller
-    /// that has no EventLogger in hand (there is none today, but the row
-    /// itself should not require one) simply logs nothing.
-    var onReuse: (() -> Void)? = nil
+    /// A past value was picked, from the menu or the sheet. The row does
+    /// not write `text` itself: a pick is a person reviewing the field, and
+    /// a bare `text = value` carried no such fact, because only focus
+    /// marked a field touched and a menu never takes focus (2026-10-31,
+    /// `ConfirmReceiptModel.usePastValue`). Required, so a caller cannot
+    /// offer the menu and forget what a pick means.
+    let onPick: (String) -> Void
 
     /// Up while the long-list picker is open (2026-09-01) - see
     /// `PastValuesPresentation` for why a long list is not a menu.
@@ -166,8 +173,7 @@ struct ReusableValueFieldRow: View {
                         Menu {
                             ForEach(pastValues, id: \.self) { value in
                                 Button(value) {
-                                    text = value
-                                    onReuse?()
+                                    onPick(value)
                                 }
                             }
                         } label: {
@@ -181,10 +187,7 @@ struct ReusableValueFieldRow: View {
             }
         }
         .sheet(isPresented: $showingPicker) {
-            PastValuesPickerSheet(title: label, values: pastValues) { value in
-                text = value
-                onReuse?()
-            }
+            PastValuesPickerSheet(title: label, values: pastValues, onPick: onPick)
         }
     }
 }

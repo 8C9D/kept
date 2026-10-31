@@ -100,6 +100,58 @@ final class ReceiptDisplayTests: XCTestCase {
         XCTAssertEqual(receipt.displayTotalCents, 2925)
     }
 
+    /// How a $218.94 receipt came to be stored at $8.50. A pending row's
+    /// total IS the number the server withheld, so `value ?? row` put it
+    /// straight back: Home read $8.50 and the swipe confirmed it.
+    func testAWithheldAmountShowsNothingAndTheRowIsNotConsulted() {
+        let receipt = Fixtures.receipt(
+            subtotalCents: 21160,
+            totalCents: 850,
+            status: .pending,
+            suggestions: Fixtures.merged(totalCents: nil, totalWithheld: true, subtotalWithheld: true)
+        )
+        XCTAssertNil(receipt.displayTotalCents)
+        XCTAssertNil(receipt.displaySubtotalCents)
+        XCTAssertFalse(receipt.canQuickConfirm, "no number to swipe on, and none that should be saved")
+    }
+
+    /// A withheld subtotal has no column on the row, but the swipe leaves
+    /// out what it does not carry, so it would confirm the number unseen.
+    func testAWithheldSubtotalAloneStopsTheSwipeToo() {
+        let receipt = Fixtures.receipt(
+            subtotalCents: 21160,
+            totalCents: 850,
+            status: .pending,
+            suggestions: Fixtures.merged(totalCents: 850, subtotalWithheld: true)
+        )
+        XCTAssertEqual(receipt.displayTotalCents, 850)
+        XCTAssertNil(receipt.displaySubtotalCents)
+        XCTAssertFalse(receipt.canQuickConfirm)
+    }
+
+    /// A person typed it: the flag does not take a human's value away.
+    func testAReviewedAmountStillShows() {
+        let receipt = Fixtures.receipt(
+            totalCents: 21894,
+            status: .pending,
+            suggestions: Fixtures.merged(totalCents: nil, totalWithheld: true),
+            reviewedFields: ["totalCents"]
+        )
+        XCTAssertEqual(receipt.displayTotalCents, 21894)
+        XCTAssertTrue(receipt.canQuickConfirm)
+    }
+
+    /// Withholding is about a machine's guess, and a confirmed row is a
+    /// human's record.
+    func testAConfirmedRowIsNeverWithheld() {
+        let receipt = Fixtures.receipt(
+            totalCents: 850,
+            status: .confirmed,
+            suggestions: Fixtures.merged(totalCents: nil, totalWithheld: true)
+        )
+        XCTAssertEqual(receipt.displayTotalCents, 850)
+    }
+
     func testMergeAbsentEverywhereIsAStatedAbsenceNotAFabrication() {
         // Both parsers ran and found nothing, and the row has nothing:
         // nil reaches the views, which state the absence ("No total yet",

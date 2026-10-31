@@ -208,6 +208,144 @@ final class CaptureFlowModelTests: XCTestCase {
         XCTAssertNil(outbox.enqueued[0].partial)
     }
 
+    /// The typing is the thing being protected: a box mid-keystroke holds
+    /// the exit, and nothing queues until it reads as something.
+    func testLaterWaitsForABoxThatWillNotParse() async {
+        let model = makeModel(recognizer: StubTextRecognizer(results: [Self.parsedText]))
+        await model.savePages([Data("single page".utf8)])
+        guard case .confirming(let confirmModel) = model.phase else {
+            return XCTFail("Expected confirming, got \(model.phase)")
+        }
+        confirmModel.markTouched(editable: .total)
+        confirmModel.totalText = "12."
+
+        await model.setAsideSingleCapture()
+
+        XCTAssertTrue(outbox.enqueued.isEmpty, "nothing queued, so nothing was lost")
+        guard case .confirming = model.phase else {
+            return XCTFail("the form must stay up, got \(model.phase)")
+        }
+
+        confirmModel.totalText = "12.50"
+        await model.setAsideSingleCapture()
+
+        XCTAssertEqual(outbox.enqueued.count, 1)
+        XCTAssertEqual(outbox.enqueued[0].partial?.reviewedFields, [.totalCents])
+        XCTAssertEqual(outbox.enqueued[0].partial?.totalCents, 1250)
+    }
+
+    /// `45,20` was the same failure on a French keyboard, and reads now.
+    func testLaterCarriesACommaDecimal() async {
+        let model = makeModel(recognizer: StubTextRecognizer(results: [Self.parsedText]))
+        await model.savePages([Data("single page".utf8)])
+        guard case .confirming(let confirmModel) = model.phase else {
+            return XCTFail("Expected confirming, got \(model.phase)")
+        }
+        confirmModel.markTouched(editable: .total)
+        confirmModel.totalText = "45,20"
+
+        await model.setAsideSingleCapture()
+
+        XCTAssertEqual(outbox.enqueued.first?.partial?.totalCents, 4520)
+    }
+
+    /// A page that would not encode is said where the rest of the scan
+    /// goes next. On one surviving page that is the confirm form.
+    func testALostPageIsStatedOnTheConfirmScreen() async {
+        let model = makeModel(recognizer: StubTextRecognizer(results: [Self.parsedText]))
+
+        await model.savePages(
+            [Data("page one".utf8)],
+            scanFailureNote: "Page 2 of 2 could not be saved. Scan it again."
+        )
+
+        guard case .confirming(let confirmModel) = model.phase else {
+            return XCTFail("Expected confirming, got \(model.phase)")
+        }
+        XCTAssertEqual(confirmModel.ocrFailureNote, "Page 2 of 2 could not be saved. Scan it again.")
+    }
+
+    /// On several it is the page-mode question, because a batch returns to
+    /// Home straight from there.
+    func testALostPageIsStatedOnThePageChoice() async {
+        let model = makeModel()
+
+        await model.savePages(
+            [Data([1]), Data([2])],
+            scanFailureNote: "Page 2 of 3 could not be saved. Scan it again."
+        )
+
+        guard case .choosingPageMode(let pageCount) = model.phase else {
+            return XCTFail("Expected the question, got \(model.phase)")
+        }
+        XCTAssertEqual(pageCount, 2)
+        XCTAssertEqual(model.scanFailureNote, "Page 2 of 3 could not be saved. Scan it again.")
+    }
+
+    /// With nothing left, the reason is all there is to show - never the
+    /// silent exit a failed scan takes, and never the ordinary failure
+    /// screen, whose Try again has nothing to resume.
+    func testAScanThatLostEveryPageOffersARescan() async {
+        let model = makeModel()
+
+        await model.savePages([], scanFailureNote: "Page 1 of 1 could not be saved. Scan it again.")
+
+        guard case .scanFailed(let message) = model.phase else {
+            return XCTFail("Expected scanFailed, got \(model.phase)")
+        }
+        XCTAssertEqual(message, "Page 1 of 1 could not be saved. Scan it again.")
+    }
+
+    /// The defect in full: Try again reached `saveRemaining()` with no pages,
+    /// which reported `.saved(count: 0)` and closed the capture as a success
+    /// having saved nothing.
+    func testRetryCannotTurnALostScanIntoASuccess() async {
+        let model = makeModel()
+        await model.savePages([], scanFailureNote: "Page 1 of 1 could not be saved. Scan it again.")
+
+        await model.retry()
+
+        guard case .scanFailed = model.phase else {
+            return XCTFail("a scan that saved nothing reported \(model.phase)")
+        }
+        XCTAssertTrue(outbox.enqueued.isEmpty)
+    }
+
+    /// Scanning again starts clean: the new scan is not told about the old
+    /// one's lost pages.
+    func testARescanStartsFromNothing() async {
+        let model = makeModel(recognizer: StubTextRecognizer(results: [Self.parsedText]))
+        await model.savePages([], scanFailureNote: "Page 1 of 1 could not be saved. Scan it again.")
+
+        model.discardFailedScan()
+
+        guard case .idle = model.phase else {
+            return XCTFail("Expected idle, got \(model.phase)")
+        }
+        XCTAssertNil(model.scanFailureNote)
+
+        await model.savePages([Data("the new scan".utf8)])
+
+        guard case .confirming(let confirmModel) = model.phase else {
+            return XCTFail("Expected confirming, got \(model.phase)")
+        }
+        XCTAssertNil(confirmModel.ocrFailureNote)
+    }
+
+    /// The view leaves the scanner as soon as encoding starts, so an empty
+    /// scan needs somewhere to go or the spinner never ends.
+    func testAnEmptyScanGoesStraightBack() async {
+        let model = makeModel()
+
+        await model.savePages([])
+
+        guard case .saved(let count) = model.phase else {
+            return XCTFail("Expected saved, got \(model.phase)")
+        }
+        XCTAssertEqual(count, 0)
+        XCTAssertTrue(outbox.enqueued.isEmpty)
+    }
+
     /// A failed "Later" leaves the failure screen up, where the confirm
     /// model is no longer the phase - so the typed values are read once,
     /// before the phase moves, and the retry sends the same ones rather
@@ -467,7 +605,11 @@ final class CaptureFlowSecondOpinionTests: XCTestCase {
         return confirmModel
     }
 
-    func testServerAnswerFillsTheFieldsTheHeuristicLeftEmpty() async {
+    /// Vendor, date and payment method replace what is untouched; amounts
+    /// arrive as chips, blank box or not (§7.2, §7.3 - this test asserted
+    /// the money was filled in directly until 2026-10-31, when that was
+    /// corrected to the spec).
+    func testServerAnswerFillsTextAndOffersAmounts() async {
         let outbox = StubOutbox()
         let model = makeModel(outbox: outbox, remoteParse: { rawText, capturedAt in
             XCTAssertEqual(rawText, "YINGHUA LI\nChicken Souvlaki $15.49\nTotal 50")
@@ -490,15 +632,19 @@ final class CaptureFlowSecondOpinionTests: XCTestCase {
         XCTAssertEqual(confirm.totalText, "")
 
         await waitUntil({ confirm.vendorText == "JIMMY THE GREEK" }, "the server's vendor never applied")
-        XCTAssertEqual(confirm.totalText, "17.50")
-        XCTAssertEqual(confirm.hstText, "2.01")
-        XCTAssertEqual(confirm.subtotalText, "15.49")
+        XCTAssertEqual(confirm.totalText, "")
+        XCTAssertEqual(confirm.hstText, "")
+        XCTAssertEqual(confirm.subtotalText, "")
+        XCTAssertEqual(
+            confirm.serverAmountAlternatives.map(\.cents),
+            [1750, 1549, 201],
+            "every amount arrives labelled, in the form's own order"
+        )
         XCTAssertEqual(confirm.paymentMethodText, "MASTERCARD")
         XCTAssertEqual(ReceiptFormat.isoDate(fromPicker: confirm.purchasedDate), "2026-04-01")
         // Replaced, not confirmed: every field it touched is still a
         // suggestion nobody has looked at.
         XCTAssertTrue(confirm.isUnreviewed(.vendor))
-        XCTAssertTrue(confirm.isUnreviewed(.total))
     }
 
     /// The immutable record: whatever the server says, what travels to the
@@ -514,6 +660,10 @@ final class CaptureFlowSecondOpinionTests: XCTestCase {
         guard let confirm = confirmModel(of: model) else { return XCTFail("no confirm screen") }
         await waitUntil({ confirm.vendorText == "JIMMY THE GREEK" }, "the server's vendor never applied")
 
+        // An amount reaches the form only by a tap (§7.3).
+        if let total = confirm.serverAmountAlternatives.first(where: { $0.field == .total }) {
+            confirm.applyServerAlternative(total)
+        }
         _ = await confirm.save()
 
         XCTAssertEqual(outbox.enqueuedParses.count, 1)

@@ -147,6 +147,16 @@ struct MergedSuggestions: Decodable, Hashable {
         self.otherFeesCents = otherFeesCents
         self.paymentMethod = paymentMethod
     }
+
+    /// The amounts the server withheld. One reading of the two flags, for
+    /// the two places that act on them: the confirm form's blank and the
+    /// read-only display's stated absence.
+    var withheldAmounts: Set<WithheldAmountField> {
+        var withheld: Set<WithheldAmountField> = []
+        if totalCents.withheld { withheld.insert(.totalCents) }
+        if subtotalCents.withheld { withheld.insert(.subtotalCents) }
+        return withheld
+    }
 }
 
 /// One receipt as the list and detail routes project it.
@@ -347,6 +357,13 @@ struct ReceiptListPage: Decodable, Equatable {
 /// the one place that renders it, and its own comment explains how it
 /// reconciles with the unrelated, whole-account pending badge already on
 /// that screen.
+///
+/// `byCurrency` (2026-10-31) is the same confirmed-only sums split by
+/// currency, CAD first. `confirmed` adds every row together whatever it was
+/// paid in, which stopped being one number the day production held a US
+/// receipt - a total of "$412.18 CAD" that is partly dollars of another
+/// country is a figure with no meaning. Optional, so an older server still
+/// decodes; `totalsByCurrency` is what to render either way.
 struct ReceiptSummary: Decodable, Equatable {
     struct Confirmed: Decodable, Equatable {
         let count: Int
@@ -357,8 +374,43 @@ struct ReceiptSummary: Decodable, Equatable {
         let totalCents: Int
     }
 
+    struct CurrencyTotals: Decodable, Equatable {
+        let currency: String
+        let count: Int
+        let subtotalCents: Int
+        let hstCents: Int
+        let tipCents: Int
+        let otherFeesCents: Int
+        let totalCents: Int
+    }
+
     let confirmed: Confirmed
     let pendingCount: Int
+    let byCurrency: [CurrencyTotals]?
+
+    init(confirmed: Confirmed, pendingCount: Int, byCurrency: [CurrencyTotals]? = nil) {
+        self.confirmed = confirmed
+        self.pendingCount = pendingCount
+        self.byCurrency = byCurrency
+    }
+
+    /// One entry per currency, never empty. A server with no `byCurrency`
+    /// - and one with no confirmed receipts to split - falls back to
+    /// `confirmed` under the column default, CAD: the only thing this block
+    /// could honestly call those sums before the split existed, and the
+    /// zero block a new account has always seen.
+    var totalsByCurrency: [CurrencyTotals] {
+        if let byCurrency, !byCurrency.isEmpty { return byCurrency }
+        return [CurrencyTotals(
+            currency: "CAD",
+            count: confirmed.count,
+            subtotalCents: confirmed.subtotalCents,
+            hstCents: confirmed.hstCents,
+            tipCents: confirmed.tipCents,
+            otherFeesCents: confirmed.otherFeesCents,
+            totalCents: confirmed.totalCents
+        )]
+    }
 }
 
 /// One vendor's remembered category and payment method (proposal #2,

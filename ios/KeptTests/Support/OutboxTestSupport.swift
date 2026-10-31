@@ -28,6 +28,12 @@ final class InMemoryOutboxStore: OutboxStore {
     var imageDataError: Error?
     /// Scripted loadAll result; when nil, loadAll derives from `items`.
     var loadAllResult: OutboxLoadResult?
+    /// What `removeUnreadable` will report removing, and whose it was
+    /// asked to clear. The rule for what counts lives in FileOutboxStore
+    /// and is tested against a real directory there.
+    var removeUnreadableResult = 0
+    var removeUnreadableError: Error?
+    private(set) var removeUnreadableCalls: [UUID] = []
 
     /// Puts an item on "disk" as if a previous run enqueued it - the
     /// seeding path for relaunch-and-resume tests.
@@ -105,6 +111,14 @@ final class InMemoryOutboxStore: OutboxStore {
         items[itemId] = nil
         images[itemId] = nil
         additionalPages[itemId] = nil
+    }
+
+    func removeUnreadable(ownedBy userId: UUID) async throws -> Int {
+        removeUnreadableCalls.append(userId)
+        if let removeUnreadableError {
+            throw removeUnreadableError
+        }
+        return removeUnreadableResult
     }
 }
 

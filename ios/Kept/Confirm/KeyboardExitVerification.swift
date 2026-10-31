@@ -107,7 +107,8 @@ enum KeyboardExitVerification {
         // was demonstrably on screen. The bar is a plain view with a real
         // `UIButton` now (KeyboardDoneBar), which the same walk finds
         // first; the walk stays because it is the assertion that survived
-        // that lesson, and the bar still carries exactly one control.
+        // that lesson. The sign toggle (2026-10-31) is added after Done
+        // precisely so this keeps finding Done.
         if let done = bar.firstControlDescendant {
             if let host = done.window {
                 let centre = done.convert(
@@ -184,7 +185,7 @@ enum KeyboardExitVerification {
 }
 
 private extension UIView {
-    /// The bar's one control - its Done button (KeyboardDoneBar).
+    /// The bar's first control - its Done button (KeyboardDoneBar).
     var firstControlDescendant: UIControl? {
         if let control = self as? UIControl { return control }
         for subview in subviews {

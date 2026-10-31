@@ -4,6 +4,29 @@ import Foundation
 /// zod schemas (server/src/http/schemas.ts). Encode-only counterparts to
 /// APIModels' decode-only types.
 
+/// The text bounds the server's schemas hold every receipt write to
+/// (`vendorText`, `category`, `paymentMethod` and `notes`,
+/// server/src/http/schemas.ts) - mirrored for the same reason
+/// `ReceiptArithmetic.isStorable` mirrors the money bound: a value the
+/// server will refuse is refused here first, while a person is still
+/// looking at the form, instead of coming back as a 400 on a queued item
+/// nobody is watching (2026-10-31).
+///
+/// Counted the way the server counts: zod's `.max()` reads a JavaScript
+/// string's `length`, which is UTF-16 code units. A Swift `count` of
+/// grapheme clusters under-counts any emoji or combining mark and would
+/// wave through a string the server then refuses.
+enum ReceiptFieldLimits {
+    static let vendor = 200
+    static let category = 200
+    static let paymentMethod = 100
+    static let notes = 5_000
+
+    static func fits(_ text: String, limit: Int) -> Bool {
+        text.utf16.count <= limit
+    }
+}
+
 /// The three content types the server presigns (its upload-url schema is
 /// this exact enum). Typed because the presigned signature covers the
 /// type: declaring one and PUTting another is a 403, so the two call
@@ -46,7 +69,13 @@ struct OcrSuggestionsPayload: Encodable, Equatable {
     let otherFeesCents: Int?
     let paymentMethod: String?
 
-    init(_ suggestions: ReceiptSuggestions) {
+    /// Verbatim apart from what the server could not store anyway
+    /// (`withinServerBounds`, 2026-10-31): this schema is strict, so one
+    /// absurd reading would refuse the entire create rather than the one
+    /// field, and "the parser read nothing usable" is an honest record of
+    /// a line nobody can store.
+    init(_ parsed: ReceiptSuggestions) {
+        let suggestions = parsed.withinServerBounds
         vendor = suggestions.vendor
         purchasedAt = suggestions.purchasedAt
         totalCents = suggestions.totalCents
@@ -264,11 +293,12 @@ struct ConfirmReceiptRequest: Encodable, Equatable {
     let category: String?
     let paymentMethod: String?
     let notes: String?
-    /// Which fields a human looked at on the way here (2026-09-01).
-    /// Harmless on a confirmation - a confirmed receipt is served no
-    /// suggestions, so nothing consumes the set - and sent anyway so this
-    /// request and `SaveForLaterRequest` below differ in as little as
-    /// possible. Absent for an item queued before the field existed.
+    /// Which fields a human looked at on the way here (2026-09-01). Sent
+    /// so this request and `SaveForLaterRequest` below differ in as little
+    /// as possible, and since 2026-10-31 read by the server too: going from
+    /// pending to confirmed answers 409 `amounts_need_review` unless every
+    /// withheld amount is named here (`reviewedFieldsForConfirm`). Absent
+    /// for an item queued before the field existed.
     let reviewedFields: [ReviewedField]?
 
     /// The PATCH body from what the confirm form produced - the same

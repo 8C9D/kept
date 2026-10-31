@@ -56,7 +56,7 @@ enum ReceiptParser {
             paymentMethod: paymentMethod(in: lines),
             purchasedAt: ReceiptDateParser.bestDate(inLines: lines.map(\.text), capturedAt: capturedAt),
             vendor: vendor(in: lines, knownVendors: knownVendors)
-        )
+        ).withinServerBounds
     }
 
     // MARK: - Total

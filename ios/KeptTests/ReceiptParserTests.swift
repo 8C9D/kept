@@ -467,6 +467,11 @@ final class ReceiptAmountTests: XCTestCase {
 
     func testDollarSignAndThousandsSeparators() {
         XCTAssertEqual(ReceiptAmount.amounts(in: "$1,234.56"), [123456])
+        // The server's bound (`centsSchema`, 2026-10-31): the largest
+        // amount it stores is an amount, and a cent past it is not one.
+        XCTAssertEqual(ReceiptAmount.amounts(in: "21474836.47"), [2_147_483_647])
+        XCTAssertEqual(ReceiptAmount.amounts(in: "21474836.48"), [])
+        XCTAssertEqual(ReceiptAmount.amounts(in: "TOTAL 123456789012.34"), [])
         XCTAssertEqual(ReceiptAmount.amounts(in: "$ 12.00"), [1200])
     }
 
@@ -488,8 +493,11 @@ final class ReceiptAmountTests: XCTestCase {
         // never trap mid-batch.
         XCTAssertEqual(ReceiptAmount.amounts(in: "9223372036854775807.00"), [])
         XCTAssertEqual(ReceiptAmount.amounts(in: "99999999999999999999.00"), [])
-        // A large but representable amount still parses.
-        XCTAssertEqual(ReceiptAmount.amounts(in: "92233720368547758.06"), [9223372036854775806])
+        // A number that fits Int is dropped too now, if no column can hold
+        // it (2026-10-31): this line asserted it parsed until then, and it
+        // is exactly the value that used to 400 a whole create. The bound
+        // itself is pinned beside the thousands test above.
+        XCTAssertEqual(ReceiptAmount.amounts(in: "92233720368547758.06"), [])
     }
 }
 
@@ -714,5 +722,56 @@ final class ReceiptDamagedAmountTests: XCTestCase {
             ReceiptAmount.trailingAmountOutsideParentheses(in: "HST 863624433 667888060849 5X2 1.25 H 1.25 H"),
             "the amount must end the line"
         )
+    }
+
+    // MARK: - The server's bounds (2026-10-31)
+
+    /// One misread line used to reach `ocrSuggestions` and 400 the create
+    /// for the whole receipt, stranding the item with Retry or Discard.
+    func testAnAmountNoColumnCanHoldIsNoSuggestion() {
+        let suggestions = ReceiptParser.parse(
+            lines: [
+                RecognizedLine(text: "MAPLE FOODS", verticalCenter: 0.05, height: 0.04),
+                RecognizedLine(text: "TOTAL 123456789012.34", verticalCenter: 0.80, height: 0.02),
+            ],
+            capturedAt: Date(timeIntervalSince1970: 1_775_000_000)
+        )
+        XCTAssertNil(suggestions.totalCents)
+        XCTAssertEqual(suggestions.vendor, "MAPLE FOODS", "the rest of the read stands")
+    }
+
+    /// The sum `ReceiptAmount` cannot see: each line fits, their total does
+    /// not.
+    func testASummedAmountIsBoundedToo() {
+        let suggestions = ReceiptSuggestions(otherFeesCents: 3_000_000_000).withinServerBounds
+        XCTAssertNil(suggestions.otherFeesCents)
+    }
+
+    func testBoundsDropOnlyWhatTheServerWouldRefuse() {
+        let suggestions = ReceiptSuggestions(
+            totalCents: 2_147_483_647,
+            hstCents: -2_147_483_649,
+            paymentMethod: String(repeating: "a", count: 101),
+            purchasedAt: "2026-01-14",
+            vendor: String(repeating: "a", count: 201)
+        ).withinServerBounds
+
+        XCTAssertEqual(suggestions.totalCents, 2_147_483_647)
+        XCTAssertNil(suggestions.hstCents)
+        XCTAssertNil(suggestions.paymentMethod)
+        XCTAssertNil(suggestions.vendor)
+        XCTAssertEqual(suggestions.purchasedAt, "2026-01-14")
+    }
+
+    /// `min(1)` on the server, so an empty string is a refusal as well.
+    func testAnEmptySuggestionIsDropped() {
+        XCTAssertNil(ReceiptSuggestions(vendor: "").withinServerBounds.vendor)
+    }
+
+    /// What the create carries, whichever path built the value.
+    func testTheCreatePayloadCannotCarryAnUnstorableValue() throws {
+        let payload = OcrSuggestionsPayload(ReceiptSuggestions(totalCents: 12_345_678_901_234, vendor: "Maple"))
+        XCTAssertNil(payload.totalCents)
+        XCTAssertEqual(payload.vendor, "Maple")
     }
 }

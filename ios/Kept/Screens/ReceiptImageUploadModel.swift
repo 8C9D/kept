@@ -38,6 +38,9 @@ final class ReceiptImageUploadModel: ObservableObject {
         /// decide whether "page N of M" framing is worth showing.
         case uploading(pageNumber: Int, pageCount: Int)
         case failed(String)
+        /// Every scanned page failed to encode, so there is nothing to
+        /// upload and nothing Try again could resume (2026-10-31).
+        case scanFailed(String)
         case finished
     }
 
@@ -57,6 +60,10 @@ final class ReceiptImageUploadModel: ObservableObject {
     /// CaptureFlowModel's batch path uses for the identical reason.
     private var remainingPages: [Data] = []
     private var completedCount = 0
+    /// The head page's last attempt told the API about it and never heard
+    /// a clear answer (2026-10-31), so those bytes may already be attached.
+    /// See `recordOnTheReceipt`.
+    private var headPageMayHaveLanded = false
     /// Re-entrancy guard: two taps in quick succession (or a stray second
     /// call while one run is in flight) must not upload the same page
     /// twice or silently drop one - the same lesson CaptureFlowModel's
@@ -81,6 +88,7 @@ final class ReceiptImageUploadModel: ObservableObject {
         replacingPage = nil
         remainingPages = pages
         completedCount = 0
+        headPageMayHaveLanded = false
         await uploadRemaining()
     }
 
@@ -95,12 +103,26 @@ final class ReceiptImageUploadModel: ObservableObject {
         replacingPage = page
         remainingPages = [data]
         completedCount = 0
+        headPageMayHaveLanded = false
         await uploadRemaining()
+    }
+
+    /// The scan produced nothing to send (2026-10-31): every page failed
+    /// to encode, so the reason is all there is to show.
+    func reportScanFailure(_ message: String) {
+        phase = .scanFailed(message)
+    }
+
+    /// The person chose to scan again; the view goes back to the scanner.
+    func discardFailedScan() {
+        phase = .idle
     }
 
     /// Resumes after a failure, starting at the page that failed - pages
     /// the server already confirmed are not resent.
     func retry() async {
+        // Nothing to resume, and resuming nothing reports a finished upload.
+        if case .scanFailed = phase { return }
         await uploadRemaining()
     }
 
@@ -120,6 +142,7 @@ final class ReceiptImageUploadModel: ObservableObject {
             }
             completedCount += 1
             remainingPages.removeFirst()
+            headPageMayHaveLanded = false
         }
         // `receipt_edited` (2026-08-28 vocabulary): a page's bytes
         // changed, the same class of thing an edited field is. No `field`
@@ -142,20 +165,40 @@ final class ReceiptImageUploadModel: ObservableObject {
     private func uploadOnePage(_ data: Data) async throws {
         let target = try await api.uploadTarget(contentType: .jpeg)
         try await api.uploadImage(to: target, data: data, contentType: .jpeg)
-        let sha256 = Self.sha256Hex(data)
-        if let page = replacingPage {
-            _ = try await api.replaceReceiptImage(
-                receiptId: receiptId,
-                page: page,
-                objectKey: target.objectKey,
-                sha256: sha256
-            )
-        } else {
-            _ = try await api.addReceiptImage(
-                receiptId: receiptId,
-                objectKey: target.objectKey,
-                sha256: sha256
-            )
+        try await recordOnTheReceipt(objectKey: target.objectKey, sha256: Self.sha256Hex(data))
+    }
+
+    /// The final step, and the only one whose failure can be a lie: the
+    /// server can apply it and lose the answer. `retry()` then sends the
+    /// same bytes, the server says 409 `duplicate_image` about its own
+    /// success, and Retry dead-ended on that message for good (2026-10-31).
+    ///
+    /// So a 409 counts as landed, the recovery the outbox's add-page has
+    /// always made - but only on a page whose previous attempt came back
+    /// unknown. On a first attempt the same answer is true news and stays
+    /// surfaced verbatim: those bytes are on some receipt, and the person
+    /// should hear which fact stopped them.
+    private func recordOnTheReceipt(objectKey: String, sha256: String) async throws {
+        do {
+            if let page = replacingPage {
+                _ = try await api.replaceReceiptImage(
+                    receiptId: receiptId,
+                    page: page,
+                    objectKey: objectKey,
+                    sha256: sha256
+                )
+            } else {
+                _ = try await api.addReceiptImage(
+                    receiptId: receiptId,
+                    objectKey: objectKey,
+                    sha256: sha256
+                )
+            }
+        } catch let error as APIError where error.isDuplicateImage && headPageMayHaveLanded {
+            return
+        } catch let error as APIError where error.outcomeIsUnknown {
+            headPageMayHaveLanded = true
+            throw error
         }
     }
 

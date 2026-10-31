@@ -712,9 +712,12 @@ final class APIClientTests: XCTestCase {
         }
     }
 
-    /// Anything else stays an APIError - a 401 must still tear the session
-    /// down rather than being swallowed as "the parser is busy".
-    func testAnUnrelatedParseFailureIsStillAnAPIError() async throws {
+    /// Anything else stays an APIError, a 401 included - but it no longer
+    /// ends the session. This test asserted that it must until 2026-10-31,
+    /// which is exactly the defect: the second opinion is a bonus nobody
+    /// asked for, on the screen holding an unsaved scan, and tearing the
+    /// session down from there destroyed the scan.
+    func testAParse401ReachesTheCallerAndLeavesTheSessionAlone() async throws {
         let client = try makeClient()
         transport.enqueue(status: 401, jsonBody: #"{"error":{"code":"unauthorized","message":"nope"}}"#)
 
@@ -726,8 +729,192 @@ final class APIClientTests: XCTestCase {
                 return XCTFail("expected sessionRejected, got \(error)")
             }
         }
+        XCTAssertEqual(sessionRejections, 0)
+        XCTAssertEqual(tokenStore.stored, "stored-session-token")
+    }
+
+    /// Telemetry can land on any screen at any moment, so the same applies.
+    func testAnEventFlush401LeavesTheSessionAlone() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 401, jsonBody: #"{"error":{"code":"unauthorized","message":"nope"}}"#)
+
+        await assertThrowsSessionRejected {
+            try await client.postEvents(PostEventsRequest([]))
+        }
+        XCTAssertEqual(sessionRejections, 0)
+    }
+
+    /// A flush landing after a sign-out finds no token at all. That is not
+    /// news to anyone, and it used to replace the sign-in screen's message
+    /// with "session expired".
+    func testAnEventFlushWithNoTokenLeavesTheSignInScreenAlone() async throws {
+        tokenStore.stored = nil
+        let client = try makeClient()
+
+        await assertThrowsSessionRejected {
+            try await client.postEvents(PostEventsRequest([]))
+        }
+        XCTAssertEqual(sessionRejections, 0)
+        XCTAssertTrue(transport.requests.isEmpty, "nothing to send it with")
+    }
+
+    /// A screen's own request still means what it always meant.
+    func testAMissingTokenOnAnOrdinaryCallStillEndsTheSession() async throws {
+        tokenStore.stored = nil
+        let client = try makeClient()
+
+        await assertThrowsSessionRejected {
+            _ = try await client.receiptsPage(cursor: nil, query: .default, limit: nil) as ReceiptListPage
+        }
         XCTAssertEqual(sessionRejections, 1)
     }
+
+    /// A slow request sent before a sign-in, answering after it: the 401 is
+    /// about a token that no longer exists, and acting on it would clear the
+    /// one the person just obtained.
+    func testAStale401DoesNotEndANewerSession() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 401, jsonBody: #"{"error":{"code":"unauthorized","message":"nope"}}"#)
+        transport.onSend = { [tokenStore] in tokenStore.stored = "newer-session-token" }
+
+        await assertThrowsSessionRejected {
+            _ = try await client.receiptsPage(cursor: nil, query: .default, limit: nil) as ReceiptListPage
+        }
+
+        XCTAssertEqual(sessionRejections, 0)
+        XCTAssertEqual(tokenStore.stored, "newer-session-token")
+    }
+
+    /// A phone that locked mid-request cannot say whether the token changed,
+    /// and a locked phone is no evidence of a dead session. The next request
+    /// on an unlocked phone gets the same 401 with a token in hand.
+    func testAKeychainThatRefusesTheReadDoesNotEndTheSession() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 401, jsonBody: #"{"error":{"code":"unauthorized","message":"nope"}}"#)
+        transport.onSend = { [tokenStore] in
+            tokenStore.loadError = KeychainError(operation: "read", status: -25308)
+        }
+
+        await assertThrowsSessionRejected {
+            _ = try await client.receiptsPage(cursor: nil, query: .default, limit: nil) as ReceiptListPage
+        }
+
+        XCTAssertEqual(sessionRejections, 0)
+    }
+
+    // MARK: - Contract changes (2026-10-31)
+
+    func testADuplicateNamingItsReceiptCarriesTheId() async throws {
+        let client = try makeClient()
+        let id = try XCTUnwrap(UUID(uuidString: "0a1b2c3d-0000-4000-8000-000000000001"))
+        transport.enqueue(status: 409, jsonBody: """
+            {"error":{"code":"duplicate_image","message":"already attached","existingReceiptId":"\(id.uuidString.lowercased())"}}
+            """)
+
+        do {
+            _ = try await client.createReceipt(Self.createRequest)
+            XCTFail("expected a duplicate")
+        } catch let error as APIError {
+            XCTAssertTrue(error.isDuplicateImage)
+            XCTAssertEqual(error.existingReceiptId, id)
+            XCTAssertEqual(error.errorDescription, "already attached")
+        }
+    }
+
+    /// An older server, and a value that does not parse, both land on the
+    /// shape every existing caller already handles.
+    func testADuplicateWithoutAUsableIdIsTheOrdinaryRefusal() async throws {
+        let client = try makeClient()
+        for body in [
+            #"{"error":{"code":"duplicate_image","message":"already attached"}}"#,
+            #"{"error":{"code":"duplicate_image","message":"already attached","existingReceiptId":"not-a-uuid"}}"#,
+        ] {
+            transport.enqueue(status: 409, jsonBody: body)
+            do {
+                _ = try await client.createReceipt(Self.createRequest)
+                XCTFail("expected a duplicate")
+            } catch let error as APIError {
+                XCTAssertTrue(error.isDuplicateImage)
+                XCTAssertNil(error.existingReceiptId)
+                guard case .requestFailed(_, _, 409) = error else {
+                    return XCTFail("expected requestFailed, got \(error)")
+                }
+            }
+        }
+    }
+
+    func testAmountsNeedReviewKeepsTheServersSentence() async throws {
+        let client = try makeClient()
+        let id = UUID()
+        transport.enqueue(
+            status: 409,
+            jsonBody: #"{"error":{"code":"amounts_need_review","message":"Check the total before confirming."}}"#
+        )
+
+        do {
+            _ = try await client.quickConfirmReceipt(
+                id: id,
+                QuickConfirmRequest(displaying: Fixtures.receipt(id: id, status: .pending))
+            )
+            XCTFail("expected a refusal")
+        } catch let error as APIError {
+            XCTAssertEqual(error.errorDescription, "Check the total before confirming.")
+        }
+    }
+
+    func testTheSummaryDecodesItsCurrencySplit() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: """
+            {"confirmed":{"count":3,"subtotalCents":0,"hstCents":900,"tipCents":0,"otherFeesCents":0,"totalCents":33900},
+             "pendingCount":1,
+             "byCurrency":[
+               {"currency":"CAD","count":2,"subtotalCents":0,"hstCents":900,"tipCents":0,"otherFeesCents":0,"totalCents":31000},
+               {"currency":"USD","count":1,"subtotalCents":0,"hstCents":0,"tipCents":0,"otherFeesCents":0,"totalCents":2900}
+             ]}
+            """)
+
+        let summary = try await client.receiptsSummary(query: .default)
+
+        XCTAssertEqual(summary.totalsByCurrency.map(\.currency), ["CAD", "USD"])
+        XCTAssertEqual(summary.totalsByCurrency.map(\.totalCents), [31000, 2900])
+    }
+
+    /// An older server's response is exactly today's, rendered as CAD.
+    func testASummaryWithoutTheSplitFallsBackToTheOldField() async throws {
+        let client = try makeClient()
+        transport.enqueue(status: 200, jsonBody: """
+            {"confirmed":{"count":3,"subtotalCents":0,"hstCents":900,"tipCents":0,"otherFeesCents":0,"totalCents":33900},
+             "pendingCount":1}
+            """)
+
+        let summary = try await client.receiptsSummary(query: .default)
+
+        XCTAssertNil(summary.byCurrency)
+        XCTAssertEqual(summary.totalsByCurrency.map(\.currency), ["CAD"])
+        XCTAssertEqual(summary.totalsByCurrency.first?.totalCents, 33900)
+        XCTAssertEqual(summary.totalsByCurrency.first?.count, 3)
+    }
+
+    func testAnEmptySplitFallsBackToo() {
+        let summary = ReceiptSummary(
+            confirmed: .init(count: 0, subtotalCents: 0, hstCents: 0, tipCents: 0, otherFeesCents: 0, totalCents: 0),
+            pendingCount: 0,
+            byCurrency: []
+        )
+        XCTAssertEqual(summary.totalsByCurrency.count, 1)
+    }
+
+    private static let createRequest = CreateReceiptRequest(
+        purchasedAt: "2026-01-14",
+        capturedAt: "2026-01-14T10:00:00.000Z",
+        vendor: nil,
+        subtotalCents: nil,
+        hstCents: nil,
+        totalCents: nil,
+        ocrRawText: nil,
+        ocrSuggestions: OcrSuggestionsPayload(ReceiptSuggestions()),
+        image: CreateReceiptRequest.Image(objectKey: "k", sha256: "s")
+    )
 
     func testRestoreReceiptPostsWithNoBodyToTheRestoreRoute() async throws {
         let client = try makeClient()

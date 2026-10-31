@@ -33,9 +33,9 @@ final class ConfirmAmountsUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    private func launchConfirmScreen() -> XCUIApplication {
+    private func launchConfirmScreen(extraArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-KeptUITestConfirmScreen"]
+        app.launchArguments = ["-KeptUITestConfirmScreen"] + extraArguments
         app.launch()
         return app
     }
@@ -70,6 +70,24 @@ final class ConfirmAmountsUITests: XCTestCase {
             element.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.5)).tap()
         }
         return element
+    }
+
+    /// `focus`, verified: a tap can scroll the Form instead of landing, and
+    /// with the keyboard already up the old field keeps it - so a button on
+    /// the keyboard bar would act on the wrong box, and the test would blame
+    /// the button.
+    ///
+    ///
+    /// Put the keyboard away before calling this for a second field. With
+    /// it up, a row underneath it still reports a frame, so `focus`'s
+    /// coordinate tap lands on the pad: on this form it typed a 6 into the
+    /// focused total, which is what first looked like a broken sign toggle.
+    private func ensureFocus(_ label: String, in app: XCUIApplication) {
+        for _ in 0..<4 {
+            let field = focus(label, in: app)
+            if (field.value(forKey: "hasKeyboardFocus") as? Bool) == true { return }
+        }
+        XCTFail("\(label) never took keyboard focus")
     }
 
     /// Empties the row and types `text` into it - backspaces rather than a
@@ -135,5 +153,130 @@ final class ConfirmAmountsUITests: XCTestCase {
         replace("Total", with: "20.00", in: app)
         replace("Subtotal", with: "13.00", in: app)
         XCTAssertEqual(value("Total", in: app), "20.00")
+    }
+
+    /// `.decimalPad` has no minus key, so the +/- on the keyboard bar is the
+    /// only way to type a refund (2026-10-31). The model's half is unit
+    /// tested; what this catches is the wiring those tests cannot see: a
+    /// button on a UIKit accessory reaching a `@FocusState` and a binding,
+    /// on whichever box is focused, with the total following a component.
+    func testTheSignToggleTurnsTheFocusedBoxIntoARefund() {
+        let app = launchConfirmScreen()
+        XCTAssertTrue(app.textFields["field.Subtotal"].firstMatch.waitForExistence(timeout: 5))
+
+        ensureFocus("Total", in: app)
+        let sign = app.buttons["keyboard.sign"]
+        XCTAssertTrue(sign.waitForExistence(timeout: 5), "a money pad raised no sign toggle")
+        sign.tap()
+        XCTAssertEqual(value("Total", in: app), "-12.34")
+        sign.tap()
+        XCTAssertEqual(value("Total", in: app), "12.34")
+
+        // A component goes through the tracking rule: 10.92 + 1.42 = 12.34
+        // is consistent, so the total follows the sign.
+        app.buttons["keyboard.done"].tap()
+        ensureFocus("Subtotal", in: app)
+        XCTAssertTrue(sign.waitForExistence(timeout: 5))
+        sign.tap()
+        XCTAssertEqual(value("Subtotal", in: app), "-10.92")
+        XCTAssertEqual(value("Total", in: app), "-9.50")
+    }
+
+    /// One bar serves every field, so the toggle has to leave with the pad.
+    func testNotesRaisesTheBarWithoutTheSignToggle() {
+        let app = launchConfirmScreen()
+        XCTAssertTrue(app.textFields["field.Subtotal"].firstMatch.waitForExistence(timeout: 5))
+
+        ensureFocus("Total", in: app)
+        XCTAssertTrue(app.buttons["keyboard.sign"].waitForExistence(timeout: 5))
+        app.buttons["keyboard.done"].tap()
+
+        // By identifier across element types: an `axis: .vertical` field
+        // does not report one consistent type (KeyboardExitUITests makes
+        // the same allowance).
+        let notes = app.descendants(matching: .any).matching(identifier: "field.Notes").firstMatch
+        for _ in 0..<5 where !(notes.exists && notes.isHittable) {
+            app.swipeUp()
+        }
+        notes.tap()
+        XCTAssertTrue(app.buttons["keyboard.done"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["keyboard.sign"].exists, "a sign toggle on notes does nothing")
+    }
+
+    /// A comma reaches the real field and the real rule. `typeText` inserts
+    /// it whichever key the pad shows, so this says nothing about the pad
+    /// itself: the simulator's stays a point even under a fr-CA region.
+    func testACommaTypedIntoAMoneyBoxIsCents() {
+        let app = launchConfirmScreen()
+        XCTAssertTrue(app.textFields["field.Subtotal"].firstMatch.waitForExistence(timeout: 5))
+
+        replace("Tip", with: "12,50", in: app)
+
+        XCTAssertEqual(value("Tip", in: app), "12,50")
+        // The total tracks a consistent form, so it is the proof the comma
+        // read as cents: 10.92 + 1.42 + 12.50. A rejected comma leaves the
+        // box unreadable and the total where it was.
+        XCTAssertEqual(value("Total", in: app), "24.84", "the comma did not read as a decimal")
+    }
+
+    /// `12.` has no value to carry, so "Later" holds and says which box
+    /// rather than dropping the typing. Clearing the box is an answer too.
+    func testLaterIsHeldWhileABoxIsMidKeystroke() {
+        let app = launchConfirmScreen()
+        XCTAssertTrue(app.textFields["field.Subtotal"].firstMatch.waitForExistence(timeout: 5))
+
+        replace("Total", with: "12.", in: app)
+        app.navigationBars.buttons["Later"].tap()
+
+        let alert = app.alerts["Finish this first"]
+        XCTAssertTrue(alert.waitForExistence(timeout: 5), "Later left with an unreadable box")
+        XCTAssertTrue(alert.staticTexts.element(boundBy: 1).label.contains("The total isn't a valid amount."))
+        alert.buttons["OK"].tap()
+        XCTAssertEqual(value("Total", in: app), "12.", "the typing is still there")
+
+        replace("Total", with: "12.50", in: app)
+        app.navigationBars.buttons["Later"].tap()
+        XCTAssertFalse(alert.waitForExistence(timeout: 1))
+    }
+
+    /// An amount past the server's bound is stopped at the form, with the
+    /// reason in both places a person would look.
+    func testAnAmountPastTheServersBoundBlocksSave() {
+        let app = launchConfirmScreen()
+        XCTAssertTrue(app.textFields["field.Subtotal"].firstMatch.waitForExistence(timeout: 5))
+
+        replace("Tip", with: "99999999.00", in: app)
+
+        // `CONTAINS`: LabeledContent merges the note into the row's label.
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Too large to save'"))
+                .firstMatch.waitForExistence(timeout: 5)
+        )
+        app.buttons["keyboard.done"].tap()
+        let reason = app.staticTexts["The tip is too large to save."]
+        for _ in 0..<5 where !reason.exists {
+            app.swipeUp()
+        }
+        XCTAssertTrue(reason.exists, "Save did not state why it is disabled")
+    }
+
+    /// The form opens blank and the server's answer lands on it: its text
+    /// takes, its amounts sit on chips, and only a tap moves one into a box.
+    func testTheServersAmountsArriveOnChipsAndOnlyATapAppliesOne() {
+        let app = launchConfirmScreen(extraArguments: ["-KeptUITestServerChips"])
+        XCTAssertTrue(app.textFields["field.Subtotal"].firstMatch.waitForExistence(timeout: 5))
+
+        XCTAssertEqual(value("Total", in: app), "")
+        XCTAssertEqual(value("Subtotal", in: app), "")
+        XCTAssertEqual(value("Vendor", in: app), "COSTCO WHOLESALE")
+
+        let chip = app.buttons["serverAlternative.total"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        XCTAssertTrue(chip.label.contains("218.94"), chip.label)
+
+        chip.tap()
+
+        XCTAssertEqual(value("Total", in: app), "218.94")
+        XCTAssertFalse(chip.exists, "a used chip goes")
     }
 }

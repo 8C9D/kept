@@ -34,7 +34,7 @@ final class SessionTokenClaimsTests: XCTestCase {
         XCTAssertNil(SessionTokenClaims.userId(inToken: "not-a-jwt"))
         XCTAssertNil(SessionTokenClaims.userId(inToken: "a.b"))
         XCTAssertNil(SessionTokenClaims.userId(inToken: "a.!!!.c"))
-        XCTAssertNil(SessionTokenClaims.userId(inToken: "a.bm90IGpzb24.c")) // payload "not json"
+        XCTAssertNil(SessionTokenClaims.userId(inToken: "a.bm90IGpzb24.c")) // payload "not json" gitleaks:allow
     }
 
     func testRejectsANonUuidSubject() {

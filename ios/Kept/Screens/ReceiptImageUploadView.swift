@@ -48,6 +48,10 @@ struct ReceiptImageUploadView: View {
     /// silently dropped, since silently dropping scanned pages is exactly
     /// the kind of invisible data loss this app avoids elsewhere.
     @State private var discardedExtraPagesNote: String?
+    /// Which scanned pages never became images (2026-10-31). Held on screen
+    /// at the end rather than left to flash past under a progress spinner:
+    /// the person has to know to scan them again.
+    @State private var scanFailureNote: String?
 
     init(
         api: any KeptAPI,
@@ -76,9 +80,19 @@ struct ReceiptImageUploadView: View {
                             // Nothing was scanned; the receipt is exactly
                             // as it was, so there is nothing to reload.
                             onFinished(false)
-                        case .scanned(let pages):
+                        case .encoding:
                             stage = .working
-                            Task { await start(with: pages) }
+                        case .scanned(let scan):
+                            scanFailureNote = scan.failureNote
+                            if !scan.pages.isEmpty {
+                                Task { await start(with: scan.pages) }
+                            } else if let note = scan.failureNote {
+                                uploadModel.reportScanFailure(note)
+                            } else {
+                                // A scan with nothing in it: the same
+                                // nothing-happened as a cancel.
+                                onFinished(false)
+                            }
                         }
                     }
                     .ignoresSafeArea()
@@ -125,8 +139,8 @@ struct ReceiptImageUploadView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
-                if let discardedExtraPagesNote {
-                    Text(discardedExtraPagesNote)
+                ForEach([discardedExtraPagesNote, scanFailureNote].compactMap { $0 }, id: \.self) { note in
+                    Text(note)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -142,6 +156,10 @@ struct ReceiptImageUploadView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                // A 401 mid-upload: the scanned pages are still held by the
+                // model, so signing in here and tapping Try again resumes
+                // at the page that failed instead of losing the scan.
+                SessionRenewalView()
                 Button("Try again") {
                     Task { await uploadModel.retry() }
                 }
@@ -157,9 +175,33 @@ struct ReceiptImageUploadView: View {
             }
             .padding()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .scanFailed(let message):
+            ScanFailedView(title: mode.failureTitle, message: message) {
+                uploadModel.discardFailedScan()
+                scanFailureNote = nil
+                stage = .scanning
+            } onCancel: {
+                // Nothing landed, so the receipt has nothing to reload.
+                onFinished(false)
+            }
         case .finished:
-            Color.clear.onAppear {
-                onFinished(true)
+            if let scanFailureNote {
+                VStack(spacing: 12) {
+                    Label("Some pages were not added", systemImage: "exclamationmark.triangle")
+                        .font(.headline)
+                    Text(scanFailureNote)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Button("Done") { onFinished(true) }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Color.clear.onAppear {
+                    onFinished(true)
+                }
             }
         }
     }

@@ -64,7 +64,9 @@ struct OutboxItem: Codable, Equatable, Identifiable, Sendable {
     /// the create sends these with status `confirmed`, so the receipt
     /// lands already done and never joins the pending queue. Optional so
     /// items persisted before this field existed decode as unconfirmed.
-    let confirmation: ConfirmedReceiptFields?
+    /// `var` since 2026-10-31: correcting an item the server refused
+    /// replaces what the create will send (`correctBlockedItem`).
+    var confirmation: ConfirmedReceiptFields?
     /// What a human had typed into the capture-time confirm form when they
     /// left it with "Later" (2026-09-01) - the values for the fields they
     /// actually looked at, and which fields those were. The create writes
@@ -206,6 +208,19 @@ struct OutboxDocument: Equatable, Sendable {
             additionalPages: additionalPages
         )
     }
+}
+
+/// What the confirm form needs to reopen over a queued receipt the server
+/// refused (2026-10-31) - the item's own bytes and values, read back off
+/// disk. Everything the form shows was already on this phone.
+struct QueuedReceiptDraft {
+    let itemId: UUID
+    let imageData: Data
+    let additionalPages: [Data]
+    let capturedAt: Date
+    let suggestions: ReceiptSuggestions
+    let confirmation: ConfirmedReceiptFields?
+    let partial: PendingReceiptFields?
 }
 
 /// What OCR and the §7.3 heuristics produced for a queued receipt, made

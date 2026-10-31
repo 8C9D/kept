@@ -376,6 +376,16 @@ final class ReceiptListModel: ObservableObject {
             await loadFirstPage()
         } catch {
             actionError = error.localizedDescription
+            // `canQuickConfirm` refuses a withheld amount, so this answer
+            // means the row on screen is older than the server's verdict.
+            // Its message is stated; the row still has to catch up, or it
+            // goes on showing the number that was just refused and offering
+            // the same swipe (2026-10-31).
+            if let apiError = error as? APIError,
+               case .requestFailed(let code, _, _) = apiError,
+               code == "amounts_need_review" {
+                await loadFirstPage()
+            }
         }
     }
 }

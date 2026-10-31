@@ -27,6 +27,13 @@ protocol OutboxStore: Sendable {
     /// Removing an already-absent item is a success: remove-after-create
     /// must be idempotent across a kill between the two.
     func remove(itemId: UUID) async throws
+    /// Deletes every record that could not be read back
+    /// (`OutboxLoadResult.unreadableCount`) unless it can be shown to be
+    /// someone else's, and returns how many went. The local half of an
+    /// account deletion, and the only thing that ever removes one of these
+    /// (2026-10-31): they are never in the queue, so "every item of this
+    /// user's" cannot reach them.
+    func removeUnreadable(ownedBy userId: UUID) async throws -> Int
 }
 
 extension OutboxStore {
@@ -229,6 +236,60 @@ actor FileOutboxStore: OutboxStore {
             return
         }
         try fileManager.removeItem(at: itemDirectory)
+    }
+
+    func removeUnreadable(ownedBy userId: UUID) async throws -> Int {
+        try ensureDirectory()
+        let entries = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        var removed = 0
+        for entry in entries where entry.hasDirectoryPath {
+            guard try isUnreadableAndNotAnotherUsers(entry, userId: userId) else { continue }
+            try fileManager.removeItem(at: entry)
+            removed += 1
+        }
+        return removed
+    }
+
+    /// The owner, as far as a broken record still says.
+    ///
+    /// ⚠ A record that names no one counts as this user's, and that is a
+    /// choice with a cost. "Every receipt in it, including the images" is a
+    /// promise made to the person deleting their account, on a phone almost
+    /// always used by one account, about files that can never upload for
+    /// anybody. The cost is a leftover from a second account on a shared
+    /// phone, which could only ever have been reported to them as unreadable.
+    private func isUnreadableAndNotAnotherUsers(_ entry: URL, userId: UUID) throws -> Bool {
+        let itemFile = entry.appending(path: Self.itemFileName)
+        // No commit record: an enqueue the process died inside.
+        guard fileManager.fileExists(atPath: itemFile.path(percentEncoded: false)) else {
+            return true
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: itemFile)
+        } catch let error as CocoaError where error.code == .fileReadNoPermission {
+            // Locked, so nothing can be said about it, and an unknown is
+            // no grounds for a deletion.
+            throw OutboxLockedError()
+        } catch {
+            return true
+        }
+        struct RecordedOwner: Decodable {
+            let userId: UUID
+        }
+        // Readable items are the queue's business, not this sweep's.
+        if (try? Self.decoder.decode(OutboxItem.self, from: data)) != nil {
+            return false
+        }
+        // `try?`: a record too broken to name its owner is the case the
+        // comment above rules on, not an error worth stopping for.
+        guard let owner = try? Self.decoder.decode(RecordedOwner.self, from: data) else {
+            return true
+        }
+        return owner.userId == userId
     }
 
     // MARK: - Layout

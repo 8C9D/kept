@@ -1392,8 +1392,11 @@ final class MoneyInputTests: XCTestCase {
     func testAmountsTooLargeForCentsAreInvalidNotACrash() {
         // Int.max dollars fits Int but overflows the cents scale-up; a
         // trap here would crash the confirm screen mid-queue.
-        XCTAssertEqual(MoneyInput.parse("9223372036854775807.00"), .invalid)
-        XCTAssertEqual(MoneyInput.parse("999999999999999999999"), .invalid)
+        // `.outOfRange` since 2026-10-31 rather than `.invalid`: these are
+        // well-formed amounts, and the form now says what is wrong with
+        // them. The property under test is unchanged - no trap.
+        XCTAssertEqual(MoneyInput.parse("9223372036854775807.00"), .outOfRange)
+        XCTAssertEqual(MoneyInput.parse("999999999999999999999"), .outOfRange)
     }
 
     func testRoundTripsWithFieldText() {
@@ -1512,14 +1515,188 @@ final class ConfirmSuggestionArrivalTests: XCTestCase {
 
         // A server that already withheld it serves a nil value plus the
         // flag; the note still appears even though there is nothing left
-        // for the local check to catch.
+        // for the local check to catch. The row carries the real number,
+        // as a production row does: a pending row's total IS the amount
+        // that was withheld, the capture-time heuristic's own snapshot, and
+        // this fixture holding nil is what hid `value ?? row` restoring it
+        // (2026-10-31).
         let flagged = Fixtures.receipt(
-            totalCents: nil,
+            totalCents: 850,
             status: .pending,
             suggestions: Fixtures.merged(purchasedAt: "2026-03-20", totalCents: nil, totalWithheld: true)
         )
         let flaggedModel = ConfirmReceiptModel(api: StubKeptAPI(), detail: Fixtures.detail(receipt: flagged))
+        XCTAssertEqual(flaggedModel.totalText, "", "the row is not consulted for a withheld amount")
         XCTAssertNotNil(flaggedModel.withheldAmountNote)
+        XCTAssertFalse(flaggedModel.canSave, "there is no total until a person enters one")
+    }
+
+    /// The subtotal is the other amount the rule can withhold, and it lands
+    /// blank by the same route.
+    func testAWithheldSubtotalLandsBlankOverItsRow() {
+        let receipt = Fixtures.receipt(
+            subtotalCents: 21160,
+            totalCents: 850,
+            status: .pending,
+            suggestions: Fixtures.merged(totalCents: nil, totalWithheld: true, subtotalWithheld: true)
+        )
+        let model = ConfirmReceiptModel(api: StubKeptAPI(), detail: Fixtures.detail(receipt: receipt))
+
+        XCTAssertEqual(model.totalText, "")
+        XCTAssertEqual(model.subtotalText, "")
+    }
+
+    /// Reviewed outranks withheld, in the same order the web applies them:
+    /// a person typed this amount, so it is theirs whatever a sum says. The
+    /// server serves no suggestion for a reviewed field, which is why the
+    /// flag being set here is belt and braces rather than a real response.
+    func testAReviewedAmountStaysOnTheFormEvenIfWithheld() {
+        let receipt = Fixtures.receipt(
+            totalCents: 21894,
+            status: .pending,
+            suggestions: Fixtures.merged(totalCents: nil, totalWithheld: true),
+            reviewedFields: ["totalCents"]
+        )
+        let model = ConfirmReceiptModel(api: StubKeptAPI(), detail: Fixtures.detail(receipt: receipt))
+        XCTAssertEqual(model.totalText, "218.94")
+    }
+
+    /// The confirm PATCH has to name each withheld amount or the server
+    /// answers 409 `amounts_need_review`, and the total that matters most
+    /// is one nobody focuses: the fill button derives it on the very receipt
+    /// this rule exists for. Here the fill is tapped, the withheld subtotal
+    /// stays blank, and nothing is ever focused - and the save still lands.
+    func testAConfirmNamesTheWithheldAmountsSoTheFillCanSave() async {
+        let receipt = Fixtures.receipt(
+            subtotalCents: nil,
+            hstCents: 734,
+            totalCents: 850,
+            status: .pending,
+            suggestions: Fixtures.merged(hstCents: 734, subtotalCents: 21160, totalWithheld: true)
+        )
+        let api = StubKeptAPI()
+        api.confirmReceiptHandler = { _, _ in receipt }
+        let model = ConfirmReceiptModel(api: api, detail: Fixtures.detail(receipt: receipt))
+        XCTAssertEqual(model.totalText, "")
+        XCTAssertEqual(model.reviewedFieldsForSave, [], "nobody has touched anything")
+
+        XCTAssertTrue(model.applyDerivedFill())
+        XCTAssertEqual(model.totalText, "218.94")
+
+        let saved = await model.save()
+
+        XCTAssertTrue(saved)
+        XCTAssertEqual(api.confirmReceiptCalls.first?.request.reviewedFields, [.totalCents])
+        XCTAssertEqual(api.confirmReceiptCalls.first?.request.totalCents, 21894)
+    }
+
+    /// A save-for-later makes no such claim: it is the write that says
+    /// nobody has decided yet.
+    func testSaveForLaterDoesNotClaimTheWithheldAmounts() async {
+        let receipt = Fixtures.receipt(
+            totalCents: 850,
+            status: .pending,
+            suggestions: Fixtures.merged(totalCents: nil, totalWithheld: true)
+        )
+        let model = ConfirmReceiptModel(api: StubKeptAPI(), detail: Fixtures.detail(receipt: receipt))
+        model.totalText = "218.94"
+        XCTAssertEqual(model.reviewedFieldsForConfirm, [.totalCents])
+        XCTAssertEqual(model.reviewedFieldsForSave, [])
+    }
+
+    /// The tracked total is the other path the claim exists for: nobody
+    /// focuses a box that fills itself, and the server refuses a withheld
+    /// amount that carries a value and is not in the reported set.
+    func testATrackedTotalOnAWithheldReceiptIsClaimed() {
+        let receipt = Fixtures.receipt(
+            totalCents: 850,
+            status: .pending,
+            suggestions: Fixtures.merged(totalCents: nil, totalWithheld: true, subtotalWithheld: true)
+        )
+        let model = ConfirmReceiptModel(api: StubKeptAPI(), detail: Fixtures.detail(receipt: receipt))
+
+        model.editComponentAmount(.subtotal, to: "211.60")
+
+        XCTAssertEqual(model.totalText, "211.60")
+        XCTAssertEqual(model.reviewedFieldsForConfirm, [.subtotalCents, .totalCents])
+    }
+
+    /// A withheld box left blank claims nothing. It sends an explicit null,
+    /// which passes the server's guard on its own because nothing the merge
+    /// refused is promoted - and saying someone reviewed a box they never
+    /// went near would be false. This claim was made until the server
+    /// learned to accept the null (2026-10-31).
+    func testABlankWithheldBoxClaimsNothingAndSendsAnExplicitNull() async throws {
+        let receipt = Fixtures.receipt(
+            subtotalCents: 21160,
+            totalCents: 850,
+            status: .pending,
+            suggestions: Fixtures.merged(totalCents: nil, totalWithheld: true, subtotalWithheld: true)
+        )
+        let api = StubKeptAPI()
+        api.confirmReceiptHandler = { _, _ in receipt }
+        let model = ConfirmReceiptModel(api: api, detail: Fixtures.detail(receipt: receipt))
+        model.totalText = "218.94"
+
+        let saved = await model.save()
+
+        XCTAssertTrue(saved)
+        let request = try XCTUnwrap(api.confirmReceiptCalls.first?.request)
+        XCTAssertEqual(request.reviewedFields, [.totalCents], "the total has a value; the subtotal does not")
+        let body = try XCTUnwrap(String(data: JSONEncoder().encode(request), encoding: .utf8))
+        XCTAssertTrue(body.contains(#""subtotalCents":null"#), body)
+    }
+
+    /// A 401 on a form is not the end of the typing: the rejection is held,
+    /// the form stays, and the same Save lands once the session is renewed.
+    func testASaveRefusedByADeadSessionKeepsEverythingAndCanBeRetried() async {
+        let receipt = Fixtures.receipt(totalCents: 1250, status: .pending)
+        let api = StubKeptAPI()
+        var attempts = 0
+        api.confirmReceiptHandler = { _, _ in
+            attempts += 1
+            if attempts == 1 { throw APIError.sessionRejected }
+            return receipt
+        }
+        let model = ConfirmReceiptModel(api: api, detail: Fixtures.detail(receipt: receipt))
+        model.vendorText = "Typed by a person"
+        model.totalText = "99.00"
+
+        let first = await model.save()
+
+        XCTAssertFalse(first)
+        XCTAssertEqual(model.vendorText, "Typed by a person")
+        XCTAssertEqual(model.totalText, "99.00")
+        XCTAssertEqual(model.saveError, "Your session has expired. Sign in again.")
+
+        model.clearSaveError()
+        XCTAssertNil(model.saveError)
+
+        let second = await model.save()
+
+        XCTAssertTrue(second)
+        XCTAssertEqual(api.confirmReceiptCalls.last?.request.vendor, "Typed by a person")
+        XCTAssertEqual(api.confirmReceiptCalls.last?.request.totalCents, 9900)
+    }
+
+    /// Contract item 1 reaching the form anyway (a merge that changed after
+    /// it opened): the server's sentence, stated, and the form stays up.
+    func testAnAmountsNeedReviewRefusalIsStatedOnTheForm() async {
+        let receipt = Fixtures.receipt(totalCents: 1250, status: .pending)
+        let api = StubKeptAPI()
+        api.confirmReceiptHandler = { _, _ in
+            throw APIError.requestFailed(
+                code: "amounts_need_review",
+                message: "Check the total before confirming.",
+                status: 409
+            )
+        }
+        let model = ConfirmReceiptModel(api: api, detail: Fixtures.detail(receipt: receipt))
+
+        let saved = await model.save()
+
+        XCTAssertFalse(saved)
+        XCTAssertEqual(model.saveError, "Check the total before confirming.")
     }
 
     // MARK: The server's second opinion
@@ -1548,15 +1725,476 @@ final class ConfirmSuggestionArrivalTests: XCTestCase {
         XCTAssertTrue(model.isUnreviewed(.paymentMethod))
     }
 
-    func testBlankMoneyFieldsAreFilled() {
+    /// §7.3: the LLM's amounts reach a person "labelled, never into the
+    /// field unasked". This test asserted the opposite until 2026-10-31,
+    /// when it was called `testBlankMoneyFieldsAreFilled` - changed
+    /// deliberately, because a blank box is where the LLM is least
+    /// checkable and an illegible photo once got `1750 / 201 / 1549`
+    /// invented for it.
+    func testBlankMoneyFieldsAreOfferedAsChipsAndNeverFilled() {
         let model = captureModel(ReceiptSuggestions())
         model.applyServerSuggestions(serverAnswer)
 
-        XCTAssertEqual(model.totalText, "17.50")
-        XCTAssertEqual(model.hstText, "2.01")
-        XCTAssertEqual(model.subtotalText, "14.50")
-        XCTAssertEqual(model.otherFeesText, "0.99")
+        XCTAssertEqual(model.totalText, "")
+        XCTAssertEqual(model.hstText, "")
+        XCTAssertEqual(model.subtotalText, "")
+        XCTAssertEqual(model.otherFeesText, "")
+        XCTAssertEqual(model.serverAmountAlternatives, [
+            .init(field: .total, cents: 1750),
+            .init(field: .subtotal, cents: 1450),
+            .init(field: .hst, cents: 201),
+            .init(field: .otherFees, cents: 99),
+        ])
+    }
+
+    /// The withheld case is the blank that matters: the note says the
+    /// number could not be trusted, so the LLM's reading must sit beside it
+    /// labelled rather than replace it silently. Tapping is what applies it.
+    func testAWithheldTotalIsOfferedAsAChipBesideItsNote() throws {
+        let model = captureModel(ReceiptSuggestions(totalCents: 850, hstCents: 734, subtotalCents: 21160))
+        model.applyServerSuggestions(ConfirmSuggestionSet(parse: ReceiptSuggestions(
+            totalCents: 21894,
+            hstCents: 734,
+            subtotalCents: 21160
+        )))
+
+        XCTAssertEqual(model.totalText, "")
+        XCTAssertNotNil(model.withheldAmountNote, "the note must not be displaced by a number")
+        let chip = try XCTUnwrap(model.serverAmountAlternatives.first { $0.field == .total })
+        XCTAssertEqual(model.serverAlternativeLabel(chip), "Server read the total as $218.94 - use it")
+
+        XCTAssertTrue(model.applyServerAlternative(chip))
+
+        XCTAssertEqual(model.totalText, "218.94")
         XCTAssertTrue(model.serverAmountAlternatives.isEmpty)
+    }
+
+    /// Later carries what was touched, so a tapped chip used to vanish: the
+    /// person had chosen a number and the pending receipt never heard of it.
+    func testATappedChipRidesAlongWithLater() throws {
+        let model = captureModel(ReceiptSuggestions())
+        model.applyServerSuggestions(serverAnswer)
+        let chip = try XCTUnwrap(model.serverAmountAlternatives.first { $0.field == .total })
+
+        model.applyServerAlternative(chip)
+
+        let partial = try XCTUnwrap(model.pendingReceiptFields())
+        XCTAssertEqual(partial.reviewedFields, [.totalCents])
+        XCTAssertEqual(partial.totalCents, 1750)
+        XCTAssertNil(partial.subtotalCents, "a chip nobody tapped stays a chip")
+    }
+
+    /// A chip already tapped is the person's, so a later box stays theirs.
+    func testATappedChipLocksTheFieldAgainstTheServer() throws {
+        let model = captureModel(ReceiptSuggestions())
+        model.applyServerSuggestions(serverAnswer)
+        let chip = try XCTUnwrap(model.serverAmountAlternatives.first { $0.field == .total })
+        model.applyServerAlternative(chip)
+
+        model.applyServerSuggestions(ConfirmSuggestionSet(parse: ReceiptSuggestions(totalCents: 9999)))
+
+        XCTAssertEqual(model.totalText, "17.50")
+        XCTAssertFalse(model.serverAmountAlternatives.contains { $0.field == .total })
+    }
+
+    // MARK: The capture-day note and the server's date
+
+    private func undatedCapture() -> ConfirmReceiptModel {
+        let model = captureModel(ReceiptSuggestions())
+        XCTAssertTrue(model.dateIsCaptureDayFallback)
+        return model
+    }
+
+    /// "No date was found on the receipt" sat directly under a date the
+    /// server had just found.
+    func testTheServersDateRetiresTheCaptureDayNote() {
+        let model = undatedCapture()
+        model.applyServerSuggestions(serverAnswer)
+        XCTAssertFalse(model.dateIsCaptureDayFallback)
+    }
+
+    /// A date was found even when it is the scan day itself, and the box
+    /// not moving must not leave the note saying otherwise.
+    func testTheServerFindingTheScanDayRetiresTheNoteToo() {
+        let model = undatedCapture()
+        let scanDay = ReceiptFormat.isoDate(fromPicker: model.purchasedDate)
+
+        model.applyServerSuggestions(ConfirmSuggestionSet(parse: ReceiptSuggestions(purchasedAt: scanDay)))
+
+        XCTAssertFalse(model.dateIsCaptureDayFallback)
+    }
+
+    func testAnAnswerWithNoDateLeavesTheNoteTrue() {
+        let model = undatedCapture()
+        model.applyServerSuggestions(ConfirmSuggestionSet(parse: ReceiptSuggestions(vendor: "Costco")))
+        XCTAssertTrue(model.dateIsCaptureDayFallback)
+    }
+
+    /// A touched date keeps what it shows, so the note still describes it.
+    func testATouchedDateKeepsTheNote() {
+        let model = undatedCapture()
+        model.markTouched(.date)
+        model.applyServerSuggestions(serverAnswer)
+        XCTAssertTrue(model.dateIsCaptureDayFallback)
+    }
+
+    /// The three fields §7.2 rules by name still replace an untouched
+    /// prefill: the correction above is about amounts, and only amounts.
+    func testAnAmountChipLeavesVendorDateAndPaymentRulesAlone() {
+        let model = captureModel(ReceiptSuggestions())
+        model.applyServerSuggestions(serverAnswer)
+
+        XCTAssertEqual(model.vendorText, "JIMMY THE GREEK")
+        XCTAssertEqual(ReceiptFormat.isoDate(fromPicker: model.purchasedDate), "2026-04-01")
+        XCTAssertEqual(model.paymentMethodText, "MASTERCARD")
+    }
+
+    // MARK: Picking a past value is looking at the field
+
+    /// A menu sets text without taking focus, and only focus marked a field
+    /// touched - so the second opinion overwrote a vendor a person had just
+    /// chosen.
+    func testAPickedVendorAndPaymentMethodSurviveTheSecondOpinion() {
+        let model = captureModel(ReceiptSuggestions(vendor: "In Store 392"))
+
+        model.usePastValue("Costco", for: .vendor)
+        model.usePastValue("Visa ending 4021", for: .paymentMethod)
+        model.applyServerSuggestions(serverAnswer)
+
+        XCTAssertEqual(model.vendorText, "Costco")
+        XCTAssertEqual(model.paymentMethodText, "Visa ending 4021")
+    }
+
+    /// The capture screen's "Later" carries only what was touched, so a pick
+    /// used to be left behind.
+    func testAPickRidesAlongWithLater() throws {
+        let model = captureModel(ReceiptSuggestions(vendor: "In Store 392"))
+
+        model.usePastValue("Costco", for: .vendor)
+        model.usePastValue("Groceries", for: .category)
+        model.usePastValue("Visa", for: .paymentMethod)
+
+        let partial = try XCTUnwrap(model.pendingReceiptFields())
+        XCTAssertEqual(partial.reviewedFields, [.vendor, .category, .paymentMethod])
+        XCTAssertEqual(partial.vendor, "Costco")
+        XCTAssertEqual(partial.category, "Groceries")
+        XCTAssertEqual(partial.paymentMethod, "Visa")
+    }
+
+    /// And "Save for later" carries only the reviewed fields' values - the
+    /// `kept` filter inside `SaveForLaterRequest` is where the pick was lost.
+    func testAPickRidesAlongWithSaveForLater() async throws {
+        let receipt = Fixtures.receipt(status: .pending)
+        let api = StubKeptAPI()
+        api.saveReceiptForLaterHandler = { _, _ in receipt }
+        let model = ConfirmReceiptModel(api: api, detail: Fixtures.detail(receipt: receipt))
+
+        model.usePastValue("Costco", for: .vendor)
+        let saved = await model.saveForLater()
+
+        XCTAssertTrue(saved)
+        let request = try XCTUnwrap(api.saveReceiptForLaterCalls.first?.request)
+        XCTAssertEqual(request.reviewedFields, [.vendor])
+        let body = try XCTUnwrap(String(data: JSONEncoder().encode(request), encoding: .utf8))
+        XCTAssertTrue(body.contains("Costco"), body)
+    }
+
+    // MARK: Only a person's change marks the date
+
+    /// The second opinion replacing an untouched date is a machine's act.
+    /// `onChange` could not tell, so "Later" sent an LLM's date to the
+    /// server as something a human had read off the paper.
+    func testAServerDateIsNotAReview() {
+        let model = captureModel(ReceiptSuggestions(purchasedAt: "2026-03-01"))
+
+        model.applyServerSuggestions(serverAnswer)
+
+        XCTAssertEqual(ReceiptFormat.isoDate(fromPicker: model.purchasedDate), "2026-04-01")
+        XCTAssertFalse(model.reviewedFieldsForSave.contains(.purchasedAt))
+        XCTAssertNil(model.pendingReceiptFields(), "nobody reviewed anything")
+        XCTAssertNil(model.fieldEditCounts[.purchasedAt], "and nobody edited it")
+    }
+
+    func testAPickedDateIsAReviewAndAnEdit() throws {
+        let model = captureModel(ReceiptSuggestions(purchasedAt: "2026-03-01"))
+
+        model.pickDate(try XCTUnwrap(ReceiptFormat.pickerDate(fromIso: "2026-03-02")))
+
+        XCTAssertEqual(model.reviewedFieldsForSave, [.purchasedAt])
+        XCTAssertEqual(model.fieldEditCounts[.purchasedAt], 1)
+
+        // And once a person has chosen, the server cannot replace it.
+        model.applyServerSuggestions(serverAnswer)
+        XCTAssertEqual(ReceiptFormat.isoDate(fromPicker: model.purchasedDate), "2026-03-02")
+    }
+
+    /// The picker re-announcing the date it already holds is nobody doing
+    /// anything.
+    func testPickingTheSameDateChangesNothing() {
+        let model = captureModel(ReceiptSuggestions(purchasedAt: "2026-03-01"))
+        model.pickDate(model.purchasedDate)
+        XCTAssertEqual(model.reviewedFieldsForSave, [])
+        XCTAssertNil(model.fieldEditCounts[.purchasedAt])
+    }
+
+    // MARK: The server's bounds, stated at the form
+
+    func testAnAmountPastTheServersBoundBlocksSaveAndSaysWhy() {
+        let model = captureModel(ReceiptSuggestions(totalCents: 4520))
+
+        model.totalText = "99999999.00"
+        XCTAssertEqual(model.saveBlocker, "The total is too large to save.")
+        XCTAssertFalse(model.canSave)
+
+        model.totalText = "45.20"
+        XCTAssertNil(model.saveBlocker)
+
+        model.editComponentAmount(.hst, to: "99999999.00")
+        XCTAssertEqual(model.saveBlocker, "HST is too large to save.")
+        model.editComponentAmount(.hst, to: "")
+        model.editComponentAmount(.subtotal, to: "99999999.00")
+        XCTAssertEqual(model.saveBlocker, "The subtotal is too large to save.")
+        model.editComponentAmount(.subtotal, to: "")
+        model.editComponentAmount(.tip, to: "99999999.00")
+        XCTAssertEqual(model.saveBlocker, "The tip is too large to save.")
+        model.editComponentAmount(.tip, to: "")
+        model.editComponentAmount(.otherFees, to: "99999999.00")
+        XCTAssertEqual(model.saveBlocker, "Other fees are too large to save.")
+    }
+
+    /// The largest amount the server stores saves; one cent more does not.
+    func testTheBoundIsTheServersExactly() {
+        let model = captureModel(ReceiptSuggestions())
+        model.totalText = "21474836.47"
+        XCTAssertNil(model.saveBlocker)
+        model.totalText = "21474836.48"
+        XCTAssertNotNil(model.saveBlocker)
+        model.totalText = "-21474836.48"
+        XCTAssertNil(model.saveBlocker)
+        model.totalText = "-21474836.49"
+        XCTAssertNotNil(model.saveBlocker)
+    }
+
+    /// The form's own sums used to run over whatever parsed: two 17-digit
+    /// boxes each fit in Int and overflow when added, which traps. Nothing
+    /// asserts on the value here; reaching the end is the assertion.
+    func testHugeAmountsDoNotReachTheFormsArithmetic() {
+        let model = captureModel(ReceiptSuggestions())
+        let huge = "90000000000000000"
+        model.editComponentAmount(.subtotal, to: huge)
+        model.editComponentAmount(.hst, to: huge)
+        model.editComponentAmount(.tip, to: huge)
+        model.totalText = huge
+
+        XCTAssertFalse(model.showsArithmeticWarning)
+        XCTAssertFalse(model.showsAmountFloorNote)
+        XCTAssertFalse(model.saveNeedsAcknowledgement)
+        XCTAssertNil(model.derivableFill)
+        XCTAssertNil(model.hstSuggestionChip)
+    }
+
+    /// Counted in UTF-16 code units, as zod's `.max()` counts: 101 emoji is
+    /// 101 characters to Swift and 202 to the server.
+    func testTextPastTheServersLengthsBlocksSaveAndSaysWhy() {
+        let model = captureModel(ReceiptSuggestions(totalCents: 4520))
+
+        model.vendorText = String(repeating: "a", count: 200)
+        XCTAssertNil(model.saveBlocker)
+        model.vendorText = String(repeating: "a", count: 201)
+        XCTAssertEqual(model.saveBlocker, "The vendor is too long (200 characters at most).")
+        model.vendorText = String(repeating: "\u{1F9FE}", count: 101)
+        XCTAssertEqual(model.saveBlocker, "The vendor is too long (200 characters at most).")
+        model.vendorText = ""
+
+        model.categoryText = String(repeating: "a", count: 201)
+        XCTAssertEqual(model.saveBlocker, "The category is too long (200 characters at most).")
+        model.categoryText = ""
+
+        model.paymentMethodText = String(repeating: "a", count: 101)
+        XCTAssertEqual(model.saveBlocker, "The payment method is too long (100 characters at most).")
+        model.paymentMethodText = ""
+
+        model.notesText = String(repeating: "a", count: 5001)
+        XCTAssertEqual(model.saveBlocker, "The notes are too long (5000 characters at most).")
+        XCTAssertEqual(model.saveForLaterBlocker, "The notes are too long (5000 characters at most).")
+    }
+
+    /// Trimmed first, because trimmed is what the write sends.
+    func testSurroundingWhitespaceDoesNotCountTowardsALength() {
+        let model = captureModel(ReceiptSuggestions(totalCents: 4520))
+        model.paymentMethodText = String(repeating: " ", count: 150) + "Visa"
+        XCTAssertNil(model.saveBlocker)
+    }
+
+    /// `save()` itself refuses, not only the disabled button.
+    func testSaveRefusesAnOutOfRangeBoxBesideAValidTotal() async {
+        var saves = 0
+        let model = captureModel(ReceiptSuggestions(totalCents: 4520), saved: { _ in saves += 1 })
+        model.editComponentAmount(.tip, to: "99999999.00")
+
+        let saved = await model.save()
+
+        XCTAssertFalse(saved)
+        XCTAssertEqual(saves, 0)
+        XCTAssertEqual(model.saveError, "The tip is too large to save.")
+    }
+
+    /// An out-of-range answer from the server is no chip at all.
+    func testAnOutOfRangeServerAmountIsNoChip() {
+        let model = captureModel(ReceiptSuggestions())
+        model.applyServerSuggestions(ConfirmSuggestionSet(parse: ReceiptSuggestions(
+            totalCents: 12_345_678_901_234
+        )))
+        XCTAssertTrue(model.serverAmountAlternatives.isEmpty)
+    }
+
+    // MARK: The keyboard bar's sign toggle
+
+    func testTheSignToggleFlipsAnAmountAndFlipsItBack() {
+        let model = captureModel(ReceiptSuggestions(totalCents: 4520))
+
+        model.toggleSign(of: .total)
+        XCTAssertEqual(model.totalText, "-45.20")
+        XCTAssertEqual(model.totalInput, .cents(-4520))
+
+        model.toggleSign(of: .total)
+        XCTAssertEqual(model.totalText, "45.20")
+    }
+
+    /// Before any digits, for someone who knows it is a refund: the box
+    /// reads "-" and the typing follows it.
+    func testTheSignToggleWorksOnABlankBox() {
+        let model = captureModel(ReceiptSuggestions())
+        model.toggleSign(of: .total)
+        XCTAssertEqual(model.totalText, "-")
+        model.totalText += "45.20"
+        XCTAssertEqual(model.totalInput, .cents(-4520))
+    }
+
+    /// A component's sign goes through the tracking rule, like typing would.
+    func testTogglingAComponentMovesATotalThatWasTrackingIt() {
+        let model = captureModel(ReceiptSuggestions(totalCents: 1435, hstCents: 165, subtotalCents: 1270))
+
+        model.toggleSign(of: .subtotal)
+
+        XCTAssertEqual(model.subtotalText, "-12.70")
+        XCTAssertEqual(model.totalText, "-11.05")
+    }
+
+    func testTheSignToggleIgnoresTextFields() {
+        let model = captureModel(ReceiptSuggestions(vendor: "Costco"))
+        model.toggleSign(of: .vendor)
+        XCTAssertEqual(model.vendorText, "Costco")
+    }
+
+    // MARK: "Later" never loses what was typed
+
+    /// A touched box that will not parse has no value to carry: it went out
+    /// reviewed-and-empty, keeping neither the typing nor the suggestion.
+    func testACaptureLaterIsHeldWhileABoxWillNotParse() {
+        let model = captureModel(ReceiptSuggestions(totalCents: 4520))
+        model.markTouched(editable: .total)
+
+        model.totalText = "12."
+        XCTAssertEqual(model.setAsideBlocker, "The total isn't a valid amount.")
+
+        model.totalText = "12.50"
+        XCTAssertNil(model.setAsideBlocker)
+
+        model.totalText = ""
+        XCTAssertNil(model.setAsideBlocker, "clearing the box is an answer too")
+    }
+
+    /// On a server-backed form "Later" discards by design, so a bad box
+    /// has nothing to spoil and no reason to hold anyone there.
+    func testTheQueuesLaterIsNeverHeld() {
+        let receipt = Fixtures.receipt(totalCents: 1250, status: .pending)
+        let model = ConfirmReceiptModel(api: StubKeptAPI(), detail: Fixtures.detail(receipt: receipt))
+        model.totalText = "12."
+        XCTAssertNil(model.setAsideBlocker)
+    }
+
+    // MARK: Correcting a queued receipt the server refused
+
+    private func queued(
+        confirmation: ConfirmedReceiptFields? = nil,
+        partial: PendingReceiptFields? = nil,
+        suggestions: ReceiptSuggestions = ReceiptSuggestions()
+    ) -> QueuedReceiptDraft {
+        QueuedReceiptDraft(
+            itemId: UUID(),
+            imageData: Data("scan".utf8),
+            additionalPages: [Data("page two".utf8)],
+            capturedAt: Date(timeIntervalSince1970: 1_774_000_000),
+            suggestions: suggestions,
+            confirmation: confirmation,
+            partial: partial
+        )
+    }
+
+    /// An item a person confirmed reopens on their own values, the
+    /// refused one included, with the reason stated where they can fix it.
+    func testAConfirmedItemReopensOnItsOwnValues() async throws {
+        let refused = ConfirmedReceiptFields(
+            purchasedAt: "2026-03-20",
+            vendor: "Maple Foods",
+            subtotalCents: nil,
+            hstCents: nil,
+            totalCents: 9_999_999_900,
+            tipCents: nil,
+            otherFeesCents: nil,
+            category: "Groceries",
+            paymentMethod: nil,
+            notes: nil
+        )
+        var saved: ConfirmedReceiptFields?
+        let model = ConfirmReceiptModel(queued: queued(confirmation: refused)) { saved = $0 }
+
+        XCTAssertEqual(model.purpose, .edit)
+        XCTAssertEqual(model.imageSources.count, 2)
+        XCTAssertEqual(model.vendorText, "Maple Foods")
+        XCTAssertEqual(model.categoryText, "Groceries")
+        XCTAssertEqual(model.totalText, "99999999.00")
+        XCTAssertEqual(model.saveBlocker, "The total is too large to save.")
+
+        model.totalText = "99.00"
+        let didSave = await model.save()
+
+        XCTAssertTrue(didSave)
+        XCTAssertEqual(saved?.totalCents, 9900)
+        XCTAssertEqual(saved?.vendor, "Maple Foods")
+    }
+
+    /// An item queued by "Later" reopens as the confirm it never had: the
+    /// fields they reviewed are theirs, the rest are the parser's suggestions.
+    func testAPendingItemReopensAsAConfirmWithItsReviewedFields() {
+        let partial = PendingReceiptFields(
+            reviewedFields: [.vendor],
+            purchasedAt: "2026-03-20",
+            vendor: "Maple Foods",
+            subtotalCents: nil,
+            hstCents: nil,
+            tipCents: nil,
+            otherFeesCents: nil,
+            totalCents: nil,
+            category: nil,
+            paymentMethod: nil,
+            notes: nil
+        )
+        let model = ConfirmReceiptModel(
+            queued: queued(
+                partial: partial,
+                suggestions: ReceiptSuggestions(totalCents: 4520, vendor: "In Store 392")
+            ),
+            saveAction: { _ in }
+        )
+
+        XCTAssertEqual(model.purpose, .confirm)
+        XCTAssertEqual(model.vendorText, "Maple Foods")
+        XCTAssertEqual(model.totalText, "45.20")
+        XCTAssertFalse(model.isUnreviewed(.vendor))
+        XCTAssertTrue(model.isUnreviewed(.total))
+        XCTAssertNil(model.setAsideBlocker, "closing this form leaves the item as it was")
     }
 
     /// A number changing under someone's eyes while they read a receipt is
@@ -1567,15 +2205,20 @@ final class ConfirmSuggestionArrivalTests: XCTestCase {
         model.applyServerSuggestions(serverAnswer)
 
         XCTAssertEqual(model.totalText, "17.49", "the on-device value stands")
-        XCTAssertEqual(model.serverAmountAlternatives.map(\.field), [.total])
+        // The two blanks are offered too, since 2026-10-31; HST agrees, so
+        // it is not.
+        XCTAssertEqual(model.serverAmountAlternatives.map(\.field), [.total, .subtotal, .otherFees])
         let alternative = try? XCTUnwrap(model.serverAmountAlternatives.first)
         guard let alternative else { return }
         XCTAssertEqual(model.serverAlternativeLabel(alternative), "Server read the total as $17.50 - use it")
 
         XCTAssertTrue(model.applyServerAlternative(alternative))
         XCTAssertEqual(model.totalText, "17.50")
-        XCTAssertTrue(model.serverAmountAlternatives.isEmpty)
-        XCTAssertTrue(model.isUnreviewed(.total), "an applied chip is still a suggestion until touched")
+        XCTAssertEqual(model.serverAmountAlternatives.map(\.field), [.subtotal, .otherFees])
+        // Asserted the opposite until 2026-10-31. A person picked this
+        // number, and leaving it unreviewed is how Later came to drop it.
+        XCTAssertFalse(model.isUnreviewed(.total), "tapping a chip is looking at the field")
+        XCTAssertTrue(model.reviewedFieldsForSave.contains(.totalCents))
     }
 
     /// §10A.1's rule, unchanged: a machine may fill a field a human has not
@@ -1590,7 +2233,10 @@ final class ConfirmSuggestionArrivalTests: XCTestCase {
 
         XCTAssertEqual(model.vendorText, "Jimmy's")
         XCTAssertEqual(model.totalText, "17.49")
-        XCTAssertTrue(model.serverAmountAlternatives.isEmpty, "no chip for a field the person has decided")
+        XCTAssertFalse(
+            model.serverAmountAlternatives.contains { $0.field == .total },
+            "no chip for a field the person has decided"
+        )
     }
 
     /// The server's answer goes through the same arithmetic-sanity rule the
@@ -1605,7 +2251,10 @@ final class ConfirmSuggestionArrivalTests: XCTestCase {
         )))
 
         XCTAssertEqual(model.totalText, "")
-        XCTAssertEqual(model.subtotalText, "211.60")
+        XCTAssertEqual(model.serverAmountAlternatives, [
+            .init(field: .subtotal, cents: 21160),
+            .init(field: .hst, cents: 734),
+        ], "the withheld total is not offered at all")
     }
 
     /// The save-time accept/override report scores the person against the
@@ -1613,10 +2262,13 @@ final class ConfirmSuggestionArrivalTests: XCTestCase {
     func testTelemetryScoresAgainstTheMostRecentSuggestion() {
         let model = captureModel(ReceiptSuggestions(vendor: "In Store 392"))
         model.applyServerSuggestions(serverAnswer)
+        if let total = model.serverAmountAlternatives.first(where: { $0.field == .total }) {
+            model.applyServerAlternative(total)
+        }
 
         let outcomes = Dictionary(uniqueKeysWithValues: model.suggestionOutcomes().map { ($0.field, $0.accepted) })
         XCTAssertEqual(outcomes[.vendor], true, "the server's vendor left alone is accepted")
-        XCTAssertEqual(outcomes[.total], true)
+        XCTAssertEqual(outcomes[.total], true, "and so is a chip someone tapped and kept")
 
         model.vendorText = "Something Else"
         let overridden = Dictionary(uniqueKeysWithValues: model.suggestionOutcomes().map { ($0.field, $0.accepted) })

@@ -119,6 +119,9 @@ struct KeptApp: App {
                 // keychain stays WhenUnlocked).
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
+                        // First: a session recovered here is what the drain
+                        // below needs to have anything to do.
+                        environment.session.retrySavedSessionIfUnread()
                         environment.outbox.externalTrigger()
                     } else if phase == .background {
                         // The telemetry queue's other flush trigger

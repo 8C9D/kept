@@ -88,6 +88,9 @@ final class OutboxController: ObservableObject {
         let id: UUID
         let capturedAt: Date
         let status: Status
+        /// Whether Home can offer to correct this item rather than only
+        /// retry or discard it (`correctionDraft`).
+        var canCorrect = false
 
         enum Status: Equatable {
             /// In line; the drain will reach it.
@@ -359,6 +362,76 @@ final class OutboxController: ObservableObject {
         externalTrigger()
     }
 
+    // MARK: - Correcting a refused item (2026-10-31)
+
+    /// What the confirm form needs to reopen over a blocked item, or nil
+    /// with the reason stated on the row.
+    ///
+    /// Retry and Discard were the only two answers to a 400, and for a
+    /// refused value neither is one: Retry sends the same bytes into the
+    /// same refusal and Discard throws the scan away. The form already
+    /// exists and a person can already fix anything on it, so this hands
+    /// it back rather than adding a screen. Only an item that reached the
+    /// create (`.uploaded`): before that nothing has been refused about
+    /// its fields, and after it the receipt exists and a correction belongs
+    /// on the receipt.
+    func correctionDraft(forBlockedItem id: UUID) async -> QueuedReceiptDraft? {
+        guard let item = items.first(where: { $0.id == id }), item.blockedMessage != nil,
+              case .uploaded(let parsed, _) = item.progress else {
+            return nil
+        }
+        do {
+            var pages: [Data] = []
+            for index in 0..<item.extraPageCount {
+                pages.append(try await store.additionalPageData(itemId: id, index: index))
+            }
+            return QueuedReceiptDraft(
+                itemId: id,
+                imageData: try await store.imageData(itemId: id),
+                additionalPages: pages,
+                capturedAt: item.capturedAt,
+                suggestions: parsed.suggestions,
+                confirmation: item.confirmation,
+                partial: item.partial
+            )
+        } catch {
+            // The tap must not fail into silence, the same rule Retry
+            // follows: the item stays blocked and says why.
+            if let index = items.firstIndex(where: { $0.id == id }) {
+                items[index].blockedMessage = "This receipt could not be opened: \(error.localizedDescription)"
+            }
+            rebuildEntries()
+            return nil
+        }
+    }
+
+    /// Saves the corrected form as what the create sends, clears the block
+    /// and drains. Throws so the form can say why it did not save and stay
+    /// open - the disk write is the only durable copy of what was just
+    /// typed.
+    func correctBlockedItem(id: UUID, with fields: ConfirmedReceiptFields) async throws {
+        guard let index = items.firstIndex(where: { $0.id == id }), items[index].blockedMessage != nil else {
+            throw BlockedItemGoneError()
+        }
+        var item = items[index]
+        item.confirmation = fields
+        item.blockedMessage = nil
+        try await store.update(item)
+        // Re-find: the awaited write is a suspension point.
+        applyInMemory(item)
+        rebuildEntries()
+        externalTrigger()
+    }
+
+    /// The item stopped being blocked while the form was open - it was
+    /// discarded, most likely, from Home underneath a sheet that has since
+    /// gone. Stated rather than treated as a save.
+    struct BlockedItemGoneError: LocalizedError {
+        var errorDescription: String? {
+            "This receipt is no longer waiting on this phone."
+        }
+    }
+
     /// Deletes a needs-attention item, image and all. Only the UI's
     /// confirmed, human-initiated path calls this - the queue itself never
     /// discards anything (kickoff §3: no silent vanishing).
@@ -395,6 +468,10 @@ final class OutboxController: ObservableObject {
     /// same way discardBlockedItem does - a saved receipt never vanishes
     /// without a human hearing about it (wave-5 kickoff §3), and that is no
     /// less true when the vanishing was asked for.
+    ///
+    /// The unreadable records go too (2026-10-31). They are not in `items`,
+    /// so walking the queue never met them, and a deleted account's image
+    /// could stay on the phone behind a record that failed to decode.
     func discardAll(ownedBy userId: UUID) async {
         // Loaded first: a queue that has never been read from disk holds
         // nothing in memory, and "delete everything" would silently delete
@@ -415,6 +492,12 @@ final class OutboxController: ObservableObject {
             } catch {
                 failures += 1
             }
+        }
+        do {
+            let removed = try await store.removeUnreadable(ownedBy: userId)
+            unreadableCount = max(0, unreadableCount - removed)
+        } catch {
+            failures += 1
         }
         if failures > 0 {
             drainFailureNote = "\(failures) queued \(failures == 1 ? "receipt" : "receipts") could not be removed from this phone."
@@ -522,8 +605,21 @@ final class OutboxController: ObservableObject {
                     // app to sign-in; the queue simply waits - sign-in
                     // success is a trigger, so it resumes by itself
                     // (kickoff §3: wait, never fail permanently).
+                    //
+                    // Unless a session is still on file (2026-10-31): the
+                    // 401 was about an older token and the person has
+                    // already signed in again, or the capture screen is
+                    // holding the rejection back until its scan is safe.
+                    // No sign-in is coming to wake this queue in the first
+                    // case, so it wakes itself; in the second the retry is
+                    // cancelled when the session does end. `try?`: a
+                    // keychain refusing the read is a locked phone, and the
+                    // next foreground is the retry for that.
                     activeItemId = nil
                     rebuildEntries()
+                    if (try? currentUserId()) != nil {
+                        scheduleRetry()
+                    }
                     return
                 }
             }
@@ -577,12 +673,12 @@ final class OutboxController: ObservableObject {
                 item.progress = .uploaded(parsed, objectKey: target.objectKey)
                 try await persist(item)
             case .uploaded(let parsed, let objectKey):
-                let created: Receipt?
+                let receiptId: UUID?
                 do {
-                    created = try await api.createReceipt(
+                    receiptId = try await api.createReceipt(
                         createRequest(for: item, parsed: parsed, objectKey: objectKey)
-                    )
-                } catch let apiError as APIError where Self.isDuplicateImage(apiError) {
+                    ).id
+                } catch let apiError as APIError where apiError.isDuplicateImage {
                     // 409 from the create - and only from the create; a
                     // duplicate_image anywhere else must not delete a
                     // receipt that was never created (reviewer finding).
@@ -591,31 +687,48 @@ final class OutboxController: ObservableObject {
                     // classic cause is a create whose response was lost.
                     // Counting it saved is recovery, not masking - the
                     // wave-4 ruling, extended to the queue.
-                    created = nil
+                    receiptId = apiError.existingReceiptId
                 }
                 guard item.extraPageCount > 0 else {
                     await finishItem(item.id)
                     return
                 }
-                guard let created else {
-                    // A multi-page receipt whose create came back 409:
-                    // page one is attached to a receipt that exists, but
-                    // the error carries no id (the server's
-                    // `duplicateImageError` is a message, not a record),
-                    // so this queue cannot attach the rest. Blocked and
-                    // stated with its remedy rather than silently dropping
-                    // pages a person scanned (kickoff §3) - the pages are
-                    // still on this phone, and "Add a page" on the receipt
-                    // itself is the way in.
+                guard let receiptId else {
+                    // A multi-page receipt whose create came back 409 from
+                    // an older server: page one is attached to a receipt
+                    // that exists, but the error carries no id, so this
+                    // queue cannot attach the rest. Blocked and stated with
+                    // its remedy rather than silently dropping pages a
+                    // person scanned (kickoff §3) - the pages are still on
+                    // this phone, and "Add a page" on the receipt itself
+                    // is the way in. A current server names the receipt
+                    // (`existingReceiptId`, 2026-10-31), so the same lost
+                    // response simply carries on with the pages below: it
+                    // used to end here, with a rescan as the remedy and
+                    // Discard one tap from the only copy of those pages.
                     await blockItem(
                         item.id,
                         message: "Page 1 of this receipt is already saved, but its other \(item.extraPageCount == 1 ? "page" : "pages") could not be attached automatically. Open that receipt and use \"Add a page\", then discard this one."
                     )
                     return
                 }
-                item.progress = .created(parsed, receiptId: created.id, pagesAdded: 0)
+                item.progress = .created(parsed, receiptId: receiptId, pagesAdded: 0)
                 try await persist(item)
             case .created(let parsed, let receiptId, let pagesAdded):
+                // Every page is attached; only now does the local copy go.
+                // A kill anywhere above resumes at the page that had not
+                // landed yet, never re-creating the receipt.
+                //
+                // Asked here, ahead of the attach, rather than after it
+                // (2026-10-31), because a kill can land between the last
+                // page's persist and this removal. Resuming there used to
+                // ask the store for a page past the end, and its "missing
+                // image" answer blocked a finished receipt with a false
+                // "could not be read back".
+                guard pagesAdded < item.extraPageCount else {
+                    await finishItem(item.id)
+                    return
+                }
                 guard let advanced = try await attachNextPage(
                     of: item,
                     parsed: parsed,
@@ -625,13 +738,6 @@ final class OutboxController: ObservableObject {
                     return
                 }
                 item = advanced
-                if item.extraPageCount <= pagesAdded + 1 {
-                    // Every page is attached; only now does the local copy
-                    // go. A kill anywhere above resumes at the page that
-                    // had not landed yet, never re-creating the receipt.
-                    await finishItem(item.id)
-                    return
-                }
             }
             guard let current = items.first(where: { $0.id == item.id }) else {
                 return
@@ -670,7 +776,7 @@ final class OutboxController: ObservableObject {
                 objectKey: target.objectKey,
                 sha256: Self.sha256Hex(page)
             )
-        } catch let apiError as APIError where Self.isDuplicateImage(apiError) {
+        } catch let apiError as APIError where apiError.isDuplicateImage {
             // These exact bytes are already attached to one of this user's
             // receipts - which, on this path, means this page landed and
             // the answer was lost. Counting it done is the same recovery
@@ -744,7 +850,10 @@ final class OutboxController: ObservableObject {
         parsed: ParsedReceipt,
         objectKey: String
     ) -> CreateReceiptRequest {
-        let suggestions = parsed.suggestions
+        // Bounded again here for the parses an earlier build already wrote
+        // to disk: the columns below read the same values the record does,
+        // and either one alone would refuse the create (2026-10-31).
+        let suggestions = parsed.suggestions.withinServerBounds
         if let confirmed = item.confirmation {
             // Confirmed at capture (the single-capture flow): the human's
             // fields land as a `confirmed` row directly - it never joins
@@ -895,7 +1004,15 @@ final class OutboxController: ObservableObject {
             case .requestFailed(_, let message, let status):
                 // Timeout-shaped and rate-limit statuses are the server
                 // asking for patience, not refusing the request.
-                if status == 408 || status == 429 {
+                //
+                // 401 and 403 are not about this item either (2026-10-31).
+                // The API never answers 403 for a resource - a foreign one
+                // is a 404, deliberately (spec §3) - so a 403 here is the
+                // edge secret's refusal: a Transform Rule that stopped
+                // adding the header, in JSON, for every request alike.
+                // Calling that an item fault flipped the whole queue to
+                // Needs attention and left one tap per receipt to undo it.
+                if status == 408 || status == 429 || status == 401 || status == 403 {
                     return .retryLater(message: message)
                 }
                 if (400..<500).contains(status) {
@@ -906,6 +1023,11 @@ final class OutboxController: ObservableObject {
                     return .blockItem(message: message)
                 }
                 return .retryLater(message: message)
+            case .duplicateImage(_, let message):
+                // Only the create and the add-page catch this, and they
+                // catch it above; anywhere else it is a refusal like any
+                // other 409.
+                return .blockItem(message: message)
             case .network(let urlError):
                 return .retryLater(message: urlError.localizedDescription)
             case .unexpectedResponse(let status):
@@ -995,20 +1117,22 @@ final class OutboxController: ObservableObject {
             } else {
                 status = .waiting
             }
-            visible.append(Entry(id: item.id, capturedAt: item.capturedAt, status: status))
+            var canCorrect = false
+            if item.blockedMessage != nil, case .uploaded = item.progress {
+                canCorrect = true
+            }
+            visible.append(Entry(
+                id: item.id,
+                capturedAt: item.capturedAt,
+                status: status,
+                canCorrect: canCorrect
+            ))
         }
         entries = visible
         otherAccountCount = foreign
     }
 
     // MARK: - Hashing
-
-    private static func isDuplicateImage(_ error: APIError) -> Bool {
-        if case .requestFailed(let code, _, _) = error {
-            return code == "duplicate_image"
-        }
-        return false
-    }
 
     private static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data)

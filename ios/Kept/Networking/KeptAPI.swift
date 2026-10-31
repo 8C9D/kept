@@ -296,7 +296,11 @@ extension APIClient: KeptAPI {
         do {
             return try await post(
                 "/api/receipts/parse",
-                body: Body(ocrRawText: ocrRawText, capturedAt: ReceiptFormat.timestamp(of: capturedAt))
+                body: Body(ocrRawText: ocrRawText, capturedAt: ReceiptFormat.timestamp(of: capturedAt)),
+                // Best-effort, so a dead session is the same silent nothing
+                // as every other failure here - see SessionFailureHandling
+                // for the scan this used to destroy.
+                sessionFailure: .leavesSession
             )
         } catch APIError.requestFailed(let code, _, _) where code == "parse_unavailable" {
             throw ServerParseError.unavailable
@@ -398,6 +402,8 @@ extension APIClient: KeptAPI {
         struct Response: Decodable {
             let accepted: Int
         }
-        let _: Response = try await post("/api/events", body: request)
+        // Fire and forget means this cannot end a session either: nobody
+        // asked for this request, and it can land on any screen.
+        let _: Response = try await post("/api/events", body: request, sessionFailure: .leavesSession)
     }
 }

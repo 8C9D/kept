@@ -175,6 +175,166 @@ final class ReceiptImageUploadModelTests: XCTestCase {
         XCTAssertEqual(message, "An identical image is already attached to one of your receipts")
     }
 
+    /// The same flaw in the other flow that scans: with no page to send,
+    /// Try again finished the upload and logged an edit nobody made.
+    func testRetryCannotTurnALostScanIntoAFinishedUpload() async {
+        let api = StubKeptAPI()
+        let model = ReceiptImageUploadModel(api: api, eventLogger: EventLogger(api: api), receiptId: UUID())
+
+        model.reportScanFailure("Page 1 of 1 could not be saved. Scan it again.")
+        await model.retry()
+
+        guard case .scanFailed(let message) = model.phase else {
+            return XCTFail("a scan that sent nothing reported \(model.phase)")
+        }
+        XCTAssertEqual(message, "Page 1 of 1 could not be saved. Scan it again.")
+        XCTAssertTrue(api.addReceiptImageCalls.isEmpty)
+
+        model.discardFailedScan()
+        guard case .idle = model.phase else {
+            return XCTFail("Expected idle, got \(model.phase)")
+        }
+    }
+
+    /// A 401 mid-upload must not cost the scan: the session is held, the
+    /// pages stay in the model, and Try again resumes at the page that
+    /// failed once the person has signed back in.
+    func testADeadSessionKeepsTheScanAndRetryResumesIt() async {
+        let api = StubKeptAPI()
+        var presigns = 0
+        api.uploadTargetHandler = { _ in
+            presigns += 1
+            if presigns == 2 { throw APIError.sessionRejected }
+            return self.target("key-\(presigns)")
+        }
+        var uploaded: [Data] = []
+        api.uploadImageHandler = { _, data, _ in uploaded.append(data) }
+        api.addReceiptImageHandler = { _, _, _ in self.image(page: 2) }
+        let model = ReceiptImageUploadModel(api: api, eventLogger: EventLogger(api: api), receiptId: UUID())
+
+        await model.addPages([Data([0x01]), Data([0x02])])
+
+        guard case .failed(let message) = model.phase else {
+            return XCTFail("Expected failed, got \(model.phase)")
+        }
+        XCTAssertTrue(message.contains("Your session has expired"), message)
+        XCTAssertEqual(uploaded, [Data([0x01])])
+
+        await model.retry()
+
+        guard case .finished = model.phase else {
+            return XCTFail("Expected finished, got \(model.phase)")
+        }
+        XCTAssertEqual(uploaded, [Data([0x01]), Data([0x02])], "the second page was still there, and the first was not resent")
+    }
+
+    /// The add reached the server and only the answer was lost, so Retry
+    /// sends the same bytes and the server says 409 about its own success.
+    /// That dead-ended Retry for good; it now counts as the page landing.
+    func testA409AfterALostAddResponseCountsAsLanded() async {
+        let api = StubKeptAPI()
+        api.uploadTargetHandler = { _ in self.target("k") }
+        api.uploadImageHandler = { _, _, _ in }
+        var attempts = 0
+        api.addReceiptImageHandler = { _, _, _ in
+            attempts += 1
+            if attempts == 1 {
+                throw APIError.network(URLError(.networkConnectionLost))
+            }
+            throw APIError.requestFailed(
+                code: "duplicate_image",
+                message: "An identical image is already attached to one of your receipts",
+                status: 409
+            )
+        }
+        let model = ReceiptImageUploadModel(api: api, eventLogger: EventLogger(api: api), receiptId: UUID())
+
+        await model.addPages([Data([0x01])])
+        guard case .failed = model.phase else {
+            return XCTFail("Expected failed, got \(model.phase)")
+        }
+
+        await model.retry()
+
+        guard case .finished = model.phase else {
+            return XCTFail("Expected finished, got \(model.phase)")
+        }
+    }
+
+    /// The same for a replace, which has the identical lost-response shape.
+    func testA409AfterALostReplaceResponseCountsAsLanded() async {
+        let api = StubKeptAPI()
+        api.uploadTargetHandler = { _ in self.target("k") }
+        api.uploadImageHandler = { _, _, _ in }
+        var attempts = 0
+        api.replaceReceiptImageHandler = { _, _, _, _ in
+            attempts += 1
+            if attempts == 1 {
+                throw APIError.requestFailed(code: "internal_error", message: "Try again", status: 500)
+            }
+            throw APIError.requestFailed(code: "duplicate_image", message: "already attached", status: 409)
+        }
+        let model = ReceiptImageUploadModel(api: api, eventLogger: EventLogger(api: api), receiptId: UUID())
+
+        await model.replacePage(1, data: Data([0x01]))
+        await model.retry()
+
+        guard case .finished = model.phase else {
+            return XCTFail("Expected finished, got \(model.phase)")
+        }
+    }
+
+    /// A failure that proves nothing landed earns the 409 no such reading:
+    /// the page before the 409 was refused, so it is true news.
+    func testA409AfterAPlainRefusalIsStillSurfaced() async {
+        let api = StubKeptAPI()
+        api.uploadTargetHandler = { _ in self.target("k") }
+        api.uploadImageHandler = { _, _, _ in }
+        var attempts = 0
+        api.addReceiptImageHandler = { _, _, _ in
+            attempts += 1
+            if attempts == 1 {
+                throw APIError.requestFailed(code: "invalid_request", message: "nope", status: 400)
+            }
+            throw APIError.requestFailed(code: "duplicate_image", message: "already attached", status: 409)
+        }
+        let model = ReceiptImageUploadModel(api: api, eventLogger: EventLogger(api: api), receiptId: UUID())
+
+        await model.addPages([Data([0x01])])
+        await model.retry()
+
+        guard case .failed(let message) = model.phase else {
+            return XCTFail("Expected failed, got \(model.phase)")
+        }
+        XCTAssertEqual(message, "already attached")
+    }
+
+    /// The memory belongs to the page: one that landed clears it, so the
+    /// next page's first 409 is news again.
+    func testTheLostResponseReadingDoesNotLeakToTheNextPage() async {
+        let api = StubKeptAPI()
+        api.uploadTargetHandler = { _ in self.target("k") }
+        api.uploadImageHandler = { _, _, _ in }
+        var attempts = 0
+        api.addReceiptImageHandler = { _, _, _ in
+            attempts += 1
+            switch attempts {
+            case 1: throw APIError.network(URLError(.timedOut))
+            case 2: return self.image(page: 2)
+            default: throw APIError.requestFailed(code: "duplicate_image", message: "already attached", status: 409)
+            }
+        }
+        let model = ReceiptImageUploadModel(api: api, eventLogger: EventLogger(api: api), receiptId: UUID())
+
+        await model.addPages([Data([0x01]), Data([0x02])])
+        await model.retry()
+
+        guard case .failed(let message) = model.phase else {
+            return XCTFail("Expected failed, got \(model.phase)")
+        }
+        XCTAssertTrue(message.contains("already attached"), message)
+    }
+
     func testReplaceSurfacesTheServersDuplicateMessageVerbatim() async {
         let api = StubKeptAPI()
         api.uploadTargetHandler = { _ in self.target("k") }

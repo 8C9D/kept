@@ -16,6 +16,9 @@ struct ConfirmReceiptView: View {
     /// forever, if it fails or nothing has been used yet - and the form
     /// is complete either way (never blocks on the network).
     @ObservedObject var options: ReceiptOptionsStore
+    /// Read for one thing: whether a dead session is being held behind this
+    /// form, so a server-backed Save can be finished from here (2026-10-31).
+    @EnvironmentObject private var session: SessionController
     /// Behavioural telemetry (2026-08-28) - fire-and-forget by contract
     /// (EventLogger's own doc comment), so every call site below is a
     /// plain, unawaited `log()`: nothing here may block or fail visibly.
@@ -58,6 +61,9 @@ struct ConfirmReceiptView: View {
     /// Up while Save is waiting for the person to acknowledge a mismatch
     /// too large to be rounding (2026-09-01, `saveNeedsAcknowledgement`).
     @State private var acknowledgingMismatch = false
+    /// Non-nil while "Later" is explaining why it has not left yet
+    /// (2026-10-31, `ConfirmReceiptModel.setAsideBlocker`).
+    @State private var setAsideRefusal: String?
 
     var body: some View {
         Form {
@@ -67,6 +73,20 @@ struct ConfirmReceiptView: View {
             detailFieldsSection
             optionalFieldsSection
             saveSection
+        }
+        // Pinned rather than in the Save section (2026-10-31, found by
+        // screenshot): the bottom of this form is below the fold, so a Save
+        // refused by a dead session looked like a button that did nothing,
+        // with the reason and the way out both a scroll away. Only where
+        // Save needs the network: a capture-time form saves to this phone
+        // whatever the session is doing, so a sign-in there would be a
+        // question nobody needs answered.
+        .safeAreaInset(edge: .bottom) {
+            if session.rejectionIsHeld && model.receiptId != nil {
+                SessionRenewalView()
+                    .padding()
+                    .background(.regularMaterial)
+            }
         }
         // Any scroll puts the keyboard away (§10A.1's dismissal rule), so
         // the Save button is never left under it: reaching Save is a
@@ -78,7 +98,13 @@ struct ConfirmReceiptView: View {
         // Both the Done button and tap-to-dismiss. The Done button was a
         // `ToolbarItemGroup(placement: .keyboard)` here until the device
         // proved it installs nothing through this screen's presentation.
-        .background(ProvidesKeyboardExits())
+        // The bar carries the money pads' sign toggle too (2026-10-31):
+        // `.decimalPad` has no minus key, and a refund is a real receipt.
+        .background(ProvidesKeyboardExits(onToggleSign: {
+            if let focusedField, focusedField.usesDecimalPad {
+                model.toggleSign(of: focusedField)
+            }
+        }))
         .navigationTitle(model.screenTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -98,6 +124,14 @@ struct ConfirmReceiptView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button(model.dismissLabel) {
+                    // An alert rather than the note under Save: this button
+                    // is at the top of a long form, usually with the
+                    // keyboard up, and the note would be off screen for
+                    // exactly the tap it is answering.
+                    if let refusal = model.setAsideBlocker {
+                        setAsideRefusal = refusal
+                        return
+                    }
                     logDeferralIfConfirming()
                     Task { await onSetAside() }
                 }
@@ -151,6 +185,21 @@ struct ConfirmReceiptView: View {
             Text(model.saveAcknowledgementMessage ?? "")
         }
         .alert(
+            "Finish this first",
+            isPresented: Binding(
+                get: { setAsideRefusal != nil },
+                set: { if !$0 { setAsideRefusal = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                setAsideRefusal = nil
+            }
+        } message: {
+            // Names the box and the two ways out of it. Nothing has been
+            // lost: the form, the scan and the typing are all still here.
+            Text("\(setAsideRefusal ?? "") Fix it or clear it, then tap Later again.")
+        }
+        .alert(
             "Your receipt was not deleted",
             isPresented: Binding(
                 get: { model.deleteError != nil },
@@ -192,6 +241,13 @@ struct ConfirmReceiptView: View {
         }
         .onChange(of: model.vendorText) { _, _ in
             applyVendorDefaultsIfAvailable()
+        }
+        // Signed back in: "your session has expired" under Save has just
+        // stopped being true.
+        .onChange(of: session.rejectionIsHeld) { wasHeld, isHeld in
+            if wasHeld && !isHeld {
+                model.clearSaveError()
+            }
         }
         .onChange(of: options.options) { _, _ in
             applyVendorDefaultsIfAvailable()
@@ -377,6 +433,15 @@ struct ConfirmReceiptView: View {
     /// spec §10.2).
     private func applyVendorDefaultsIfAvailable() {
         model.applyVendorDefaultIfAvailable(options.options.vendorDefaults)
+    }
+
+    // MARK: - Past values (2026-10-31)
+
+    /// One meaning for a pick, whichever row and whichever control made it:
+    /// the model records the look, and `option_reused` reports it.
+    private func reusePastValue(_ value: String, for field: ConfirmReceiptModel.EditableField) {
+        model.usePastValue(value, for: field)
+        eventLogger.log(.optionReused, field: field.eventField, receiptId: model.receiptId)
     }
 
     // MARK: - Telemetry (2026-08-28)
@@ -569,8 +634,9 @@ struct ConfirmReceiptView: View {
                 model.applyReconciliationDifference(into: .otherFees)
             }
         }
-        // The server's second opinion, where it disagrees with an amount
-        // already on screen (2026-09-01). Offered, never applied: a number
+        // The server's second opinion, wherever it read an amount the form
+        // does not show (2026-09-01; blank boxes too since 2026-10-31).
+        // Offered, never applied: a number
         // changing under someone's eyes while they read a receipt is the
         // one behaviour this screen must not have. Same labelled-not-bare
         // button as proposal #1's fills, for the same stated reason.
@@ -624,8 +690,17 @@ struct ConfirmReceiptView: View {
             // the previous day west of Greenwich and saves the next day
             // when "corrected".
             VStack(alignment: .leading, spacing: 4) {
-                DatePicker("Date", selection: $model.purchasedDate, displayedComponents: .date)
-                    .receiptDatePickerPin()
+                // Bound through `pickDate` rather than watched with an
+                // `onChange` (2026-10-31): a binding's setter is only ever
+                // a person, and `onChange` also fired when the server's
+                // second opinion replaced the date, passing an LLM's read
+                // off as a human's review.
+                DatePicker(
+                    "Date",
+                    selection: Binding(get: { model.purchasedDate }, set: { model.pickDate($0) }),
+                    displayedComponents: .date
+                )
+                .receiptDatePickerPin()
                 if model.dateIsCaptureDayFallback {
                     // The one suggestion that can be fabricated: no date
                     // parsed, so this is the capture day, said out loud
@@ -649,10 +724,6 @@ struct ConfirmReceiptView: View {
             .simultaneousGesture(TapGesture().onEnded {
                 model.markTouched(.date)
             })
-            .onChange(of: model.purchasedDate) { _, _ in
-                model.markTouched(.date)
-                model.recordDateEdited()
-            }
 
             // Vendor is both a suggestion row and a reusable-value row
             // (2026-08-28): the parser can prefill it AND the person's own
@@ -666,7 +737,7 @@ struct ConfirmReceiptView: View {
                 focus: $focusedField,
                 pastValues: options.options.vendors,
                 placeholder: "Not found",
-                onReuse: { eventLogger.log(.optionReused, field: .vendor, receiptId: model.receiptId) }
+                onPick: { reusePastValue($0, for: .vendor) }
             )
             SuggestedFieldRow(
                 label: "HST",
@@ -734,7 +805,7 @@ struct ConfirmReceiptView: View {
                 field: .category,
                 focus: $focusedField,
                 pastValues: options.options.categories,
-                onReuse: { eventLogger.log(.optionReused, field: .category, receiptId: model.receiptId) }
+                onPick: { reusePastValue($0, for: .category) }
             )
             ReusableValueFieldRow(
                 label: "Payment",
@@ -742,7 +813,7 @@ struct ConfirmReceiptView: View {
                 field: .paymentMethod,
                 focus: $focusedField,
                 pastValues: options.options.paymentMethods,
-                onReuse: { eventLogger.log(.optionReused, field: .paymentMethod, receiptId: model.receiptId) }
+                onPick: { reusePastValue($0, for: .paymentMethod) }
             )
             TextField("Notes", text: $model.notesText, axis: .vertical)
                 .lineLimit(2...5)
@@ -808,7 +879,9 @@ struct ConfirmReceiptView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
             }
-            if let saveError = model.saveError {
+            // Not while a rejection is held: the pinned prompt is already
+            // saying so, with the way out attached.
+            if let saveError = model.saveError, !session.rejectionIsHeld {
                 Text(saveError)
                     .font(.footnote)
                     .foregroundStyle(.red)

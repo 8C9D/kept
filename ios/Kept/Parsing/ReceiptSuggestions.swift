@@ -53,6 +53,38 @@ struct ReceiptSuggestions: Codable, Equatable {
 
     var vendor: String?
 
+    /// This parse with everything the server's schema would refuse taken
+    /// out (2026-10-31): an amount past the int4 bound, a vendor or payment
+    /// method past its length, or an empty string.
+    ///
+    /// `ReceiptAmount` already refuses a single out-of-range line, so what
+    /// this adds is the rest: the two amounts the parser SUMS across lines
+    /// (other fees, a split HST), the vendor line, and the parse an earlier
+    /// build already wrote to a queued item on disk. That last one is why
+    /// the drain applies it again at the create - `ocrSuggestions` is
+    /// strict, so a value it refuses 400s the receipt a person is waiting
+    /// on, and "the parser read something absurd" is not a reason to lose
+    /// it. Dropped rather than clamped: a suggestion that has been edited
+    /// to fit is a reading nobody made.
+    var withinServerBounds: ReceiptSuggestions {
+        func amount(_ value: Int?) -> Int? {
+            value.flatMap { ReceiptArithmetic.isStorable(cents: $0) ? $0 : nil }
+        }
+        func text(_ value: String?, limit: Int) -> String? {
+            value.flatMap { !$0.isEmpty && ReceiptFieldLimits.fits($0, limit: limit) ? $0 : nil }
+        }
+        return ReceiptSuggestions(
+            totalCents: amount(totalCents),
+            hstCents: amount(hstCents),
+            subtotalCents: amount(subtotalCents),
+            tipCents: amount(tipCents),
+            otherFeesCents: amount(otherFeesCents),
+            paymentMethod: text(paymentMethod, limit: ReceiptFieldLimits.paymentMethod),
+            purchasedAt: purchasedAt,
+            vendor: text(vendor, limit: ReceiptFieldLimits.vendor)
+        )
+    }
+
     /// True when no heuristic found anything - the confirm screen for this
     /// receipt starts from a blank form rather than suggestions.
     var isEmpty: Bool {

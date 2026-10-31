@@ -33,9 +33,16 @@ import UIKit
 /// Place it as a background: it draws nothing and takes no touches itself,
 /// it is only there to find the window and to leave with the screen.
 struct ProvidesKeyboardExits: UIViewRepresentable {
+    /// The bar's sign toggle (2026-10-31). A closure back into SwiftUI
+    /// rather than an edit of the `UITextField` from here: the form's money
+    /// rules - the total tracking its components, above all - run on the
+    /// model, and text written behind the binding's back would skip them.
+    var onToggleSign: (() -> Void)? = nil
+
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> UIView {
+        context.coordinator.onToggleSign = onToggleSign
         let view = WindowObservingView()
         view.isUserInteractionEnabled = false
         // didMoveToWindow rather than updateUIView: the window is the
@@ -47,7 +54,9 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ view: UIView, context: Context) {}
+    func updateUIView(_ view: UIView, context: Context) {
+        context.coordinator.onToggleSign = onToggleSign
+    }
 
     /// Detaches when the confirm screen goes away: the view leaves the
     /// window, `didMoveToWindow` fires with nil, and the recognizer and
@@ -73,6 +82,7 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
         /// Which field the bar is currently presented for; a responder
         /// change is the one moment UIKit re-queries on its own.
         private weak var barPresentedFor: UIView?
+        var onToggleSign: (() -> Void)?
 
         func attach(to window: UIWindow?) {
             guard window !== self.window else { return }
@@ -127,6 +137,10 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
 
         @objc private func dismissKeyboard() {
             window?.endEditing(true)
+        }
+
+        @objc private func toggleSign() {
+            onToggleSign?()
         }
 
         // MARK: - The Done bar
@@ -186,6 +200,10 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
         private func ensureDoneBar(on input: UIView) {
             let bar = doneBar ?? makeDoneBar()
             doneBar = bar
+            // Ahead of the guard below: one bar serves every field on the
+            // screen, and a move from a money box to notes changes this
+            // without changing the bar.
+            bar.showsSignToggle = input.keyboardIsDecimalPad
             guard input.inputAccessoryView !== bar else { return }
             switch input {
             case let field as UITextField:
@@ -218,7 +236,8 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
                 width: window?.bounds.width ?? 0,
                 height: height,
                 target: self,
-                action: #selector(dismissKeyboard)
+                action: #selector(dismissKeyboard),
+                signAction: #selector(toggleSign)
             )
         }
 
@@ -259,6 +278,12 @@ struct ProvidesKeyboardExits: UIViewRepresentable {
 /// the first responder rather than requested from SwiftUI's toolbar
 /// system, still self-healing, still explicitly sized and never
 /// `sizeToFit`.
+///
+/// **The sign toggle (2026-10-31).** `.decimalPad` has no minus key, so a
+/// refund could be prefilled but not typed. The bar is the one surface this
+/// screen owns on top of a keyboard, so the +/- lives here, leading, opposite
+/// Done - and only over a money pad: on notes it would be a button that does
+/// nothing.
 final class KeyboardDoneBar: UIView {
     /// The band UIKit reserves above the keyboard. 44 is the standard
     /// accessory height and the number the device pass was run against.
@@ -270,6 +295,11 @@ final class KeyboardDoneBar: UIView {
     private static let trailingInset: CGFloat = 16
 
     private let height: CGFloat
+    private let signButton: UIButton
+
+    var showsSignToggle = false {
+        didSet { signButton.isHidden = !showsSignToggle }
+    }
 
     /// UIKit measures an `inputAccessoryView` through Auto Layout when it
     /// can, and through the frame when it cannot; stating the same number
@@ -280,8 +310,12 @@ final class KeyboardDoneBar: UIView {
         CGSize(width: UIView.noIntrinsicMetric, height: height)
     }
 
-    init(width: CGFloat, height: CGFloat, target: Any, action: Selector) {
+    init(width: CGFloat, height: CGFloat, target: Any, action: Selector, signAction: Selector) {
         self.height = height
+        var signConfiguration = UIButton.Configuration.bordered()
+        signConfiguration.title = "+/\u{2212}"
+        signConfiguration.cornerStyle = .capsule
+        signButton = UIButton(configuration: signConfiguration)
         super.init(frame: CGRect(x: 0, y: 0, width: width, height: height))
         // The keyboard's width is what this has to match, and it is not
         // always the window's - a hardware keyboard or a resized scene
@@ -306,20 +340,35 @@ final class KeyboardDoneBar: UIView {
         button.accessibilityIdentifier = KeyboardExitIdentifiers.doneButton
         button.addTarget(target, action: action, for: .touchUpInside)
         button.translatesAutoresizingMaskIntoConstraints = false
+        // Added ahead of the sign button deliberately:
+        // KeyboardExitVerification's hit-test walks to the first control it
+        // finds, and that control has to stay Done.
         addSubview(button)
+
+        signButton.accessibilityIdentifier = KeyboardExitIdentifiers.signButton
+        signButton.accessibilityLabel = "Change sign"
+        signButton.isHidden = true
+        signButton.addTarget(target, action: signAction, for: .touchUpInside)
+        signButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(signButton)
+
+        // An explicit height rather than top/bottom insets, so the DEBUG
+        // negative control - which builds this bar zero points tall -
+        // collapses the buttons with it instead of demanding a negative
+        // height and having Auto Layout break one of the two constraints
+        // for it.
+        let buttonHeight = max(0, height - 2 * Self.buttonInset)
         NSLayoutConstraint.activate([
             button.trailingAnchor.constraint(
                 equalTo: trailingAnchor, constant: -Self.trailingInset
             ),
             button.centerYAnchor.constraint(equalTo: centerYAnchor),
-            // An explicit height rather than top/bottom insets, so the
-            // DEBUG negative control - which builds this bar zero points
-            // tall - collapses the button with it instead of demanding a
-            // negative height and having Auto Layout break one of the two
-            // constraints for it.
-            button.heightAnchor.constraint(
-                equalToConstant: max(0, height - 2 * Self.buttonInset)
+            button.heightAnchor.constraint(equalToConstant: buttonHeight),
+            signButton.leadingAnchor.constraint(
+                equalTo: leadingAnchor, constant: Self.trailingInset
             ),
+            signButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            signButton.heightAnchor.constraint(equalToConstant: buttonHeight),
         ])
     }
 
@@ -336,9 +385,15 @@ enum KeyboardExitIdentifiers {
     /// Also how the bar is told apart from SwiftUI's own empty accessory
     /// host, which is installed regardless and is not a Done bar.
     static let doneBar = "keyboard.doneBar"
+    static let signButton = "keyboard.sign"
 }
 
 extension UIView {
+    /// The pad the money boxes raise - the one that needs a sign toggle.
+    var keyboardIsDecimalPad: Bool {
+        (self as? UITextField)?.keyboardType == .decimalPad
+    }
+
     /// Which keyboards cannot be closed from inside themselves: a numeric
     /// pad has no return key at all, and a text view's return key inserts
     /// a newline.

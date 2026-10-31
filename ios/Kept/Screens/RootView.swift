@@ -12,7 +12,7 @@ struct RootView: View {
     var body: some View {
         #if DEBUG
         if KeyboardExitUITestHarness.isRequested {
-            KeyboardExitUITestHarness(options: options, eventLogger: eventLogger)
+            KeyboardExitUITestHarness(api: api, eventLogger: eventLogger)
         } else {
             signedInOrOut
         }

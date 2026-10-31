@@ -87,10 +87,20 @@ final class CaptureFlowModel: ObservableObject {
         /// directly.
         case saving(pageNumber: Int, pageCount: Int)
         case failed(String)
+        /// Every page of the scan failed to encode (2026-10-31). Not
+        /// `failed`, whose Try again resumes a save: here there is nothing
+        /// to resume, so that button "succeeded" with zero receipts and
+        /// closed the capture as if the scan were safe. Only a new scan
+        /// helps, and this is the phase that offers one.
+        case scanFailed(String)
         case saved(count: Int)
     }
 
     @Published private(set) var phase: Phase = .idle
+    /// Which pages of this scan were lost to a failed encode (2026-10-31),
+    /// for the screens the surviving pages reach: the page-mode question,
+    /// or the confirm form.
+    @Published private(set) var scanFailureNote: String?
 
     /// How long the capture-time second opinion is given before it is
     /// abandoned silently (2026-09-01). The model answers in a median 5
@@ -173,13 +183,24 @@ final class CaptureFlowModel: ObservableObject {
     /// the confirm screen, no question asked, because there is nothing to
     /// ask about. Two or more stop here and ask (2026-09-01) - see
     /// `Phase.choosingPageMode`.
-    func savePages(_ pages: [Data]) async {
+    ///
+    /// `scanFailureNote` is what a partial scan has to say (2026-10-31). With
+    /// no pages at all it is the whole story, and the way out is a rescan.
+    func savePages(_ pages: [Data], scanFailureNote: String? = nil) async {
         guard !isProcessing else { return }
+        self.scanFailureNote = scanFailureNote
         if pages.count == 1, let page = pages.first {
             await prepareSingleCapture(page)
         } else if pages.count > 1 {
             pagesAwaitingChoice = pages
             phase = .choosingPageMode(pageCount: pages.count)
+        } else if let scanFailureNote {
+            phase = .scanFailed(scanFailureNote)
+        } else {
+            // A scan with nothing in it. The view has already left the
+            // scanner by now, so this has to go somewhere or the screen
+            // sits on "Reading receipt…" for good.
+            phase = .saved(count: 0)
         }
     }
 
@@ -206,7 +227,16 @@ final class CaptureFlowModel: ObservableObject {
         await prepareSingleCapture(first, additionalPages: rest)
     }
 
+    /// The person chose to scan again after losing every page. The view
+    /// goes back to the scanner; this clears what the last scan left.
+    func discardFailedScan() {
+        scanFailureNote = nil
+        phase = .idle
+    }
+
     func retry() async {
+        // Nothing to resume, and resuming nothing reports a success.
+        if case .scanFailed = phase { return }
         if retryIsSingleSetAside {
             await setAsideSingleCapture()
         } else {
@@ -240,12 +270,15 @@ final class CaptureFlowModel: ObservableObject {
             // that screen rather than swallowed.
             ocrFailureNote = "The image could not be read for text: \(error.localizedDescription)"
         }
+        // The confirm screen's one line under the image is where a person
+        // is looking at the scan, so a lost page is said there too.
+        let notes = [scanFailureNote, ocrFailureNote].compactMap { $0 }
         let draft = CapturedReceiptDraft(
             imageData: page,
             suggestions: suggestions,
             ocrRawText: rawText,
             capturedAt: capturedAt,
-            ocrFailureNote: ocrFailureNote,
+            ocrFailureNote: notes.isEmpty ? nil : notes.joined(separator: " "),
             additionalPages: additionalPages
         )
         singleDraft = draft
@@ -325,14 +358,20 @@ final class CaptureFlowModel: ObservableObject {
     /// create writes those columns and reports them reviewed. Nil when
     /// nobody had touched anything, which is the ordinary case, and the
     /// create body is then exactly what it always was.
+    ///
+    /// A box that will not parse holds the exit (2026-10-31,
+    /// `ConfirmReceiptModel.setAsideBlocker`). The view stops there and says
+    /// why; this says no as well, so the rule that protects the typing does
+    /// not rest on a button's wiring.
     func setAsideSingleCapture() async {
         guard !isProcessing, let draft = singleDraft else { return }
-        isProcessing = true
-        defer { isProcessing = false }
-
         if case .confirming(let model) = phase {
+            guard model.setAsideBlocker == nil else { return }
             singlePartial = model.pendingReceiptFields()
         }
+
+        isProcessing = true
+        defer { isProcessing = false }
 
         do {
             try await outbox.enqueue(

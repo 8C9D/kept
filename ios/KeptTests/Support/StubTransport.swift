@@ -23,6 +23,9 @@ final class StubTransport: HTTPTransport {
 
     private var queue: [Outcome] = []
     private(set) var requests: [URLRequest] = []
+    /// Runs as a request is in flight, before its scripted answer - the
+    /// hook for "the world changed while this was on the wire".
+    var onSend: (() -> Void)?
 
     func enqueue(status: Int, jsonBody: String) {
         queue.append(.respond(status: status, body: Data(jsonBody.utf8)))
@@ -34,6 +37,7 @@ final class StubTransport: HTTPTransport {
 
     func send(_ request: URLRequest) async throws -> (data: Data, response: HTTPURLResponse) {
         requests.append(request)
+        onSend?()
         guard !queue.isEmpty else {
             throw UnscriptedRequest()
         }

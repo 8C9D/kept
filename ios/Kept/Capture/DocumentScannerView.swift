@@ -18,8 +18,10 @@ import VisionKit
 /// bytes so nothing downstream needs UIKit.
 struct DocumentScannerView: UIViewControllerRepresentable {
     enum Outcome {
-        /// One JPEG per scanned page, in scan order.
-        case scanned([Data])
+        /// The person tapped Save and the pages are being encoded. Arrives
+        /// at once, so the screen can move on while that runs (2026-10-31).
+        case encoding
+        case scanned(ScannedPages)
         case cancelled
         case failed(Error)
     }
@@ -77,35 +79,58 @@ struct DocumentScannerView: UIViewControllerRepresentable {
         Coordinator(completion: completion)
     }
 
+    /// What crosses to the encoding task. `VNDocumentCameraScan` is not
+    /// Sendable and neither is the completion, but the scan is read only by
+    /// that task and the completion is only ever called back on the main
+    /// actor, which is where it came from. Reading the scan off the main
+    /// thread is the shape Apple's own document-scanning sample uses.
+    private struct ScanHandoff: @unchecked Sendable {
+        let scan: VNDocumentCameraScan
+        let completion: (Outcome) -> Void
+    }
+
     final class Coordinator: NSObject, VNDocumentCameraViewControllerDelegate {
         private let completion: (Outcome) -> Void
+        /// The delegate returns immediately now, so the scanner stays alive
+        /// and tappable for as long as the encoding takes.
+        private var hasFinished = false
 
         init(completion: @escaping (Outcome) -> Void) {
             self.completion = completion
         }
 
+        /// Hands the pages to a background task rather than encoding them
+        /// here (2026-10-31). This runs on the main thread, and a scanned
+        /// page is a full-resolution image: a stack froze the UI for the
+        /// length of the encode, and every decoded page stayed in memory
+        /// until the run loop turned, which is a jetsam risk on a long
+        /// batch. It costs no time: the same work, in the same order,
+        /// starting at once, and the screen moves on as it starts.
         func documentCameraViewController(
             _ controller: VNDocumentCameraViewController,
             didFinishWith scan: VNDocumentCameraScan
         ) {
-            var pages: [Data] = []
-            for pageIndex in 0..<scan.pageCount {
-                guard let jpeg = scan.imageOfPage(at: pageIndex).jpegData(compressionQuality: DocumentScannerView.jpegQuality) else {
-                    // A page that cannot encode is a lost scan; surface it
-                    // rather than silently uploading fewer receipts than
-                    // were scanned.
-                    completion(.failed(PageEncodingError(pageIndex: pageIndex)))
-                    return
-                }
-                pages.append(jpeg)
-            }
-            if !pages.isEmpty {
+            guard !hasFinished else { return }
+            hasFinished = true
+            if scan.pageCount > 0 {
                 AudioServicesPlaySystemSound(DocumentScannerView.shutterSoundID)
             }
-            completion(.scanned(pages))
+            completion(.encoding)
+
+            let handoff = ScanHandoff(scan: scan, completion: completion)
+            Task.detached(priority: .userInitiated) {
+                let pages = ScannedPages.encode(pageCount: handoff.scan.pageCount) { pageIndex in
+                    handoff.scan.imageOfPage(at: pageIndex)
+                        .jpegData(compressionQuality: DocumentScannerView.jpegQuality)
+                }
+                await MainActor.run {
+                    handoff.completion(.scanned(pages))
+                }
+            }
         }
 
         func documentCameraViewControllerDidCancel(_ controller: VNDocumentCameraViewController) {
+            guard !hasFinished else { return }
             completion(.cancelled)
         }
 
@@ -113,14 +138,51 @@ struct DocumentScannerView: UIViewControllerRepresentable {
             _ controller: VNDocumentCameraViewController,
             didFailWithError error: Error
         ) {
+            guard !hasFinished else { return }
             completion(.failed(error))
         }
+    }
+}
 
-        struct PageEncodingError: LocalizedError {
-            let pageIndex: Int
-            var errorDescription: String? {
-                "Page \(pageIndex + 1) could not be encoded as an image."
+/// What one scanning session produced: the pages that became JPEGs, in scan
+/// order, and the ones that did not (2026-10-31).
+///
+/// Before this, one page that would not encode failed the whole session -
+/// every good page of a stack gone, and the caller leaves quietly on
+/// `.failed`, so nobody was told either. The paper may already be back in a
+/// pocket, so what encoded is kept and the page that did not is named.
+///
+/// Outside `DocumentScannerView` so the rule can run in a test: the
+/// simulator cannot present the scanner at all.
+struct ScannedPages: Equatable, Sendable {
+    let pages: [Data]
+    /// 1-based, as a person counts them.
+    let failedPageNumbers: [Int]
+
+    /// Stated wherever the surviving pages go next, or nil when every page
+    /// made it - the ordinary case, which says nothing.
+    var failureNote: String? {
+        guard !failedPageNumbers.isEmpty else { return nil }
+        let scanned = pages.count + failedPageNumbers.count
+        let named = failedPageNumbers.map(String.init).joined(separator: ", ")
+        return failedPageNumbers.count == 1
+            ? "Page \(named) of \(scanned) could not be saved. Scan it again."
+            : "Pages \(named) of \(scanned) could not be saved. Scan them again."
+    }
+
+    /// Each page inside its own pool, so a page's decoded image is released
+    /// before the next is decoded and a stack costs one page of peak memory
+    /// rather than all of them. `encodePage` is nil for a page that failed.
+    static func encode(pageCount: Int, encodePage: (Int) -> Data?) -> ScannedPages {
+        var pages: [Data] = []
+        var failed: [Int] = []
+        for pageIndex in 0..<pageCount {
+            if let jpeg = autoreleasepool(invoking: { encodePage(pageIndex) }) {
+                pages.append(jpeg)
+            } else {
+                failed.append(pageIndex + 1)
             }
         }
+        return ScannedPages(pages: pages, failedPageNumbers: failed)
     }
 }

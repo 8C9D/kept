@@ -698,6 +698,49 @@ final class ReceiptListModelTests: XCTestCase {
     }
 }
 
+// MARK: - A swipe on a row older than the server's verdict (2026-10-31)
+
+@MainActor
+final class QuickConfirmWithheldTests: XCTestCase {
+    /// `canQuickConfirm` refuses a withheld amount, so this answer means the
+    /// list is stale: loaded before the sweep withheld the total. The
+    /// server's sentence is stated and the row catches up, so it stops
+    /// showing the number and stops offering the swipe.
+    func testAnAmountsNeedReviewRefusalIsStatedAndTheRowCatchesUp() async {
+        let api = StubKeptAPI()
+        let id = UUID()
+        let stale = Fixtures.receipt(id: id, totalCents: 850, status: .pending)
+        let fresh = Fixtures.receipt(
+            id: id,
+            totalCents: 850,
+            status: .pending,
+            suggestions: Fixtures.merged(totalCents: nil, totalWithheld: true)
+        )
+        var loads = 0
+        api.receiptsPageHandler = { _, _, _ in
+            loads += 1
+            return Fixtures.page([loads == 1 ? stale : fresh], pendingCount: 1)
+        }
+        api.quickConfirmReceiptHandler = { _, _ in
+            throw APIError.requestFailed(
+                code: "amounts_need_review",
+                message: "Check the total before confirming.",
+                status: 409
+            )
+        }
+        let model = ReceiptListModel(api: api, eventLogger: EventLogger(api: api))
+        await model.loadFirstPage()
+        XCTAssertTrue(model.receipts[0].canQuickConfirm)
+
+        await model.quickConfirmReceipt(stale)
+
+        XCTAssertEqual(model.actionError, "Check the total before confirming.")
+        XCTAssertEqual(loads, 2)
+        XCTAssertNil(model.receipts[0].displayTotalCents)
+        XCTAssertFalse(model.receipts[0].canQuickConfirm)
+    }
+}
+
 // MARK: - Swipe-to-confirm saves what the row shows (2026-09-01)
 
 /// The bug this fixes shipped in 1.0 (4): the Home row renders the served

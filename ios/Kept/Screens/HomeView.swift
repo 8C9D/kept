@@ -52,6 +52,9 @@ struct HomeView: View {
     @State private var showDateRangeFilter = false
     /// The needs-attention item a discard confirmation is showing for.
     @State private var discardCandidate: OutboxController.Entry?
+    /// The confirm form reopened over a queued item the server refused
+    /// (2026-10-31), while it is up.
+    @State private var correctionForm: ConfirmReceiptModel?
     /// Coalesces list reloads while the outbox drains a batch: eighty
     /// receipts landing server-side must not mean eighty full list
     /// reloads under the user's thumb (reviewer finding).
@@ -284,6 +287,22 @@ struct HomeView: View {
                         Task { await model.loadFirstPage() }
                     }
                 }
+                // The scan and the typing on this cover exist nowhere else.
+                .holdsSession()
+            }
+            .fullScreenCover(item: $correctionForm) { form in
+                NavigationStack {
+                    ConfirmReceiptView(
+                        model: form,
+                        options: options,
+                        eventLogger: eventLogger,
+                        // The correction went to the outbox; the drain
+                        // takes it from here, and the row follows.
+                        onSaved: { correctionForm = nil },
+                        onSetAside: { correctionForm = nil }
+                    )
+                }
+                .holdsSession()
             }
             // Each receipt the outbox lands server-side turns a queued row
             // here into a real pending receipt there; refresh - debounced,
@@ -332,6 +351,7 @@ struct HomeView: View {
                         await options.refresh()
                     }
                 }
+                .holdsSession()
             }
             // Anchored to the List for the same reason the discard dialog
             // above is: the toolbar Menu that raises it closes on tap, and a
@@ -353,7 +373,7 @@ struct HomeView: View {
                 Text("This permanently deletes your Kept account and every receipt in it, including the images. It cannot be undone. If you need the records, run an export from the web app first.")
             }
             .alert(
-                "Your account was not deleted",
+                session.accountDeletion.alertTitle,
                 isPresented: Binding(
                     get: { session.accountDeletion.failureMessage != nil },
                     set: { if !$0 { session.clearAccountDeletionFailure() } }
@@ -363,8 +383,9 @@ struct HomeView: View {
                     session.clearAccountDeletionFailure()
                 }
             } message: {
-                // The reason in the server's or the transport's own words,
-                // plus the fact that matters most: nothing was destroyed.
+                // The reason in the server's or the transport's own words.
+                // The title carries the fact that matters most, and it
+                // differs: nothing was destroyed, or nobody can say.
                 Text(session.accountDeletion.failureMessage ?? "")
             }
             .overlay {
@@ -607,6 +628,7 @@ struct HomeView: View {
                     OutboxEntryRow(
                         entry: entry,
                         onRetry: { retry(entry) },
+                        onCorrect: { correct(entry) },
                         onDiscard: { discardCandidate = entry }
                     )
                 }
@@ -622,6 +644,17 @@ struct HomeView: View {
             Task { await outbox.retryBlockedItem(id: entry.id) }
         } else {
             outbox.externalTrigger()
+        }
+    }
+
+    /// Reopens the confirm form over a refused item. When there is nothing
+    /// to open, the controller has already said why on the row.
+    private func correct(_ entry: OutboxController.Entry) {
+        Task {
+            guard let draft = await outbox.correctionDraft(forBlockedItem: entry.id) else { return }
+            correctionForm = ConfirmReceiptModel(queued: draft) { [outbox] fields in
+                try await outbox.correctBlockedItem(id: draft.itemId, with: fields)
+            }
         }
     }
 
@@ -677,12 +710,7 @@ struct HomeView: View {
     private var summarySection: some View {
         if let summary = model.summary {
             Section {
-                // GET /api/receipts/summary carries no currency of its own
-                // (it sums across every matching row) - "CAD" the same way
-                // ConfirmReceiptModel's capture-time init hardcodes it:
-                // currency is not editable anywhere in this client (spec,
-                // wave-4 report §6.3) and the server column default is CAD.
-                SummaryRow(summary: summary, currency: "CAD")
+                SummaryRow(summary: summary)
             }
         }
     }
@@ -873,6 +901,7 @@ struct ReceiptRow: View {
 struct OutboxEntryRow: View {
     let entry: OutboxController.Entry
     let onRetry: () -> Void
+    let onCorrect: () -> Void
     let onDiscard: () -> Void
 
     var body: some View {
@@ -898,6 +927,12 @@ struct OutboxEntryRow: View {
                     .foregroundStyle(.secondary)
                 HStack(spacing: 16) {
                     Button("Retry", action: onRetry)
+                    // Between the two: fixing it is the better answer to
+                    // a refusal than either neighbour, and Discard stays
+                    // the one farthest from a stray thumb.
+                    if entry.canCorrect {
+                        Button("Edit", action: onCorrect)
+                    }
                     Button("Discard", role: .destructive, action: onDiscard)
                 }
                 .font(.caption.weight(.medium))
@@ -938,23 +973,27 @@ struct OutboxEntryRow: View {
 /// blended into the money, per the proposal's own named risk ("the number
 /// invites being read as a tax figure"). Plain text, not amber: this is a
 /// read-only report, not a suggestion anyone confirms.
+///
+/// One line per currency (2026-10-31): amounts in two currencies do not add,
+/// so a mixed filter shows both rather than a sum that means neither.
 struct SummaryRow: View {
     let summary: ReceiptSummary
-    let currency: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(ReceiptFormat.money(cents: summary.confirmed.totalCents, currency: currency))
-                    .font(.title3.weight(.semibold))
-                    .monospacedDigit()
-                Text(receiptCountLabel)
+            ForEach(summary.totalsByCurrency, id: \.currency) { totals in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(ReceiptFormat.money(cents: totals.totalCents, currency: totals.currency))
+                        .font(.title3.weight(.semibold))
+                        .monospacedDigit()
+                    Text(receiptCountLabel(totals.count))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Text("HST \(ReceiptFormat.money(cents: totals.hstCents, currency: totals.currency))")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            Text("HST \(ReceiptFormat.money(cents: summary.confirmed.hstCents, currency: currency))")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
             // Stated every time a summary shows, zero included: this is
             // what keeps "confirmed only" a fact about the number above
             // rather than a caveat that only appears when it is bad news.
@@ -965,8 +1004,8 @@ struct SummaryRow: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var receiptCountLabel: String {
-        "· \(summary.confirmed.count) confirmed \(summary.confirmed.count == 1 ? "receipt" : "receipts") in this view"
+    private func receiptCountLabel(_ count: Int) -> String {
+        "· \(count) confirmed \(count == 1 ? "receipt" : "receipts") in this view"
     }
 
     private var pendingCaveat: String {

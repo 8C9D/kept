@@ -119,10 +119,108 @@ final class ScreenRenderingTests: XCTestCase {
                     onSetAside: {}
                 )
             }
+            .environmentObject(Self.session(api: api))
             .frame(width: Self.phoneSize.width, height: Self.phoneSize.height),
             named: "confirm-multipage"
         )
         XCTAssertTrue(Self.hasVisibleContent(image))
+    }
+
+    private static func session(api: StubKeptAPI, token: String? = nil) -> SessionController {
+        SessionController(
+            api: api,
+            tokenStore: InMemoryTokenStore(stored: token),
+            reauthorization: StubAppleReauthorization(),
+            eventLogger: EventLogger(api: api)
+        )
+    }
+
+    /// A Save refused by a dead session has to answer on the screen the
+    /// person is looking at. In the Save section the prompt sat below the
+    /// fold, so the button simply seemed not to work (found by screenshot on
+    /// a real 401, 2026-10-31). Pinned, it is in the top-of-form render,
+    /// which is the frame with the form scrolled nowhere at all.
+    func testTheRenewalPromptIsPinnedOnScreenOverAServerBackedForm() async throws {
+        let api = StubKeptAPI()
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "ScreenRenderingTests-\(UUID().uuidString)"))
+        defer { defaults.removePersistentDomain(forName: defaults.description) }
+        let session = Self.session(api: api, token: "a-token")
+        let receipt = Fixtures.receipt(vendor: "COSTCO WHOLESALE", totalCents: 21894, status: .pending)
+        let form = { (held: Bool) -> AnyView in
+            AnyView(
+                NavigationStack {
+                    ConfirmReceiptView(
+                        model: ConfirmReceiptModel(api: api, detail: Fixtures.detail(receipt: receipt)),
+                        options: ReceiptOptionsStore(api: api, defaults: defaults),
+                        eventLogger: EventLogger(api: api),
+                        onSaved: {},
+                        onSetAside: {}
+                    )
+                }
+                .environmentObject(session)
+                .frame(width: Self.phoneSize.width, height: Self.phoneSize.height)
+            )
+        }
+
+        let idle = try await render(form(false), named: "form-session-live")
+        session.beginHold()
+        session.handleSessionRejected()
+        let held = try await render(form(true), named: "form-session-held")
+
+        // The bottom strip is where the pin lands: a live session leaves it
+        // showing the form, a held one draws the prompt over it. Only a pin
+        // can change this strip on an unscrolled form.
+        XCTAssertNotEqual(
+            Self.bottomStrip(of: held),
+            Self.bottomStrip(of: idle),
+            "the prompt is not on screen"
+        )
+    }
+
+    /// The bottom eighth of an image, as bytes to compare.
+    private static func bottomStrip(of image: UIImage) -> Data? {
+        guard let cgImage = image.cgImage else { return nil }
+        let height = cgImage.height / 8
+        let strip = cgImage.cropping(to: CGRect(
+            x: 0, y: cgImage.height - height, width: cgImage.width, height: height
+        ))
+        return strip.flatMap { UIImage(cgImage: $0).pngData() }
+    }
+
+    func testTheScanFailedScreenOffersTheCamera() async throws {
+        let image = try await render(
+            ScanFailedView(
+                title: "Nothing was saved",
+                message: "Page 1 of 1 could not be saved. Scan it again.",
+                onScanAgain: {},
+                onCancel: {}
+            )
+            .frame(width: Self.phoneSize.width, height: Self.phoneSize.height),
+            named: "scan-failed"
+        )
+        XCTAssertTrue(Self.hasVisibleContent(image))
+    }
+
+    /// The prompt that finishes a held form or scan draws while a rejection
+    /// is held, and nothing at all otherwise - it sits on screens that are
+    /// perfectly ordinary until a token dies behind them.
+    func testTheRenewalPromptDrawsOnlyWhileARejectionIsHeld() async throws {
+        let api = StubKeptAPI()
+        let session = Self.session(api: api, token: "a-token")
+
+        let idle = try await render(
+            SessionRenewalView().environmentObject(session).frame(width: 360, height: 160),
+            named: "session-renewal-idle"
+        )
+        XCTAssertFalse(Self.hasVisibleContent(idle), "nothing is being held, so nothing should show")
+
+        session.beginHold()
+        session.handleSessionRejected()
+        let held = try await render(
+            SessionRenewalView().environmentObject(session).frame(width: 360, height: 160),
+            named: "session-renewal-held"
+        )
+        XCTAssertTrue(Self.hasVisibleContent(held), "a held rejection has to offer the way out")
     }
 
     /// The zoom sheet turning pages (2026-09-01). Buttons rather than a
