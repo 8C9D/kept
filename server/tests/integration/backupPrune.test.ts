@@ -475,7 +475,7 @@ describe("pruning a deleted account", SLOW, () => {
       // on a faster machine, and each then succeeded for real.
       fake.planDeletes(Array<"noop">(64).fill("noop"));
       const lying = await world.runBackup(wrangler);
-      expect(lying.code).toBe(1);
+      expect(lying.code, lying.output).toBe(1);
       expect(lying.output).toContain("still there after the delete");
       expect(pendingFile()).toContain(alice.id);
       expect(existsSync(localPath(oldest))).toBe(true);
