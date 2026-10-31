@@ -12,7 +12,12 @@ import {
   type ListedObject,
   type ListedPage,
 } from "../../ops/backup-watch/src/freshness.js";
-import worker, { watchBackups, type Env } from "../../ops/backup-watch/src/index.js";
+import worker, {
+  BackupWatch,
+  nextRunAt,
+  watchBackups,
+  type Env,
+} from "../../ops/backup-watch/src/index.js";
 
 const NOW = new Date("2026-10-31T12:00:00.000Z");
 const hoursAgo = (hours: number) => new Date(NOW.getTime() - hours * 3_600_000);
@@ -230,6 +235,10 @@ describe("the Worker", () => {
     return {
       sent,
       BACKUPS: bucketOf(objects).bucket,
+      WATCH: {
+        idFromName: (name) => name,
+        get: () => ({ fetch: async () => new Response("unused") }),
+      },
       ALERT: {
         async send(message) {
           sent.push(message);
@@ -307,10 +316,107 @@ describe("the Worker", () => {
     await expect(watchBackups(env, NOW)).rejects.toThrow(/wrangler secret put ALERT_TO/);
   });
 
-  it("runs from the scheduled handler", async () => {
-    const env = envWith([]);
-    await worker.scheduled({}, env);
-    expect(env.sent).toHaveLength(1);
-    expect(env.sent[0]?.text).toContain("no dump at all under pg/");
+  describe("the alarm that ticks it", () => {
+    const stateWith = () => {
+      const alarm = { at: null as number | null };
+      return {
+        alarm,
+        state: {
+          storage: {
+            setAlarm: async (at: number) => {
+              alarm.at = at;
+            },
+            getAlarm: async () => alarm.at,
+          },
+        },
+      };
+    };
+
+    it("always aims at the next 12:00 UTC", () => {
+      expect(new Date(nextRunAt(new Date("2026-10-31T11:59:59Z"))).toISOString()).toBe(
+        "2026-10-31T12:00:00.000Z",
+      );
+      expect(new Date(nextRunAt(new Date("2026-10-31T12:00:00Z"))).toISOString()).toBe(
+        "2026-11-01T12:00:00.000Z",
+      );
+    });
+
+    it("checks when it fires, and alerts", async () => {
+      const env = envWith([]);
+      const { state } = stateWith();
+      await new BackupWatch(state, env).alarm();
+      expect(env.sent).toHaveLength(1);
+      expect(env.sent[0]?.text).toContain("no dump at all under pg/");
+    });
+
+    it("keeps ticking when a check throws: losing the next tick is the failure itself", async () => {
+      const env = envWith(healthy, { ALERT_TO: undefined });
+      const { state, alarm } = stateWith();
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await expect(new BackupWatch(state, env).alarm()).resolves.toBeUndefined();
+
+      expect(alarm.at).toBeGreaterThan(Date.now());
+      expect(logged).toHaveBeenCalled();
+      logged.mockRestore();
+    });
+
+    it("arms on the first request, says when, and sends a test mail only if asked", async () => {
+      const env = envWith(healthy);
+      const { state, alarm } = stateWith();
+      const watch = new BackupWatch(state, env);
+
+      const armed = await watch.fetch(new Request("https://watch/check", { method: "POST" }));
+      expect(alarm.at).not.toBeNull();
+      expect(((await armed.json()) as { nextRunAt: string }).nextRunAt).toMatch(/T12:00:00/);
+      expect(env.sent).toHaveLength(0);
+
+      await watch.fetch(new Request("https://watch/check?test=1", { method: "POST" }));
+      expect(env.sent).toHaveLength(1);
+    });
+  });
+
+  describe("the route", () => {
+    const forward = () => {
+      const seen: Request[] = [];
+      return {
+        seen,
+        WATCH: {
+          idFromName: (name: string) => name,
+          get: () => ({
+            fetch: async (request: Request) => {
+              seen.push(request);
+              return new Response("ok");
+            },
+          }),
+        },
+      };
+    };
+    const post = (path: string, token?: string) =>
+      new Request(`https://watch${path}`, {
+        method: "POST",
+        ...(token !== undefined && { headers: { "x-watch-token": token } }),
+      });
+
+    it("is a 404 to everyone without the token, or with no token configured", async () => {
+      const { seen, WATCH } = forward();
+      const env = envWith(healthy, { WATCH, WATCH_TOKEN: "right" });
+      expect((await worker.fetch(post("/check"), env)).status).toBe(404);
+      expect((await worker.fetch(post("/check", "wrong"), env)).status).toBe(404);
+      expect((await worker.fetch(post("/other", "right"), env)).status).toBe(404);
+      expect(
+        (await worker.fetch(new Request("https://watch/check", { method: "GET" }), env)).status,
+      ).toBe(404);
+      const unset = envWith(healthy, { WATCH, WATCH_TOKEN: undefined });
+      expect((await worker.fetch(post("/check", "anything"), unset)).status).toBe(404);
+      expect(seen).toEqual([]);
+    });
+
+    it("reaches the alarm with the token", async () => {
+      const { seen, WATCH } = forward();
+      const env = envWith(healthy, { WATCH, WATCH_TOKEN: "right" });
+      expect((await worker.fetch(post("/check", "right"), env)).status).toBe(200);
+      expect(seen).toHaveLength(1);
+    });
   });
 });

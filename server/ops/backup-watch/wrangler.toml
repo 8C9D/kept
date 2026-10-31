@@ -6,12 +6,19 @@ main = "src/index.ts"
 # The newest date the workerd bundled with wrangler 4.124.0 will run locally.
 compatibility_date = "2026-08-22"
 
-# No public surface at all: the Worker only ever wakes on its cron.
-workers_dev = false
+# The address exists only so the alarm can be armed and a check run on demand:
+# every request without the WATCH_TOKEN secret is a 404.
+workers_dev = true
 preview_urls = false
 
-[triggers]
-crons = ["0 12 * * *"]
+# The daily tick. A Durable Object alarm rather than a cron trigger: see index.ts.
+[[durable_objects.bindings]]
+name = "WATCH"
+class_name = "BackupWatch"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BackupWatch"]
 
 [vars]
 MAX_AGE_HOURS = "48"

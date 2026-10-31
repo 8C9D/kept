@@ -12,6 +12,11 @@ import {
  * The Worker around `freshness.ts`: once a day, list the bucket, and either log a
  * line or send an email. See README.md.
  *
+ * ⚠ The daily tick is a Durable Object alarm, not a cron trigger. The Free plan
+ * allows five cron triggers per account and other projects hold all five. An alarm
+ * needs no slot, re-arms itself, and survives deploys. It does need one first arm,
+ * which is `POST /check` below; `README.md` says so.
+ *
  * Mail goes through the structured `send()` on the `send_email` binding, which is
  * the form Cloudflare's docs recommend as of October 2026, so there is no raw MIME,
  * no `EmailMessage` from `cloudflare:email` and no Message-ID to build. Sending to a
@@ -24,6 +29,12 @@ import {
  */
 export interface Env {
   BACKUPS: BucketLister;
+  WATCH: {
+    idFromName(name: string): unknown;
+    get(id: unknown): { fetch(request: Request): Promise<Response> };
+  };
+  /** A secret. Without it, every HTTP request is a 404. */
+  WATCH_TOKEN?: string;
   ALERT: {
     send(message: {
       to: string;
@@ -91,8 +102,85 @@ export async function watchBackups(env: Env, now: Date): Promise<void> {
   await sendAlert(env, formatAlert(report));
 }
 
+/** The next 12:00 UTC strictly after `now`, so that the tick cannot drift. */
+export function nextRunAt(now: Date): number {
+  const noon = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 12);
+  return noon > now.getTime() ? noon : noon + 24 * 60 * 60 * 1000;
+}
+
+interface AlarmState {
+  storage: {
+    setAlarm(scheduledTime: number): Promise<void>;
+    getAlarm(): Promise<number | null>;
+  };
+}
+
+/**
+ * Holds the alarm. A plain class rather than `DurableObject` from
+ * `cloudflare:workers`, which would stop `tests/unit` importing this file.
+ *
+ * ⚠ It re-arms BEFORE it checks, and `alarm()` does not rethrow. This is a
+ * dead man's switch: a check that threw and took the next tick with it would be
+ * the same silence it exists to end. `watchBackups` has already tried to send the
+ * failure by email and the error is logged where Cloudflare keeps it.
+ */
+export class BackupWatch {
+  constructor(
+    private readonly state: AlarmState,
+    private readonly env: Env,
+  ) {}
+
+  async alarm(): Promise<void> {
+    const now = new Date();
+    await this.state.storage.setAlarm(nextRunAt(now));
+    try {
+      await watchBackups(this.env, now);
+    } catch (error) {
+      console.error(`Kept backup watch failed: ${reasonOf(error)}`);
+    }
+  }
+
+  /** Arms the alarm and checks now. `?test=1` also sends a mail, to prove delivery. */
+  async fetch(request: Request): Promise<Response> {
+    const now = new Date();
+    await this.state.storage.setAlarm(nextRunAt(now));
+    await watchBackups(this.env, now);
+    if (new URL(request.url).searchParams.get("test") === "1") {
+      await sendAlert(this.env, {
+        subject: "Kept backup watch: test",
+        text: "This is a test of the backup watch. No action is needed.",
+      });
+    }
+    const next = await this.state.storage.getAlarm();
+    return Response.json({ nextRunAt: next === null ? null : new Date(next).toISOString() });
+  }
+}
+
+/** Compared as digests, so the comparison says nothing about the token's bytes. */
+async function digest(value: string): Promise<string> {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return btoa(String.fromCharCode(...new Uint8Array(bytes)));
+}
+
 export default {
-  async scheduled(_controller: unknown, env: Env): Promise<void> {
-    await watchBackups(env, new Date());
+  /**
+   * The one route exists to arm the alarm the first time and to check on demand.
+   * Everything else, and everything without the token, is a plain 404: the
+   * workers.dev address is public and has nothing to say to a stranger.
+   */
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const token = env.WATCH_TOKEN;
+    const presented = request.headers.get("x-watch-token");
+    const allowed =
+      request.method === "POST" &&
+      new URL(request.url).pathname === "/check" &&
+      token !== undefined &&
+      token !== "" &&
+      presented !== null &&
+      (await digest(presented)) === (await digest(token));
+    if (!allowed) {
+      return new Response("Not found", { status: 404 });
+    }
+    return env.WATCH.get(env.WATCH.idFromName("kept-backups")).fetch(request);
   },
 };
