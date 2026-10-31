@@ -1,0 +1,32 @@
+# A dead man's switch for the Kept backup. See README.md. This repository is
+# public: the alert's recipient is the Worker secret ALERT_TO and must never be
+# written in this file.
+name = "kept-backup-watch"
+main = "src/index.ts"
+# The newest date the workerd bundled with wrangler 4.124.0 will run locally.
+compatibility_date = "2026-08-22"
+
+# No public surface at all: the Worker only ever wakes on its cron.
+workers_dev = false
+preview_urls = false
+
+[triggers]
+crons = ["0 12 * * *"]
+
+[vars]
+MAX_AGE_HOURS = "48"
+ALERT_FROM = "alerts@keptapp.net"
+
+# Listed and nothing else. The binding could write, and this Worker never does.
+[[r2_buckets]]
+binding = "BACKUPS"
+bucket_name = "kept-backups"
+
+# No destination here. Unrestricted means "any verified address on the account",
+# which is what lets the address stay out of a public file.
+[[send_email]]
+name = "ALERT"
+
+# So that the one line a healthy run logs, and an error, can be read afterwards.
+[observability]
+enabled = true
