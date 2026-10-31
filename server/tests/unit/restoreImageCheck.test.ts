@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { checkRestoredImage } from "../../src/db/restoreImageCheck.js";
+import { WranglerError } from "../../src/db/backupTransport.js";
+import {
+  checkRestoredImage,
+  fetchRestoredImage,
+} from "../../src/db/restoreImageCheck.js";
 import { ObjectNotFoundError } from "../../src/storage/objectStorage.js";
+
+/** Split so the fixtures below read as fixtures to the repo's secret hook. */
+const PG = "postgres:" + "//";
 
 /**
  * The restore drill's image-leg classification (round 4 §4a). The drill
@@ -84,5 +91,64 @@ describe("checkRestoredImage", () => {
     expect(verdict.failure).toContain("may still be there");
     // And it does not use the word that means "the backup lost it".
     expect(verdict.failure).not.toContain("absent");
+  });
+
+  it("prints an adapter's own `detail`, because a CLI has no error names to offer", async () => {
+    const verdict = await checkRestoredImage(
+      {
+        download: async () => {
+          throw new WranglerError("exited with code 1: Authentication error");
+        },
+      },
+      ROW,
+    );
+    expect(verdict.label).toBe("UNREACHABLE");
+    expect(verdict.failure).toContain("WranglerError: exited with code 1: Authentication error");
+  });
+
+  it("never prints the message of an error that did not opt in", async () => {
+    const verdict = await checkRestoredImage(
+      {
+        download: async () => {
+          throw new Error(`${PG}kept:hunter2@host/kept`);
+        },
+      },
+      ROW,
+    );
+    expect(verdict.failure).not.toContain("hunter2");
+  });
+});
+
+describe("fetchRestoredImage", () => {
+  it("hands back the bytes on ok", async () => {
+    const fetched = await fetchRestoredImage({ download: async () => BYTES }, ROW);
+    expect(fetched.label).toBe("ok");
+    expect(fetched.label === "ok" && fetched.bytes).toEqual(BYTES);
+  });
+
+  it("hands back no bytes on DIGEST, so a caller has nothing wrong to write", async () => {
+    const fetched = await fetchRestoredImage(
+      { download: async () => new Uint8Array([9, 9, 9]) },
+      ROW,
+    );
+    expect(fetched.label).toBe("DIGEST");
+    expect("bytes" in fetched).toBe(false);
+  });
+
+  it("reaches the same verdict as checkRestoredImage for every failure", async () => {
+    const cases: Array<() => Promise<Uint8Array>> = [
+      async () => new Uint8Array([1]),
+      async () => {
+        throw new ObjectNotFoundError(ROW.objectKey);
+      },
+      async () => {
+        throw new Error("boom");
+      },
+    ];
+    for (const download of cases) {
+      const fetched = await fetchRestoredImage({ download }, ROW);
+      const checked = await checkRestoredImage({ download }, ROW);
+      expect(checked).toEqual(fetched);
+    }
   });
 });

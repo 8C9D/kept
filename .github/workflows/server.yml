@@ -10,6 +10,11 @@
 # their own bucket, but the startup-probe tests boot the real entrypoint
 # against the configured bucket and do not - hence the storage:init step,
 # which dev never needs because the bucket persists in a named volume.
+#
+# The backup tests run the real job, which starts a throwaway Postgres cluster
+# of its own, so they need initdb and pg_ctl on the runner itself, beside the
+# server in the container. ubuntu-latest ships PostgreSQL 16 there, outside
+# PATH; those tests fail rather than skip without it.
 name: server
 
 on:
@@ -32,6 +37,8 @@ jobs:
           cache: npm
           cache-dependency-path: server/package-lock.json
       - run: npm ci
+      - name: Put the runner's PostgreSQL 16 binaries on PATH for the backup tests
+        run: echo /usr/lib/postgresql/16/bin >> "$GITHUB_PATH"
       - name: Create the object-storage bucket the startup probes expect
         run: npm run storage:init
       - run: npm run typecheck

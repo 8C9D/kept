@@ -1,87 +1,42 @@
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { assertPgDumpVersion, resolveBackupConfig, timestampKey } from "./backupConfig.js";
+import { resolveBackupConfig } from "./backupConfig.js";
+import { formatRunSummary } from "./backupReport.js";
+import { runBackup } from "./backupRun.js";
 
 /**
- * The scheduled dump Runbook §4 says retention actually rests on: a
- * `pg_dump -Fc` of DATABASE_URL, uploaded to a bucket that is not Neon and
- * not this laptop alone.
+ * The scheduled backup Runbook §4 says retention actually rests on, and the
+ * whole of it: a `pg_dump -Fc`, restored for real into a throwaway cluster and
+ * compared with its source, every receipt image mirrored and hashed against the
+ * row the restore handed back, and both stores put in a bucket that is not the
+ * image bucket and read back to the same digests. `npm run db:backup` is the
+ * only way in; `server/ops/kept-backup.sh` is how launchd runs it.
  *
- * The refusals live in `backupConfig.ts` (unit-tested): every variable
- * required with no defaults, the backup bucket never the image bucket,
- * pg_dump never older than the database.
+ * What it replaced dumped Postgres alone, through R2 keys nobody ever minted, so
+ * it refused every night from 2026-08-20 and every real backup since was a
+ * hand-run procedure. This is that procedure, automated.
  *
- * Usage (see Runbook §4 for scheduling):
+ * One step removes rather than keeps: a green run prunes an account deleted more
+ * than 30 days ago, and raises a notice when it first sees one (`backupPrune.ts`).
  *
- *   DATABASE_URL=... \
- *   BACKUP_STORAGE_ENDPOINT=... BACKUP_STORAGE_BUCKET=kept-backups \
- *   BACKUP_STORAGE_ACCESS_KEY_ID=... BACKUP_STORAGE_SECRET_ACCESS_KEY=... \
- *   npm run db:backup
+ * The steps are in `backupRun.ts`, the refusals in `backupConfig.ts`. Nothing
+ * defaults. Usage (see `server/ops/com.arthurzhang.kept-backup.plist` for the
+ * scheduled form):
  *
- * The upload is verified by re-reading the object's ContentLength against
- * the local file, and the file's sha256 is printed so a restore drill can
- * check it is holding the same bytes. The client builds its own S3Client
- * rather than widening `s3ObjectStorage`'s surface, the same deliberate
- * trade the key-normalization probe recorded (wave-6 §6).
+ *   DATABASE_URL=...                   the direct, non-pooler endpoint
+ *   BACKUP_LOCAL_DIR=/absolute/path    dumps, the mirror, the ledger, the records
+ *   BACKUP_SOURCE_BUCKET=kept          the images
+ *   BACKUP_STORAGE_BUCKET=kept-backups the backup; never the image bucket
+ *   BACKUP_TRANSPORT=wrangler          wrangler's own OAuth login, or:
+ *   BACKUP_TRANSPORT=s3                plus BACKUP_STORAGE_ENDPOINT, _ACCESS_KEY_ID
+ *                                      and _SECRET_ACCESS_KEY, one token for both
+ *
+ * Exits non-zero with every problem listed if anything at all went wrong.
+ * `npm run db:backup-status` reads what it left behind, with no credentials.
  */
 
-async function main(): Promise<void> {
-  const config = resolveBackupConfig(process.env);
+const config = resolveBackupConfig(process.env);
+const record = await runBackup(config);
+console.log(formatRunSummary(record));
 
-  assertPgDumpVersion(execFileSync("pg_dump", ["--version"], { encoding: "utf8" }));
-
-  const workDir = mkdtempSync(join(tmpdir(), "kept-backup-"));
-  const dumpPath = join(workDir, "kept.dump");
-  try {
-    execFileSync("pg_dump", [config.databaseUrl, "-Fc", "-f", dumpPath], {
-      stdio: ["ignore", "inherit", "inherit"],
-    });
-
-    const bytes = readFileSync(dumpPath);
-    if (bytes.length === 0) {
-      throw new Error("pg_dump wrote an empty file; refusing to upload it as a backup.");
-    }
-    const digest = createHash("sha256").update(bytes).digest("hex");
-    const key = timestampKey(new Date());
-
-    const client = new S3Client({
-      endpoint: config.endpoint,
-      region: "auto",
-      credentials: {
-        accessKeyId: config.accessKeyId,
-        secretAccessKey: config.secretAccessKey,
-      },
-      forcePathStyle: true,
-    });
-    await client.send(
-      new PutObjectCommand({
-        Bucket: config.bucket,
-        Key: key,
-        Body: bytes,
-        ContentType: "application/octet-stream",
-      }),
-    );
-
-    const head = await client.send(new HeadObjectCommand({ Bucket: config.bucket, Key: key }));
-    if (head.ContentLength !== bytes.length) {
-      throw new Error(
-        `Upload verification failed: local dump is ${bytes.length} bytes, ` +
-          `stored object reports ${head.ContentLength}.`,
-      );
-    }
-
-    console.log(`Backup uploaded: ${config.bucket}/${key}`);
-    console.log(`  ${bytes.length} bytes, sha256 ${digest}`);
-    console.log(
-      "This is an untested backup until a restore drill has run against it (Runbook §4).",
-    );
-  } finally {
-    rmSync(workDir, { recursive: true, force: true });
-  }
-}
-
-await main();
+// process.exit rather than exitCode: a timed-out S3 call leaves its request
+// behind (backupTransport.ts), and that socket must not hold launchd's slot.
+process.exit(record.ok ? 0 : 1);

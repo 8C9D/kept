@@ -38,10 +38,32 @@ export type RestoredImageVerdict =
    */
   | { label: "UNREACHABLE"; failure: string };
 
+/** A verdict, plus the bytes when they were the right ones. */
+export type RestoredImageFetch =
+  | { label: "ok"; bytes: Uint8Array; failure?: undefined }
+  | Exclude<RestoredImageVerdict, { label: "ok" }>;
+
 export async function checkRestoredImage(
   storage: Pick<ObjectStorage, "download">,
   image: RestoredImageRow,
 ): Promise<RestoredImageVerdict> {
+  const fetched = await fetchRestoredImage(storage, image);
+  return fetched.label === "ok" ? { label: "ok" } : fetched;
+}
+
+/**
+ * The same four verdicts, for a caller that needs the bytes as well: the
+ * backup's image leg and `db:restore-images`.
+ *
+ * ⚠ Bytes come back only on `ok`, and that is what stops wrong bytes from
+ * reaching a mirror: a caller holding a DIGEST verdict has nothing to write.
+ * One implementation with `checkRestoredImage` above, so that the drill and
+ * the nightly job cannot come to disagree about what MISSING means.
+ */
+export async function fetchRestoredImage(
+  storage: Pick<ObjectStorage, "download">,
+  image: RestoredImageRow,
+): Promise<RestoredImageFetch> {
   let bytes: Uint8Array;
   try {
     bytes = await storage.download(image.objectKey);
@@ -69,7 +91,7 @@ export async function checkRestoredImage(
       failure: `${image.objectKey}: stored bytes hash to ${digest}, row says ${image.sha256}`,
     };
   }
-  return { label: "ok" };
+  return { label: "ok", bytes };
 }
 
 /**
@@ -88,9 +110,16 @@ function causeName(error: ObjectNotFoundError): string | undefined {
   return undefined;
 }
 
+/**
+ * The name, never the message: an error's text is not known to be safe to
+ * print. `detail` is the exception an adapter opts into by setting it, as text
+ * it wrote itself, because a CLI transport has one exit code for every cause
+ * and no name that says which (WranglerError, backupTransport.ts).
+ */
 function errorName(error: unknown): string {
   if (error instanceof Error && error.name !== "") {
-    return error.name;
+    const detail = (error as { detail?: unknown }).detail;
+    return typeof detail === "string" ? `${error.name}: ${detail}` : error.name;
   }
   return `non-Error value thrown (${typeof error})`;
 }

@@ -9,6 +9,8 @@
     "db:claim": "tsx src/db/claim.ts",
     "db:verify-restore": "tsx src/db/verifyRestore.ts",
     "db:backup": "tsx src/db/backup.ts",
+    "db:backup-status": "tsx src/db/backupStatus.ts",
+    "db:restore-images": "tsx src/db/backupRestoreImages.ts",
     "parse-accuracy": "tsx src/db/parseAccuracyReport.ts",
     "action-report": "tsx src/db/actionReport.ts",
     "events:prune": "tsx src/db/eventsPrune.ts",

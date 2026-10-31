@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	Template for the scheduled backup (Runbook §4). NOT installed by any
+	script - copying it into ~/Library/LaunchAgents is a deliberate operator
+	step, like migrations.
+
+	It runs server/ops/kept-backup.sh, which sources ~/.kept/backup.env,
+	rebuilds PATH and runs `npm run db:backup`. A failed run posts a macOS
+	notification and leaves every problem in the log below.
+
+	Before installing:
+	  1. Replace __REPO__ with the absolute path to this checkout and
+	     __HOME__ with your home directory.
+	  2. Create ~/.kept/backup.env (chmod 600). Secrets live in that file,
+	     never in this plist. In wrangler mode it needs:
+	       DATABASE_URL            the DIRECT non-pooler Neon endpoint
+	                               (pg_dump needs session semantics PgBouncer
+	                               does not give)
+	       BACKUP_LOCAL_DIR        absolute path, e.g. "$HOME/.kept/backups"
+	       BACKUP_TRANSPORT        wrangler
+	       BACKUP_SOURCE_BUCKET    kept
+	       BACKUP_STORAGE_BUCKET   kept-backups
+	     Quote every value: the file is sourced by zsh, and a Neon URL
+	     carries & in its query string. No PATH line is needed any more;
+	     one left over in the file is overwritten by kept-backup.sh.
+	  3. Make sure wrangler is logged in for this user: `wrangler whoami`.
+	     Its OAuth login reads and writes R2 objects, which is why the job
+	     needs no R2 API token. It must be on the newest node under ~/.nvm.
+	     If that login sees more than one Cloudflare account, also put
+	     CLOUDFLARE_ACCOUNT_ID in backup.env: wrangler cannot ask which one
+	     under launchd, and fails rather than guess.
+	  4. Install it. The label below was disabled in launchd's own database
+	     (about 2026-09-25), and that survives a reload, so enable it too:
+	       cp server/ops/com.arthurzhang.kept-backup.plist ~/Library/LaunchAgents/
+	       launchctl enable gui/$(id -u)/com.arthurzhang.kept-backup
+	       launchctl bootout gui/$(id -u)/com.arthurzhang.kept-backup 2>/dev/null
+	       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.arthurzhang.kept-backup.plist
+	  5. Run it once by hand and read what it left:
+	       launchctl kickstart gui/$(id -u)/com.arthurzhang.kept-backup
+	       tail -f ~/Library/Logs/kept-backup.log
+	       BACKUP_LOCAL_DIR="$HOME/.kept/backups" npm run db:backup-status
+	     The first run mirrors and uploads every image, three wrangler calls
+	     each at two at a time, so expect many minutes rather than seconds.
+
+	Runs daily at 02:00 local. launchd runs a missed slot at next wake, so a
+	closed laptop shifts the backup rather than skipping it.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.arthurzhang.kept-backup</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>__REPO__/server/ops/kept-backup.sh</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>2</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>__HOME__/Library/Logs/kept-backup.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/Library/Logs/kept-backup.log</string>
+</dict>
+</plist>

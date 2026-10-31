@@ -1,7 +1,8 @@
 import { isNull } from "drizzle-orm";
+import { compareTableCounts, countMismatches } from "./backupCounts.js";
 import { createDb } from "./client.js";
 import { checkRestoredImage } from "./restoreImageCheck.js";
-import { exportJobs, receiptImages, receipts, users } from "./schema.js";
+import { receiptImages } from "./schema.js";
 import {
   LOCAL_DEV_STORAGE_CONFIG,
   createS3ObjectStorage,
@@ -18,7 +19,8 @@ import {
  * restored database against the source it was taken from and then follows
  * the restored image rows out into object storage:
  *
- *   1. row counts per table, source vs restored;
+ *   1. row counts for every table, source vs restored (backupCounts.ts finds
+ *      the tables, so a new one cannot be left out of the drill);
  *   2. every live receipt image's object key resolves in storage;
  *   3. the bytes behind each key re-hash to the digest the RESTORED row
  *      carries.
@@ -37,13 +39,6 @@ import {
  * drill runs locally today and identically against R2 after deployment.
  */
 
-const TABLES = [
-  { name: "users", table: users },
-  { name: "receipts", table: receipts },
-  { name: "receipt_images", table: receiptImages },
-  { name: "export_jobs", table: exportJobs },
-] as const;
-
 async function main(): Promise<void> {
   const sourceUrl = required("SOURCE_DATABASE_URL");
   const restoredUrl = required("RESTORED_DATABASE_URL");
@@ -61,15 +56,12 @@ async function main(): Promise<void> {
 
   try {
     console.log("Row counts (source -> restored):");
-    for (const { name, table } of TABLES) {
-      const sourceCount = (await source.db.select().from(table)).length;
-      const restoredCount = (await restored.db.select().from(table)).length;
-      const verdict = sourceCount === restoredCount ? "ok" : "MISMATCH";
-      console.log(`  ${name.padEnd(15)} ${sourceCount} -> ${restoredCount}  ${verdict}`);
-      if (sourceCount !== restoredCount) {
-        failures.push(`${name}: ${sourceCount} rows in source, ${restoredCount} restored`);
-      }
+    const counts = await compareTableCounts(source.pool, restored.pool);
+    for (const { table, source: inSource, restored: inRestored } of counts) {
+      const verdict = inSource !== null && inSource === inRestored ? "ok" : "MISMATCH";
+      console.log(`  ${table.padEnd(28)} ${inSource} -> ${inRestored}  ${verdict}`);
     }
+    failures.push(...countMismatches(counts));
 
     // Live rows only: a soft-deleted image's bytes are kept for retention,
     // but nothing guarantees an object still exists behind a tombstone.
