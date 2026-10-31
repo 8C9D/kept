@@ -5,6 +5,7 @@ import {
   MIN_STORABLE_CENTS,
   cents,
   centsToDecimalString,
+  summedCents,
 } from "../../src/domain/money.js";
 
 describe("cents", () => {
@@ -68,5 +69,26 @@ describe("centsToDecimalString", () => {
   it("keeps the sign on refunds, including sub-dollar ones", () => {
     expect(centsToDecimalString(cents(-4200))).toBe("-42.00");
     expect(centsToDecimalString(cents(-7))).toBe("-0.07");
+  });
+});
+
+describe("summedCents", () => {
+  it("reads a bigint sum the driver hands back as a string, past int4's ceiling", () => {
+    expect(summedCents("4000000000")).toBe(4_000_000_000);
+    expect(summedCents("-4000000000")).toBe(-4_000_000_000);
+    expect(summedCents("0")).toBe(0);
+  });
+
+  it("is not limited to what one receipt may hold", () => {
+    expect(summedCents(String(MAX_STORABLE_CENTS + 1))).toBe(
+      MAX_STORABLE_CENTS + 1,
+    );
+  });
+
+  it("refuses a sum a number can no longer state to the cent", () => {
+    expect(summedCents(String(Number.MAX_SAFE_INTEGER))).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(() => summedCents("9007199254740993")).toThrow(InvalidMoneyError);
   });
 });

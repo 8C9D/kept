@@ -24,6 +24,8 @@ import { errorSummary } from "../observability/errorSummary.js";
 import {
   isIssuedExportKey,
   isIssuedObjectKey,
+  userExportPrefix,
+  userImagePrefix,
 } from "../storage/objectKeys.js";
 import type { ObjectStorage } from "../storage/objectStorage.js";
 
@@ -140,6 +142,15 @@ export function meRoutes(deps: MeRouteDependencies): Hono<AuthedEnv> {
    *      failed commit would leave live rows pointing at images that are
    *      gone - a person still signed in, looking at receipts whose photos
    *      have vanished. Orphans are counted and logged, never silent.
+   *
+   *      The rows are not the whole inventory, which is why storage is listed
+   *      as well (spec §6: every stored object goes). An image is PUT to a
+   *      presigned URL before its receipt exists, so an upload whose create
+   *      then got a 409, or never ran, sits under `{userId}/` with no row
+   *      naming it; a zip whose job was retired sits under `exports/{userId}/`
+   *      the same way. Listing is added to the row keys rather than replacing
+   *      them: if it fails, what the rows know about still goes, and the
+   *      failure is logged like any other orphan.
    */
   router.delete("/", async (c) => {
     const body = parseOrThrow(deleteMeSchema, await readOptionalJsonBody(c));
@@ -244,7 +255,12 @@ export function meRoutes(deps: MeRouteDependencies): Hono<AuthedEnv> {
           `so deleting them could have destroyed another account's data.`,
       );
     }
-    await deleteObjects(deps.storage, objectKeys.keys);
+    await deleteObjects(deps.storage, [
+      ...new Set([
+        ...objectKeys.keys,
+        ...(await listUserObjects(deps.storage, userId)),
+      ]),
+    ]);
 
     if (notRevoked !== null) {
       // The account really is gone by now, which is what makes this
@@ -308,10 +324,42 @@ async function revokeAppleTokens(
 }
 
 /**
+ * Every key under this user's two prefixes, best-effort for the reason
+ * `deleteObjects` is: the rows are already gone, and a listing failure must
+ * not turn a deletion that happened into a 500. A prefix that cannot be listed
+ * contributes nothing and is logged, and the other is still asked.
+ *
+ * Nothing here needs the `isIssued*` shape checks the row keys go through.
+ * Those exist because a row can hold a key naming someone else's prefix; a
+ * listing can only answer with keys under the prefix it was given, and that
+ * prefix came from the session.
+ */
+async function listUserObjects(
+  storage: ObjectStorage,
+  userId: string,
+): Promise<string[]> {
+  const keys: string[] = [];
+  for (const prefix of [userImagePrefix(userId), userExportPrefix(userId)]) {
+    try {
+      keys.push(...(await storage.listKeys(prefix)));
+    } catch (error) {
+      // The prefix is deliberately absent from this line, like the keys in
+      // `deleteObjects` below: it begins with, or is, the user id.
+      console.error(
+        "Account deletion could not list a storage prefix, so objects no " +
+          "row named may remain under a user id no session can present again:",
+        errorSummary(error),
+      );
+    }
+  }
+  return keys;
+}
+
+/**
  * How many object deletions are in flight at once. A year of a small
  * business's receipts is hundreds of objects, so one at a time would hold the request
- * open for minutes; all at once would open hundreds of sockets to R2 in a
- * process provisioned at 2 GB. Sixteen is a judgement between the two,
+ * open for minutes; all at once would open hundreds of sockets to R2 from a
+ * 1 GiB VM. Sixteen is a judgement between the two,
  * written down as one.
  */
 const OBJECT_DELETE_CONCURRENCY = 16;

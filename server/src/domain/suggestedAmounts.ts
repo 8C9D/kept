@@ -30,6 +30,15 @@
  * this governs is what the confirm screen PREFILLS, where the cost of being
  * wrong is one blank field instead of a wrong tax record.
  *
+ * The verdict reaches a write in exactly one place, and it does not change
+ * the above: `PATCH /api/receipts/:id` refuses to promote a pending row whose
+ * amounts were withheld until a person has been through them
+ * (`withheldAmountFields`, mergedSuggestions.ts). That asks whether a HUMAN
+ * reviewed the field, never whether the numbers balance - the typed value
+ * still saves, however it sums. What it closes is the other path to the same
+ * corruption: the row's columns hold the raw parse this rule declined to
+ * serve, so a confirm that named no amount would have stored it anyway.
+ *
  * A pure function over five numbers, in the domain layer, so the rule is
  * written once and both clients inherit it (spec §4.1).
  */

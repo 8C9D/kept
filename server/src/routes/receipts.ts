@@ -5,12 +5,14 @@ import {
   asc,
   desc,
   eq,
+  getTableColumns,
   gte,
   ilike,
   inArray,
   isNotNull,
   isNull,
   lte,
+  max,
   ne,
   or,
   sql,
@@ -24,6 +26,7 @@ import { visibleTo } from "../db/receiptQueries.js";
 import { receiptFieldOptions, receiptImages, receipts } from "../db/schema.js";
 import { ApiError, notFoundError } from "../http/errors.js";
 import type { z } from "zod";
+import { summedCents } from "../domain/money.js";
 import type { OcrFieldSuggestions } from "../domain/ocrSuggestions.js";
 import type { ReceiptOptionField } from "../domain/receiptFieldOptions.js";
 import {
@@ -52,6 +55,7 @@ import {
 import { sessionAuth, type AuthedEnv } from "../http/sessionAuth.js";
 import {
   mergeSuggestions,
+  withheldAmountFields,
   type MergedSuggestions,
 } from "../domain/mergedSuggestions.js";
 import type { LlmParseSweepHandle } from "../parse/llmParseSweep.js";
@@ -210,7 +214,14 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
       });
     } catch (error) {
       if (isUniqueViolation(error, "receipt_images_user_id_sha256_uq")) {
-        throw duplicateImageError();
+        // The one duplicate_image that names what it collided with, because
+        // the create is the one route whose caller may not know: a retry
+        // after a lost response gets this 409 and no id, and a multi-page
+        // capture then has nowhere to attach its other pages. The add-page
+        // and replace routes are already talking about a receipt by id.
+        throw duplicateImageError(
+          await liveReceiptHoldingImage(deps.db, userId, body.image.sha256),
+        );
       }
       throw error;
     }
@@ -262,7 +273,10 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     // Fetch one row beyond the page: its presence means another page
     // exists, and the last row actually returned seeds the next cursor.
     const rows = await deps.db
-      .select()
+      .select({
+        ...getTableColumns(receipts),
+        createdAtForCursor: CREATED_AT_FOR_CURSOR,
+      })
       .from(receipts)
       .where(and(...conditions))
       .orderBy(...listOrderBy(spec, order))
@@ -601,15 +615,31 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
    * say "$X, and N pending, not counted" instead of a figure someone could
    * mistake for a finished claim.
    *
+   * **Summed per currency.** Production holds USD receipts, and adding them
+   * to CAD ones produces a number that is not an amount of anything.
+   * `byCurrency` is the honest answer: one entry per currency holding a
+   * confirmed row, CAD first and the rest alphabetical, so a client can state
+   * each figure in its own money.
+   *
+   * ⚠ `confirmed` is CAD rows ONLY now, deliberately, and it stays because
+   * shipped iOS cannot be updated in lockstep. That build decodes this key and
+   * prints it labelled "CAD" (HomeView's `SummaryRow`), which was false the
+   * moment a USD receipt was confirmed; narrowing the figure is what makes the
+   * label true without touching the phone. It is therefore not "the total"
+   * any more - a USD-only filter answers zeros here, with the money in
+   * `byCurrency` - and no new client should read it.
+   *
    * One query, not two: every count and sum is a `FILTER (WHERE ...)`
-   * aggregate in the same SELECT, so the confirmed and pending halves are
-   * computed from one snapshot of the filtered rows rather than two
+   * aggregate in one GROUP BY, so the confirmed and pending halves and every
+   * currency are computed from one snapshot of the filtered rows rather than
    * queries that could race a concurrent write between them.
    *
-   * `COALESCE(..., 0)` on every sum: a filter matching zero confirmed rows
-   * must answer 0, not null - a client rendering "$0.00" is correct, and a
+   * `COALESCE(..., 0)` on every sum: a currency with confirmed rows and no
+   * tip must answer 0, not null - a client rendering "$0.00" is correct, and a
    * null would hand every client an absence to special-case that is really
-   * just a zero.
+   * just a zero. The sums are `bigint` for the reason `summedCents` states: a
+   * year of receipts can pass int4 where one receipt cannot, and the `::int`
+   * this used to carry turned that into a 500 on the summary line.
    *
    * Registered ABOVE /:id for the same reason /options is (see that
    * route's comment): the :id handler 404s a non-uuid, so a literal path
@@ -620,37 +650,52 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     const userId = c.get("userId");
     const conditions = buildReceiptFilterConditions(userId, query);
 
+    const confirmedSum = (column: PgColumn) =>
+      sql<string>`coalesce(sum(${column}) filter (where ${receipts.status} = ${"confirmed"}), 0)::bigint`;
+
+    // Grouped, so a filter matching nothing yields no rows at all rather
+    // than one row of zeros - which is why the figures below fall back to
+    // ZERO_SUMMARY_FIGURES and there is no "aggregate returned no row" case.
     const rows = await deps.db
       .select({
+        currency: receipts.currency,
         confirmedCount: sql<number>`count(*) filter (where ${receipts.status} = ${"confirmed"})::int`,
-        subtotalCents: sql<number>`coalesce(sum(${receipts.subtotalCents}) filter (where ${receipts.status} = ${"confirmed"}), 0)::int`,
-        hstCents: sql<number>`coalesce(sum(${receipts.hstCents}) filter (where ${receipts.status} = ${"confirmed"}), 0)::int`,
-        tipCents: sql<number>`coalesce(sum(${receipts.tipCents}) filter (where ${receipts.status} = ${"confirmed"}), 0)::int`,
-        otherFeesCents: sql<number>`coalesce(sum(${receipts.otherFeesCents}) filter (where ${receipts.status} = ${"confirmed"}), 0)::int`,
-        totalCents: sql<number>`coalesce(sum(${receipts.totalCents}) filter (where ${receipts.status} = ${"confirmed"}), 0)::int`,
+        subtotalCents: confirmedSum(receipts.subtotalCents),
+        hstCents: confirmedSum(receipts.hstCents),
+        tipCents: confirmedSum(receipts.tipCents),
+        otherFeesCents: confirmedSum(receipts.otherFeesCents),
+        totalCents: confirmedSum(receipts.totalCents),
         pendingCount: sql<number>`count(*) filter (where ${receipts.status} = ${"pending"})::int`,
       })
       .from(receipts)
-      .where(and(...conditions));
+      .where(and(...conditions))
+      .groupBy(receipts.currency)
+      .orderBy(
+        sql`${receipts.currency} = ${SUMMARY_LEADING_CURRENCY} desc`,
+        asc(receipts.currency),
+      );
 
-    const row = rows[0];
-    if (row === undefined) {
-      // An aggregate with no GROUP BY always yields exactly one row, even
-      // over zero matching receipts; its absence means something is
-      // genuinely broken.
-      throw new Error("Summary aggregate query returned no row");
-    }
+    const figures = (row: (typeof rows)[number]) => ({
+      count: row.confirmedCount,
+      subtotalCents: summedCents(row.subtotalCents),
+      hstCents: summedCents(row.hstCents),
+      tipCents: summedCents(row.tipCents),
+      otherFeesCents: summedCents(row.otherFeesCents),
+      totalCents: summedCents(row.totalCents),
+    });
+    const leading = rows.find(
+      (row) => row.currency === SUMMARY_LEADING_CURRENCY,
+    );
 
     return c.json({
-      confirmed: {
-        count: row.confirmedCount,
-        subtotalCents: row.subtotalCents,
-        hstCents: row.hstCents,
-        tipCents: row.tipCents,
-        otherFeesCents: row.otherFeesCents,
-        totalCents: row.totalCents,
-      },
-      pendingCount: row.pendingCount,
+      confirmed:
+        leading === undefined ? ZERO_SUMMARY_FIGURES : figures(leading),
+      byCurrency: rows
+        // A currency seen only on pending rows has nothing confirmed to
+        // report; it is still counted by `pendingCount` below.
+        .filter((row) => row.confirmedCount > 0)
+        .map((row) => ({ currency: row.currency, ...figures(row) })),
+      pendingCount: rows.reduce((sum, row) => sum + row.pendingCount, 0),
     });
   });
 
@@ -894,12 +939,7 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     let created: typeof receiptImages.$inferSelect;
     try {
       created = await deps.db.transaction(async (tx) => {
-        const receiptRows = await tx
-          .select({ id: receipts.id })
-          .from(receipts)
-          .where(and(eq(receipts.id, id), visibleTo(userId)))
-          .for("update");
-        if (receiptRows.length === 0) {
+        if (!(await lockLiveReceipt(tx, id, userId))) {
           throw notFoundError();
         }
 
@@ -979,14 +1019,24 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
    * answers the same named `duplicate_image` error the create and add-page
    * routes do, never a raw constraint violation.
    *
-   * Scoping deliberately does NOT re-check the `receipts` table the way the
-   * add-page route above does. The UPDATE's WHERE clause requires
-   * `receiptImages.userId = <caller>` in addition to matching the page, and
-   * `user_id` is denormalized onto this table for exactly this reason (spec
-   * §5: "a constraint that needs a join is not a constraint") - a row can
-   * only match if this caller already owns the receipt it belongs to, so a
-   * foreign receipt id or a foreign or nonexistent page both fall out as
-   * zero rows updated, the same 404 the detail route gives.
+   * ⚠ The receipt row is locked FOR UPDATE first, exactly as add-page does,
+   * and scoping is checked on that lock. This route used to skip the
+   * `receipts` table entirely on the reasoning that `user_id` on the image row
+   * scopes it well enough - which is true of isolation and was never true of
+   * concurrency. `DELETE /:id` tombstones images with an UPDATE that cannot
+   * see another transaction's uncommitted insert, so a replace in flight
+   * across a delete committed a LIVE image onto a deleted receipt: restore
+   * then found nothing stamped alongside the receipt and 500ed forever, and
+   * the live row kept the sha256 slot, refusing a re-capture of those bytes
+   * with a 409 that named no receipt the person could see. With both routes
+   * queueing on the receipt row, either the replace commits first and the
+   * delete's image UPDATE sees its insert, or the delete commits first and
+   * this select re-evaluates `visibleTo` and finds nothing to replace.
+   *
+   * The lock order - receipt, then images - is the one DELETE and restore
+   * take, so no pair of these can deadlock. A foreign receipt id, a deleted
+   * one, or a nonexistent page all fall out as the same 404 the detail route
+   * gives.
    */
   router.put("/:id/images/:page", async (c) => {
     const id = uuidParamOrNotFound(c.req.param("id"));
@@ -1005,6 +1055,10 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     let created: typeof receiptImages.$inferSelect;
     try {
       created = await deps.db.transaction(async (tx) => {
+        if (!(await lockLiveReceipt(tx, id, userId))) {
+          throw notFoundError();
+        }
+
         const replaced = await tx
           .update(receiptImages)
           .set({ deletedAt: new Date() })
@@ -1018,10 +1072,9 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
           )
           .returning({ id: receiptImages.id });
         if (replaced.length === 0) {
-          // No live image at this page for this user: either the receipt
-          // is not theirs, the receipt does not exist, or this page never
-          // existed. All three are "not found", never "forbidden" (spec §3
-          // constraint 4).
+          // The receipt is this user's and live, and this page never
+          // existed. Still "not found", the same answer as a receipt that
+          // is not theirs (spec §3 constraint 4).
           throw notFoundError();
         }
 
@@ -1078,11 +1131,12 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
    * superseded page (spec §5) at whatever moment that replace happened, and
    * `DELETE /:id` retires every LIVE image at the moment of deletion,
    * stamping the receipt and those images with the exact same `deleted_at`
-   * value in one transaction (see the DELETE handler above - `deletedAt` is
-   * one `new Date()` shared by both updates). That shared timestamp is what
+   * value in one transaction (see the DELETE handler below - one stamp from
+   * `deletionStampFor`, shared by both updates). That shared timestamp is what
    * this route matches on: only image rows whose `deleted_at` equals the
    * receipt's OWN `deleted_at` are un-tombstoned. A row retired earlier by a
-   * replace keeps an earlier timestamp and is left alone, correctly still
+   * replace carries a strictly earlier timestamp, which `deletionStampFor`
+   * guarantees rather than assumes, and is left alone, correctly still
    * retired as the superseded version it is - restoring the receipt must
    * not resurrect a page image the person had already replaced before ever
    * deleting the receipt.
@@ -1101,6 +1155,14 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
    * own `duplicate_image` 409. It happens inside the SAME transaction as the
    * receipt's own un-delete, so a failure here leaves the receipt DELETED,
    * never restored without its images.
+   *
+   * The `FOR UPDATE` below is the same queue the replace, add-page and delete
+   * routes wait in, and it is why this route has no hole of the replace
+   * route's old kind: a restore cannot run while one of them holds the
+   * receipt, and each of them re-reads whether the receipt is live once it
+   * gets its turn. The images this touches are chosen by the stamp DELETE
+   * wrote, inside that lock, so nothing can be inserted between the select and
+   * the UPDATE.
    *
    * Scoping is deliberately INDISTINGUISHABLE across three cases - an id
    * that does not exist, one that belongs to someone else, and one that
@@ -1252,6 +1314,42 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
         throw notFoundError();
       }
 
+      // The root of the $218.94-stored-as-$8.50 failure. A pending row's
+      // columns hold the raw capture-time parse, including the very amount
+      // the merge just declined to serve, so a promotion that names no amount
+      // writes nothing and the withheld number simply becomes the record: the
+      // web's bulk confirm sends `{status}` alone, and an iOS swipe sends what
+      // the row displays, which for a withheld amount IS that raw column.
+      //
+      // Asked of the transition only. The form clients list what a person
+      // entered or accepted in `reviewedFields`, and that is exactly what
+      // constraint 2 needs to know; the VALUE is deliberately not judged,
+      // because a person who types what the paper says must always be able to
+      // save it (domain/suggestedAmounts.ts). An explicit null also passes: a
+      // form whose withheld box stayed blank clears the column, so nothing the
+      // merge refused is promoted, and a receipt with no subtotal printed
+      // must not need its blank box touched before it can save. (A null total
+      // still fails below, on the rule that a confirmed receipt has one.)
+      // Computed under the row lock from the row as it stands, so it judges
+      // the same merge a client would be served now. A field already in the
+      // STORED set is not withheld in the first place: the merge serves it
+      // absent.
+      if (existing.status === "pending" && body.status === "confirmed") {
+        const reviewedNow = new Set(body.reviewedFields);
+        const unreviewed = withheldAmountFields(servedMerge(existing)).filter(
+          (field) => !reviewedNow.has(field) && body[field] !== null,
+        );
+        if (unreviewed.length > 0) {
+          throw new ApiError(
+            409,
+            "amounts_need_review",
+            "The amounts on this receipt didn't add up, so it can't be " +
+              "confirmed as it stands. Open the receipt and enter them from " +
+              "the paper.",
+          );
+        }
+      }
+
       const resulting = {
         status: body.status ?? existing.status,
         totalCents:
@@ -1306,21 +1404,26 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
     return c.json(receiptResponse(updatedReceipt));
   });
 
-  /** DELETE /api/receipts/:id - soft delete (spec §10B: retention). */
+  /**
+   * DELETE /api/receipts/:id - soft delete (spec §10B: retention).
+   *
+   * Locks the receipt first, the queue the replace, add-page and restore
+   * routes all wait in, and only then picks the stamp - see
+   * `deletionStampFor` for why the order matters.
+   */
   router.delete("/:id", async (c) => {
     const id = uuidParamOrNotFound(c.req.param("id"));
     const userId = c.get("userId");
-    const deletedAt = new Date();
 
     const deleted = await deps.db.transaction(async (tx) => {
-      const rows = await tx
+      if (!(await lockLiveReceipt(tx, id, userId))) {
+        return false;
+      }
+      const deletedAt = await deletionStampFor(tx, id, userId);
+      await tx
         .update(receipts)
         .set({ deletedAt })
-        .where(and(eq(receipts.id, id), visibleTo(userId)))
-        .returning({ id: receipts.id });
-      if (rows.length === 0) {
-        return rows;
-      }
+        .where(and(eq(receipts.id, id), visibleTo(userId)));
       // Stamp the images too: a deleted receipt's image must stop occupying
       // its (user_id, sha256) uniqueness slot, or re-capturing the same
       // file after a deletion would 409 forever.
@@ -1343,9 +1446,9 @@ export function receiptRoutes(deps: ReceiptRouteDependencies): Hono<AuthedEnv> {
             isNull(receiptImages.deletedAt),
           ),
         );
-      return rows;
+      return true;
     });
-    if (deleted.length === 0) {
+    if (!deleted) {
       throw notFoundError();
     }
     return c.body(null, 204);
@@ -1404,26 +1507,100 @@ function buildReceiptFilterConditions(
 }
 
 /**
- * The API shape of a receipt. A projection rather than the raw row, for the
- * same reason /api/me has one: user_id and deleted_at are internal, and the
- * row's shape should be free to change without changing the API's.
- * ocr_raw_text is added by the detail route only.
+ * Takes the receipt row's lock, answering whether the caller has a live
+ * receipt by this id.
+ *
+ * This row is the queue every write to a receipt's images waits in - add-page,
+ * replace, delete, and restore, which has to select the deleted row instead and
+ * so spells its own. One queue is what lets each of them reason about the
+ * others: nothing touches `receipt_images` for a receipt without holding this,
+ * so no route can act on images another has half-changed. A caller that waited
+ * here gets the row re-read once the lock is granted, so a delete that
+ * committed first is answered as the 404 it now is.
  */
-function receiptResponse(row: typeof receipts.$inferSelect) {
-  const suggestions = mergeSuggestions(
+async function lockLiveReceipt(
+  tx: DbTransaction,
+  receiptId: string,
+  userId: string,
+): Promise<boolean> {
+  const rows = await tx
+    .select({ id: receipts.id })
+    .from(receipts)
+    .where(and(eq(receipts.id, receiptId), visibleTo(userId)))
+    .for("update");
+  return rows.length > 0;
+}
+
+/**
+ * The `deleted_at` a delete writes: now, or one millisecond past the newest
+ * tombstone this receipt's images already carry, whichever is later.
+ *
+ * ⚠ Restore identifies "the images this delete retired" by exact equality with
+ * the receipt's stamp, so that equality has to be guaranteed, not likely. A
+ * Date has millisecond resolution, and a replace and a delete landing together
+ * routinely read the same millisecond - found by the concurrency test, within a
+ * few rounds, not on paper. The superseded image and its replacement then both
+ * carried the receipt's stamp, restore un-tombstoned both, they collided on
+ * `(receipt_id, page)`, and the receipt could never be restored again.
+ *
+ * Safe to ask here and only here: the caller holds the receipt's row lock, so
+ * no replace is in flight and every earlier tombstone is committed and
+ * visible, and once this commits the receipt is deleted and no replace can add
+ * another. So each stamp is strictly later than everything before it. Also
+ * covers a stored tombstone ahead of this machine's clock, and one holding
+ * microseconds: the driver truncates it, and a millisecond clears the rest.
+ */
+async function deletionStampFor(
+  tx: DbTransaction,
+  receiptId: string,
+  userId: string,
+): Promise<Date> {
+  const rows = await tx
+    .select({ latest: max(receiptImages.deletedAt) })
+    .from(receiptImages)
+    .where(
+      and(
+        eq(receiptImages.receiptId, receiptId),
+        eq(receiptImages.userId, userId),
+      ),
+    );
+  const latest = rows[0]?.latest ?? null;
+  const now = new Date();
+  return latest !== null && latest.getTime() >= now.getTime()
+    ? new Date(latest.getTime() + 1)
+    : now;
+}
+
+/**
+ * The §7.3 merge for one row, the one way anything here computes it, so what
+ * a client is served and what the PATCH confirm guard judges cannot differ.
+ *
+ * The row's own state decides what is served, not just what the two parsers
+ * said (2026-09-01): a reviewed field on a pending receipt has its suggestion
+ * withheld, and a PDF's extracted text layer merges money differently from a
+ * photograph's OCR. Both rules live in the domain layer; this passes it what
+ * it needs to apply them.
+ */
+function servedMerge(row: typeof receipts.$inferSelect) {
+  return mergeSuggestions(
     row.ocrSuggestions,
     row.llmSuggestions?.suggestions ?? null,
-    // The row's own state decides what is served, not just what the two
-    // parsers said (2026-09-01): a reviewed field on a pending receipt has
-    // its suggestion withheld, and a PDF's extracted text layer merges money
-    // differently from a photograph's OCR. Both rules live in the domain
-    // layer; this passes it what it needs to apply them.
     {
       status: row.status,
       reviewedFields: row.reviewedFields,
       ocrSource: row.ocrSource,
     },
   );
+}
+
+/**
+ * The API shape of a receipt. A projection rather than the raw row, for the
+ * same reason /api/me has one: user_id and deleted_at are internal, and the
+ * row's shape should be free to change without changing the API's.
+ * ocr_raw_text is added by the detail route only.
+ */
+function receiptResponse(row: typeof receipts.$inferSelect) {
+  const suggestions = servedMerge(row);
   return {
     id: row.id,
     purchasedAt: row.purchasedAt,
@@ -1476,13 +1653,50 @@ function servedSuggestions(merged: MergedSuggestions) {
  * route that can hit it - the create route, add-a-page, and replace - so
  * the wording that turns a raw constraint violation into a comprehensible
  * answer cannot drift between them.
+ *
+ * `existingReceiptId` is the create route's alone (see there). It is optional
+ * on the wire too: absent when the receipt could not be named, and shipped
+ * clients decode `code` and `message` and ignore the rest.
  */
-function duplicateImageError(): ApiError {
+function duplicateImageError(existingReceiptId?: string): ApiError {
   return new ApiError(
     409,
     "duplicate_image",
     "An identical image is already attached to one of your receipts",
+    existingReceiptId === undefined ? undefined : { existingReceiptId },
   );
+}
+
+/**
+ * The caller's own live receipt holding this digest, which is what the
+ * `(user_id, sha256)` index just collided with.
+ *
+ * ⚠ Asked again here instead of read off the error, and scoped by the session
+ * user on both tables: this id goes into a response, so it must be impossible
+ * for it to name anyone else's receipt. The index being per-user means another
+ * person's identical bytes never caused the collision in the first place, and
+ * this query is what stops them being found afterwards. `undefined` when
+ * nothing matches - the other receipt can be deleted between the collision and
+ * this read - and the caller still gets the 409 that is true either way.
+ */
+async function liveReceiptHoldingImage(
+  db: Db,
+  userId: string,
+  sha256: string,
+): Promise<string | undefined> {
+  const rows = await db
+    .select({ id: receipts.id })
+    .from(receiptImages)
+    .innerJoin(receipts, eq(receipts.id, receiptImages.receiptId))
+    .where(
+      and(
+        eq(receiptImages.userId, userId),
+        eq(receiptImages.sha256, sha256),
+        isNull(receiptImages.deletedAt),
+        visibleTo(userId),
+      ),
+    );
+  return rows[0]?.id;
 }
 
 /**
@@ -1559,6 +1773,22 @@ const DEFAULT_ORDER: ListOrder = "desc";
 
 /** How many matches GET /possible-duplicates returns - see that route's comment. */
 const MAX_POSSIBLE_DUPLICATES = 20;
+
+/**
+ * The currency `summary.confirmed` reports and `byCurrency` leads with: the
+ * column default, and what shipped iOS labels that figure.
+ */
+const SUMMARY_LEADING_CURRENCY = "CAD";
+
+/** What `confirmed` says when the filter matched no CAD row at all. */
+const ZERO_SUMMARY_FIGURES = {
+  count: 0,
+  subtotalCents: 0,
+  hstCents: 0,
+  tipCents: 0,
+  otherFeesCents: 0,
+  totalCents: 0,
+};
 
 type ListSort = z.infer<typeof listSortSchema>;
 type ListOrder = z.infer<typeof listOrderSchema>;
@@ -1714,8 +1944,26 @@ function afterCursorInSort(
   return sql`(${nullRowsFollow}${afterKey} OR (${spec.sortKey} = ${key} AND ${afterTiebreak}))`;
 }
 
+/**
+ * `created_at` as text, at the column's own microsecond precision, for the
+ * list's cursor.
+ *
+ * ⚠ The row's `createdAt` cannot serve here: the driver hands it back as a
+ * JavaScript Date, which stops at milliseconds, while the column keeps
+ * microseconds. A cursor written from it names an instant slightly EARLIER
+ * than its own row, so `(created_at, id) < cursor` then drops every other row
+ * sharing that sort key and millisecond across the page boundary - and because
+ * a keyset query reports no gap, those receipts simply never appear. Formatted
+ * in the query instead, where the full value still exists.
+ *
+ * In UTC, with the `Z` the cursor's schema requires of a timestamp. A cursor
+ * minted before this existed has three digits, still decodes, and still
+ * resumes where it always did.
+ */
+const CREATED_AT_FOR_CURSOR = sql<string>`to_char(${receipts.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
 function encodeListCursor(
-  row: typeof receipts.$inferSelect,
+  row: typeof receipts.$inferSelect & { createdAtForCursor: string },
   sort: ListSort,
   order: ListOrder,
 ): string {
@@ -1725,7 +1973,7 @@ function encodeListCursor(
     order,
     sortKeyNull: sortKey === null,
     sortKey,
-    createdAt: row.createdAt.toISOString(),
+    createdAt: row.createdAtForCursor,
     id: row.id,
   };
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");

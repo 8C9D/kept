@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { users } from "../../src/db/schema.js";
 import { SignJWT } from "jose";
+import { APPLE_OUTAGE_TOKEN } from "../helpers/fakeAppleVerifier.js";
 import { createTestHarness, TEST_SESSION_SECRET } from "../helpers/testApp.js";
 
 const harness = createTestHarness();
@@ -59,6 +60,45 @@ describe("POST /api/auth/apple", () => {
   it("rejects an empty body with 400", async () => {
     const response = await harness.request(null, "POST", "/api/auth/apple", {});
     expect(response.status).toBe(400);
+  });
+
+  it("answers 503 apple_unavailable when Apple's keys cannot be fetched, and says so in the log", async () => {
+    // The failure this pins: an Apple outage, or this VM's egress failing,
+    // used to answer every user 401 invalid_identity_token - "your token is
+    // bad" - with no log line anywhere.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await harness.request(null, "POST", "/api/auth/apple", {
+        identityToken: APPLE_OUTAGE_TOKEN,
+      });
+
+      expect(response.status).toBe(503);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code).toBe("apple_unavailable");
+
+      const line = logged.mock.calls.flat().join(" ");
+      expect(line).toContain("could not fetch Apple's signing keys");
+      expect(line).toContain("fetch failed");
+      // The whole request is someone's credential; none of it is logged.
+      expect(line).not.toContain(APPLE_OUTAGE_TOKEN);
+    } finally {
+      logged.mockRestore();
+    }
+    // No user is created by a sign-in that could not be checked.
+    expect(await harness.db.select().from(users)).toHaveLength(0);
+  });
+
+  it("logs nothing for a bad token: that is the caller's, and it is not news", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await harness.request(null, "POST", "/api/auth/apple", {
+        identityToken: "forged-token",
+      });
+      expect(response.status).toBe(401);
+      expect(logged).not.toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
   });
 });
 

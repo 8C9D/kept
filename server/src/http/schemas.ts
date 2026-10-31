@@ -42,6 +42,44 @@ const centsSchema = z
   .max(MAX_STORABLE_CENTS, { error: "is outside the storable amount range" })
   .transform(cents);
 
+/**
+ * U+0000 is the one character Postgres cannot keep: `text` refuses it and so
+ * does `jsonb`, so it used to arrive at the insert as a 500 - after the image
+ * had already uploaded.
+ *
+ * ⚠ Stripped, not refused, and the reason is who is on the other end. A 400
+ * on a create strands an iOS outbox item for good: the phone holds a capture
+ * it can neither send nor edit. And there is nothing to protect by refusing,
+ * because no human ever typed this character - it comes off OCR text or a PDF
+ * text layer, where it was never part of what the receipt said.
+ *
+ * `.overwrite()` rather than `.transform()`, for two reasons. It runs in check
+ * order, so the length bounds below it measure what will actually be stored;
+ * and it stays a string schema, so `.min()`, `.max()` and `.trim()` still chain
+ * off it.
+ */
+const NUL = "\u0000";
+const freeText = () =>
+  z.string().overwrite((value) => value.replaceAll(NUL, ""));
+
+/**
+ * Free text for a nullable field that refuses an empty string. A value that
+ * was NOTHING BUT NUL strips to empty, which would hand the outbox the very
+ * 400 stripping exists to avoid, so it reads as what it is - nothing - while
+ * a client that really sends "" still gets the 400 it always got.
+ */
+function nullableLabel(maxLength: number) {
+  return z.preprocess(
+    (value) =>
+      typeof value === "string" &&
+      value !== "" &&
+      value.replaceAll(NUL, "") === ""
+        ? null
+        : value,
+    freeText().min(1).max(maxLength).nullable(),
+  );
+}
+
 /** yyyy-mm-dd and a real calendar date (2026-02-30 is rejected). */
 const isoDateSchema = z.string().refine(
   (value) => {
@@ -58,6 +96,26 @@ const isoDateSchema = z.string().refine(
   { error: "must be a valid yyyy-mm-dd date" },
 );
 
+/**
+ * An ISO timestamp that a `timestamptz` can hold, with the year judged on the
+ * resolved instant rather than on the digits as written.
+ *
+ * zod checks the shape, and year 0000 has the right shape: the route then
+ * turns it into a Date, drizzle into `0000-...`, and Postgres refuses the
+ * statement - a 500 on a bad date, the same defect `isValidCalendarDate` closes
+ * for plain dates. The instant is what has to be asked, because an offset moves
+ * the year across the boundary in both directions: `0001-01-01T00:00:00+14:00`
+ * is in year zero, and `9999-12-31T23:59:59-01:00` is in year 10000, which
+ * `toISOString()` writes as `+010000-...`.
+ */
+const isoDateTimeSchema = z.iso.datetime({ offset: true }).refine(
+  (value) => {
+    const year = new Date(value).getUTCFullYear();
+    return year >= 1 && year <= 9999;
+  },
+  { error: "must be a valid ISO 8601 date-time" },
+);
+
 // Derived from the database enum so the two can never disagree.
 const receiptStatusSchema = z.enum(receiptStatus.enumValues);
 
@@ -66,9 +124,9 @@ const receiptStatusSchema = z.enum(receiptStatus.enumValues);
  * below so the two can never drift apart.
  */
 const purchasedAt = isoDateSchema;
-const capturedAt = z.iso.datetime({ offset: true });
-const vendorText = z.string().min(1).max(200);
-const vendor = vendorText.nullable();
+const capturedAt = isoDateTimeSchema;
+const vendorText = freeText().min(1).max(200);
+const vendor = nullableLabel(200);
 const subtotalCents = centsSchema.nullable();
 const hstCents = centsSchema.nullable();
 // Gratuity and every other non-HST, non-subtotal charge (delivery, service
@@ -82,10 +140,10 @@ const totalCents = centsSchema;
 const currency = z.string().regex(/^[A-Z]{3}$/, {
   error: "must be a three-letter currency code like CAD",
 });
-const category = z.string().min(1).max(200).nullable();
-const paymentMethod = z.string().min(1).max(100).nullable();
-const notes = z.string().max(5000).nullable();
-const ocrRawText = z.string().max(100_000).nullable();
+const category = nullableLabel(200);
+const paymentMethod = nullableLabel(100);
+const notes = freeText().max(5000).nullable();
+const ocrRawText = freeText().max(100_000).nullable();
 
 /**
  * Which fields a human has entered or explicitly reviewed on a still-pending
@@ -120,7 +178,7 @@ const ocrSource = z.enum(OCR_SOURCES);
  * what a parser said and keeps whatever keys the client of the day sent -
  * see `ocrSuggestionsSchema` below. No receipt column carries it any more.
  */
-const vendorTaxNumber = z.string().min(1).max(50).nullable();
+const vendorTaxNumber = nullableLabel(50);
 
 /**
  * ⚠ TRANSITIONAL (2026-08-26 field reduction). The shipped iOS build
@@ -151,7 +209,7 @@ export const appleSignInSchema = z.strictObject({
   identityToken: z.string().min(1),
   // Apple provides the person's name only on first authorization, and only
   // to the client; the client passes it along when it has it.
-  displayName: z.string().min(1).max(200).optional(),
+  displayName: freeText().min(1).max(200).optional(),
 });
 
 export const uploadUrlSchema = z.strictObject({
@@ -174,6 +232,45 @@ export const receiptImageSchema = z.strictObject({
 });
 
 /**
+ * A money amount a PARSER reported, which is not held to the terms of one a
+ * person saved. Past the storable range it becomes null - "the parser found
+ * nothing usable" - instead of a 400.
+ *
+ * ⚠ This is a record of a parser, not the record. A misread digit run can
+ * overflow int4 on a receipt whose human-corrected total is perfectly fine, and
+ * refusing the create over it would reject the person's work because of a guess
+ * they had already thrown away - with no edit path on iOS, since the outbox item
+ * can only be retried, and the request would be identical every time. The range
+ * check itself is still `centsSchema`'s, reused rather than restated, so a value
+ * this keeps is exactly a value the columns could hold. A non-number stays a
+ * 400: that is a malformed client rather than a bad read.
+ */
+const suggestedCents = z
+  .number()
+  .transform((value) => {
+    const parsed = centsSchema.safeParse(value);
+    return parsed.success ? parsed.data : null;
+  })
+  .nullable();
+
+/**
+ * The same rule for a parser's text and dates: a value the column's own schema
+ * refuses (a vendor run on for 300 characters, an impossible date) becomes
+ * null rather than a 400, for the reason `suggestedCents` gives, and the bound
+ * is the field's own schema rather than a restatement of it. A non-string
+ * stays a 400, as a non-number does there.
+ */
+function suggestedText(bound: z.ZodType<string | null>) {
+  return z
+    .string()
+    .transform((value) => {
+      const parsed = bound.safeParse(value);
+      return parsed.success ? parsed.data : null;
+    })
+    .nullable();
+}
+
+/**
  * What the on-device parser suggested, recorded verbatim for the §7.3
  * accuracy measurement. Absent and null both mean "the parser found
  * nothing" - the client sends what it has. Deliberately not strict about
@@ -184,22 +281,22 @@ export const receiptImageSchema = z.strictObject({
  * one, and rewriting what they reported would corrupt the §7.3 measurement.
  */
 export const ocrSuggestionsSchema = z.strictObject({
-  vendor: vendor.optional(),
-  purchasedAt: isoDateSchema.nullable().optional(),
-  totalCents: centsSchema.nullable().optional(),
-  hstCents: hstCents.optional(),
-  subtotalCents: subtotalCents.optional(),
+  vendor: suggestedText(vendor).optional(),
+  purchasedAt: suggestedText(isoDateSchema).optional(),
+  totalCents: suggestedCents.optional(),
+  hstCents: suggestedCents.optional(),
+  subtotalCents: suggestedCents.optional(),
   // An amount like the other three, so it gets a suggestion field on the
   // same terms (2026-08-28: the on-device parser will start reporting one).
-  tipCents: centsSchema.nullable().optional(),
+  tipCents: suggestedCents.optional(),
   // Prompt v5's two new suggestion fields (2026-09-01). Optional like every
   // key here, which is what keeps the shipped iOS build working unchanged:
   // 1.0 (4) has no heuristic for either and sends neither, and a stored
   // record that omits them says the same thing a null does - the parser of
   // the day found nothing.
-  otherFeesCents: centsSchema.nullable().optional(),
-  paymentMethod: paymentMethod.optional(),
-  vendorTaxNumber: vendorTaxNumber.optional(),
+  otherFeesCents: suggestedCents.optional(),
+  paymentMethod: suggestedText(paymentMethod).optional(),
+  vendorTaxNumber: suggestedText(vendorTaxNumber).optional(),
 });
 
 /**
@@ -219,7 +316,7 @@ export const ocrSuggestionsSchema = z.strictObject({
  * request anyone means to make.
  */
 export const parseOcrTextSchema = z.strictObject({
-  ocrRawText: z.string().min(1).max(100_000),
+  ocrRawText: freeText().min(1).max(100_000),
   capturedAt,
 });
 
@@ -334,9 +431,9 @@ export const receiptFilterQuerySchema = z.strictObject({
   from: isoDateSchema.optional(),
   to: isoDateSchema.optional(),
   status: receiptStatusSchema.optional(),
-  category: z.string().min(1).max(200).optional(),
-  paymentMethod: z.string().min(1).max(100).optional(),
-  q: z.string().min(1).max(200).optional(),
+  category: freeText().min(1).max(200).optional(),
+  paymentMethod: freeText().min(1).max(100).optional(),
+  q: freeText().min(1).max(200).optional(),
 });
 
 /**
@@ -366,6 +463,10 @@ export const listReceiptsQuerySchema = receiptFilterQuerySchema.extend({
  * the string Postgres compares it as (a date, an ISO timestamp, an integer's
  * digits, a vendor name); `sortKeyNull` records that the row had none, since
  * null-keyed rows sort last and are compared by the tiebreak alone.
+ *
+ * `createdAt` is written at the column's full microsecond precision - see
+ * `encodeListCursor` in routes/receipts.ts. The schema takes any sub-second
+ * precision, which is what keeps a millisecond cursor already in flight valid.
  */
 /**
  * What a cursor's `sortKey` must look like for each sort, because the route
@@ -377,7 +478,7 @@ export const listReceiptsQuerySchema = receiptFilterQuerySchema.extend({
  */
 const cursorSortKeyFormats = {
   purchasedAt: isoDateSchema,
-  capturedAt: z.iso.datetime({ offset: true }),
+  capturedAt: isoDateTimeSchema,
   // Digits first so `Number()` cannot quietly accept "1e9", " 12" or "0x10",
   // then the same storable-cents range every money field is held to.
   total: z
@@ -385,7 +486,15 @@ const cursorSortKeyFormats = {
     .regex(/^-?\d+$/, { error: "must be an integer number of cents" })
     .transform(Number)
     .pipe(centsSchema),
-  vendor: vendorText,
+  // Not `vendorText`: this checks the key and the route then binds the string
+  // as it arrived, so a stripping schema would pass a NUL straight through to
+  // Postgres. No stored vendor can hold one, so a key that does is not a
+  // position in any list, and it is refused here like any other forged cursor.
+  vendor: z
+    .string()
+    .min(1)
+    .max(200)
+    .refine((value) => !value.includes(NUL)),
 } as const satisfies Record<z.infer<typeof listSortSchema>, z.ZodType>;
 
 export const listCursorSchema = z
@@ -394,7 +503,7 @@ export const listCursorSchema = z
     order: listOrderSchema,
     sortKeyNull: z.boolean(),
     sortKey: z.string().nullable(),
-    createdAt: z.iso.datetime({ offset: true }),
+    createdAt: isoDateTimeSchema,
     id: z.uuid(),
   })
   .superRefine((cursor, ctx) => {
@@ -502,8 +611,8 @@ export type ReceiptOptionApiField = z.infer<typeof receiptOptionFieldSchema>;
  */
 function renameOptionSchema(maxLength: number) {
   return z.strictObject({
-    from: z.string().min(1).max(maxLength),
-    to: z.string().trim().min(1).max(maxLength),
+    from: freeText().min(1).max(maxLength),
+    to: freeText().trim().min(1).max(maxLength),
   });
 }
 
@@ -520,7 +629,7 @@ export const renameReceiptOptionSchemas = {
  * bounded but never trimmed, exactly like `from` above.
  */
 export const deleteReceiptOptionQuerySchema = z.strictObject({
-  value: z.string().min(1).max(200),
+  value: freeText().min(1).max(200),
 });
 
 /**
@@ -545,7 +654,7 @@ export const exportRequestSchema = z.union([
 
 export const updateMeSchema = z
   .strictObject({
-    displayName: z.string().min(1).max(200).nullable().optional(),
+    displayName: nullableLabel(200).optional(),
     fiscalYearEndMonth: z.number().int().min(1).max(12).optional(),
     fiscalYearEndDay: z.number().int().min(1).max(31).optional(),
   })
@@ -615,7 +724,7 @@ export const userEventSchema = z.strictObject({
   action: z.enum(EVENT_ACTIONS),
   occurredAt: eventOccurredAt,
   client: z.enum(EVENT_CLIENTS),
-  appVersion: z.string().min(1).max(40).optional(),
+  appVersion: freeText().min(1).max(40).optional(),
   field: z.enum(EVENT_FIELDS).optional(),
   // No foreign key on the stored column (schema.ts) and none of the
   // validation here either, beyond "is a uuid": a receipt id naming a

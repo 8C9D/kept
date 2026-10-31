@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import {
+  AppleKeysUnavailableError,
   AppleVerificationError,
   type AppleIdentityVerifier,
 } from "../auth/appleVerifier.js";
@@ -10,6 +11,7 @@ import { users } from "../db/schema.js";
 import { ApiError } from "../http/errors.js";
 import { appleSignInSchema } from "../http/schemas.js";
 import { parseOrThrow, readJsonBody } from "../http/validate.js";
+import { errorSummary } from "../observability/errorSummary.js";
 
 interface AuthRouteDependencies {
   db: Db;
@@ -37,6 +39,22 @@ export function authRoutes(deps: AuthRouteDependencies): Hono {
           401,
           "invalid_identity_token",
           "Apple identity token failed verification",
+        );
+      }
+      if (error instanceof AppleKeysUnavailableError) {
+        // Logged here because this is the only trace an outage leaves: unlike
+        // a bad token it is true of every sign-in at once and nobody's fault
+        // on the client. errorSummary carries the fetch failure and its cause,
+        // and the identity token is in neither - nothing about the request is
+        // passed to the log, deliberately.
+        console.error(
+          "Sign in with Apple is failing: could not fetch Apple's signing keys:",
+          errorSummary(error),
+        );
+        throw new ApiError(
+          503,
+          "apple_unavailable",
+          "Sign in with Apple can't be reached right now. Try again in a few minutes.",
         );
       }
       throw error;

@@ -1,4 +1,9 @@
-import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
+import {
+  createRemoteJWKSet,
+  errors as joseErrors,
+  jwtVerify,
+  type JWTVerifyGetKey,
+} from "jose";
 
 /**
  * What a verified Sign in with Apple identity token tells us. `appleSub` is
@@ -11,7 +16,11 @@ export interface AppleIdentity {
 }
 
 export interface AppleIdentityVerifier {
-  /** Resolves for a valid token, throws AppleVerificationError otherwise. */
+  /**
+   * Resolves for a valid token. Throws AppleVerificationError when the TOKEN
+   * is the problem, and AppleKeysUnavailableError when the token could not be
+   * judged at all.
+   */
   verify(identityToken: string): Promise<AppleIdentity>;
 }
 
@@ -19,6 +28,22 @@ export class AppleVerificationError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = "AppleVerificationError";
+  }
+}
+
+/**
+ * Apple's signing keys could not be obtained, so nothing is known about the
+ * token either way - an outage at Apple, or this machine's egress failing.
+ *
+ * Its own class, because the two failures want opposite handling. A bad token
+ * is the caller's and is answered 401 in silence; this one is ours, is true of
+ * every sign-in at once, and answered as a 401 it reads as "your token is bad"
+ * to all of them with nothing in the log to say otherwise.
+ */
+export class AppleKeysUnavailableError extends Error {
+  constructor(options: { cause: unknown }) {
+    super("Apple's signing keys could not be fetched", options);
+    this.name = "AppleKeysUnavailableError";
   }
 }
 
@@ -69,7 +94,7 @@ export async function verifyAppleIdentityToken(
   assertClientIds(clientIds);
   let payload;
   try {
-    ({ payload } = await jwtVerify(identityToken, keys, {
+    ({ payload } = await jwtVerify(identityToken, reportingKeyFailures(keys), {
       issuer: APPLE_ISSUER,
       // jose accepts the token if its audience matches ANY entry; a token
       // minted for neither client is rejected.
@@ -77,6 +102,9 @@ export async function verifyAppleIdentityToken(
       algorithms: ["RS256"],
     }));
   } catch (error) {
+    if (error instanceof AppleKeysUnavailableError) {
+      throw error;
+    }
     throw new AppleVerificationError(
       "Apple identity token failed verification",
       { cause: error },
@@ -90,6 +118,36 @@ export async function verifyAppleIdentityToken(
   return {
     appleSub: payload.sub,
     email: typeof payload.email === "string" ? payload.email : null,
+  };
+}
+
+/**
+ * Sorts a key-source failure from a token failure by WHERE it happened rather
+ * than by a list of error classes. jose throws its own `JWKSTimeout` for a
+ * timeout, a bare `JOSEError` for a non-200 or an unparseable body, and lets
+ * `fetch`'s TypeError straight through for a network failure - so naming them
+ * would be enumerating an implementation, and the next one would quietly read
+ * as a bad token. Anything the key source throws means the keys were not
+ * obtained, except the two answers that are statements ABOUT this token: the
+ * key set arrived, and no key in it (or more than one) matches what the token
+ * asks for. A forged `kid` lands there, and that stays a 401.
+ *
+ * Everything else `jwtVerify` rejects - signature, issuer, audience, expiry -
+ * happens outside this function and keeps meaning a bad token.
+ */
+function reportingKeyFailures(keys: JWTVerifyGetKey): JWTVerifyGetKey {
+  return async (protectedHeader, token) => {
+    try {
+      return await keys(protectedHeader, token);
+    } catch (error) {
+      if (
+        error instanceof joseErrors.JWKSNoMatchingKey ||
+        error instanceof joseErrors.JWKSMultipleMatchingKeys
+      ) {
+        throw error;
+      }
+      throw new AppleKeysUnavailableError({ cause: error });
+    }
   };
 }
 

@@ -43,15 +43,18 @@ async function create(
   return (await response.json()) as { id: string; status: string };
 }
 
+interface SummaryFigures {
+  count: number;
+  subtotalCents: number;
+  hstCents: number;
+  tipCents: number;
+  otherFeesCents: number;
+  totalCents: number;
+}
+
 interface SummaryResponse {
-  confirmed: {
-    count: number;
-    subtotalCents: number;
-    hstCents: number;
-    tipCents: number;
-    otherFeesCents: number;
-    totalCents: number;
-  };
+  confirmed: SummaryFigures;
+  byCurrency: (SummaryFigures & { currency: string })[];
   pendingCount: number;
 }
 
@@ -239,6 +242,7 @@ describe("GET /api/receipts/summary", () => {
         otherFeesCents: 0,
         totalCents: 0,
       },
+      byCurrency: [],
       pendingCount: 0,
     });
   });
@@ -270,5 +274,178 @@ describe("GET /api/receipts/summary", () => {
   it("refuses without a session", async () => {
     const response = await summary(null);
     expect(response.status).toBe(401);
+  });
+});
+
+describe("GET /api/receipts/summary by currency", () => {
+  const confirmedIn = (
+    currency: string,
+    totalCents: number,
+    extra: Record<string, unknown> = {},
+  ) =>
+    create(token, userId, {
+      currency,
+      status: "confirmed",
+      subtotalCents: null,
+      hstCents: null,
+      totalCents,
+      ...extra,
+    });
+
+  const read = async (query = ""): Promise<SummaryResponse> =>
+    (await (await summary(token, query)).json()) as SummaryResponse;
+
+  it("reports each currency apart, CAD first and the rest alphabetical", async () => {
+    await confirmedIn("USD", 5000, { tipCents: 100 });
+    await confirmedIn("EUR", 700);
+    await confirmedIn("CAD", 11300, { subtotalCents: 10000, hstCents: 1300 });
+    await confirmedIn("USD", 2500);
+    await confirmedIn("AUD", 900);
+
+    const body = await read();
+
+    expect(body.byCurrency).toEqual([
+      {
+        currency: "CAD",
+        count: 1,
+        subtotalCents: 10000,
+        hstCents: 1300,
+        tipCents: 0,
+        otherFeesCents: 0,
+        totalCents: 11300,
+      },
+      {
+        currency: "AUD",
+        count: 1,
+        subtotalCents: 0,
+        hstCents: 0,
+        tipCents: 0,
+        otherFeesCents: 0,
+        totalCents: 900,
+      },
+      {
+        currency: "EUR",
+        count: 1,
+        subtotalCents: 0,
+        hstCents: 0,
+        tipCents: 0,
+        otherFeesCents: 0,
+        totalCents: 700,
+      },
+      {
+        currency: "USD",
+        count: 2,
+        subtotalCents: 0,
+        hstCents: 0,
+        tipCents: 100,
+        otherFeesCents: 0,
+        totalCents: 7500,
+      },
+    ]);
+  });
+
+  it("keeps `confirmed` for shipped clients, narrowed to CAD so its label is true", async () => {
+    await confirmedIn("CAD", 11300, { subtotalCents: 10000, hstCents: 1300 });
+    await confirmedIn("USD", 5000, { hstCents: 999 });
+
+    const body = await read();
+
+    // Not 16300: shipped iOS prints this figure labelled "CAD".
+    expect(body.confirmed).toEqual({
+      count: 1,
+      subtotalCents: 10000,
+      hstCents: 1300,
+      tipCents: 0,
+      otherFeesCents: 0,
+      totalCents: 11300,
+    });
+  });
+
+  it("answers `confirmed` zeros when only another currency matched, with the money in byCurrency", async () => {
+    await confirmedIn("USD", 5000);
+
+    const body = await read();
+
+    expect(body.confirmed).toEqual({
+      count: 0,
+      subtotalCents: 0,
+      hstCents: 0,
+      tipCents: 0,
+      otherFeesCents: 0,
+      totalCents: 0,
+    });
+    expect(body.byCurrency.map((entry) => entry.currency)).toEqual(["USD"]);
+  });
+
+  it("counts pending rows across every currency and sums none of them", async () => {
+    await confirmedIn("CAD", 1000);
+    await create(token, userId, { currency: "USD", totalCents: 5000 });
+    await create(token, userId, { currency: "EUR", totalCents: 6000 });
+    await create(token, userId, { currency: "CAD", totalCents: 7000 });
+
+    const body = await read();
+
+    expect(body.pendingCount).toBe(3);
+    // A currency seen only on pending rows has nothing confirmed to report.
+    expect(body.byCurrency.map((entry) => entry.currency)).toEqual(["CAD"]);
+    expect(body.confirmed.totalCents).toBe(1000);
+  });
+
+  it("applies the same filter to every currency", async () => {
+    await confirmedIn("USD", 5000, { purchasedAt: "2026-01-10" });
+    await confirmedIn("USD", 2500, { purchasedAt: "2026-06-10" });
+    await confirmedIn("CAD", 1000, { purchasedAt: "2026-06-10" });
+
+    const body = await read("?from=2026-06-01");
+
+    expect(
+      body.byCurrency.map(({ currency, totalCents }) => ({
+        currency,
+        totalCents,
+      })),
+    ).toEqual([
+      { currency: "CAD", totalCents: 1000 },
+      { currency: "USD", totalCents: 2500 },
+    ]);
+  });
+
+  it("sums past 2^31 as a JSON number, where the old ::int cast answered 500", async () => {
+    await confirmedIn("CAD", 2_000_000_000, { hstCents: 2_000_000_000 });
+    await confirmedIn("CAD", 2_000_000_000, { hstCents: 2_000_000_000 });
+    await confirmedIn("USD", 2_100_000_000);
+    await confirmedIn("USD", 2_100_000_000);
+
+    const response = await summary(token);
+    expect(response.status).toBe(200);
+    const raw = await response.text();
+    // Numbers on the wire, not the strings the driver hands back for bigint.
+    expect(raw).toContain('"totalCents":4000000000');
+    expect(raw).toContain('"totalCents":4200000000');
+
+    const body = JSON.parse(raw) as SummaryResponse;
+    expect(body.confirmed.totalCents).toBe(4_000_000_000);
+    expect(body.confirmed.hstCents).toBe(4_000_000_000);
+    expect(body.byCurrency[1]?.totalCents).toBe(4_200_000_000);
+  });
+
+  it("sums negative refunds as well", async () => {
+    await confirmedIn("CAD", 5000);
+    await confirmedIn("CAD", -2000);
+
+    expect((await read()).confirmed.totalCents).toBe(3000);
+  });
+
+  it("never reports another user's currency", async () => {
+    const other = await harness.signIn("summary-currency-other");
+    await create(other.token, other.userId, {
+      currency: "JPY",
+      status: "confirmed",
+      totalCents: 99900,
+    });
+    await confirmedIn("CAD", 1000);
+
+    expect((await read()).byCurrency.map((entry) => entry.currency)).toEqual([
+      "CAD",
+    ]);
   });
 });

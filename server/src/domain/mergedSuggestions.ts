@@ -1,6 +1,9 @@
 import type { OcrFieldSuggestions, OcrSource } from "./ocrSuggestions.js";
 import type { ReviewedField } from "./reviewedFields.js";
-import { validateSuggestedAmounts } from "./suggestedAmounts.js";
+import {
+  validateSuggestedAmounts,
+  type WithheldAmountField,
+} from "./suggestedAmounts.js";
 
 /**
  * The field-level merge of the two parse paths (spec §7.3, ruled Aug 8,
@@ -260,6 +263,35 @@ export function mergeSuggestions(
   // already been through is never withheld a second time for failing a sum
   // it is no longer part of.
   return withholdImpossibleAmounts(withholdReviewed(merged, context));
+}
+
+/**
+ * Which amounts a merge served `withheld: true`, for the one caller that has
+ * to act on the flag rather than render it: the PATCH that promotes a pending
+ * receipt (routes/receipts.ts).
+ *
+ * ⚠ It reads the merge's answer instead of re-asking the arithmetic rule, and
+ * that is the point. Whether a field is withheld depends on the reviewed-field
+ * suppression and the pdf-text fallthrough having already run, so a second
+ * call to `validateSuggestedAmounts` over the raw records could disagree with
+ * what the person was shown - the guard would then be judging a screen nobody
+ * saw. Null in, nothing withheld out: a receipt neither parser ever read has
+ * no suggestions to decline.
+ */
+export function withheldAmountFields(
+  merged: MergedSuggestions | null,
+): WithheldAmountField[] {
+  if (merged === null) {
+    return [];
+  }
+  const withheld: WithheldAmountField[] = [];
+  if (merged.totalCents.withheld) {
+    withheld.push("totalCents");
+  }
+  if (merged.subtotalCents.withheld) {
+    withheld.push("subtotalCents");
+  }
+  return withheld;
 }
 
 /**

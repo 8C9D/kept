@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   mergeSuggestions,
+  withheldAmountFields,
   type SuggestionContext,
 } from "../../src/domain/mergedSuggestions.js";
 import type { OcrFieldSuggestions } from "../../src/domain/ocrSuggestions.js";
@@ -935,5 +936,67 @@ describe("mergeSuggestions", () => {
         withheld: false,
       });
     });
+  });
+});
+
+/**
+ * The PATCH confirm guard's question. These read the merge's own answer, which
+ * is the design: the guard must judge what a client was served, not re-run the
+ * arithmetic over the raw records and possibly disagree.
+ */
+describe("withheldAmountFields", () => {
+  const pending: SuggestionContext = {
+    status: "pending",
+    reviewedFields: [],
+    ocrSource: null,
+  };
+  // A total below its own parts, with an HST that corroborates the subtotal.
+  const totalMisread = ocr({
+    subtotalCents: 21160,
+    hstCents: 734,
+    tipCents: null,
+    totalCents: 850,
+  });
+  // The same, with an HST no subtotal could carry.
+  const nothingToTrust = ocr({
+    subtotalCents: 2000,
+    hstCents: 1000,
+    tipCents: null,
+    totalCents: 850,
+  });
+
+  it("is empty when neither parser ever saw the receipt", () => {
+    expect(withheldAmountFields(mergeSuggestions(null, null, pending))).toEqual(
+      [],
+    );
+  });
+
+  it("is empty for a set that adds up", () => {
+    expect(
+      withheldAmountFields(mergeSuggestions(ocr(), null, pending)),
+    ).toEqual([]);
+  });
+
+  it("names the total alone when the HST corroborates the subtotal", () => {
+    expect(
+      withheldAmountFields(mergeSuggestions(totalMisread, null, pending)),
+    ).toEqual(["totalCents"]);
+  });
+
+  it("names both when nothing is left to trust", () => {
+    expect(
+      withheldAmountFields(mergeSuggestions(nothingToTrust, null, pending)),
+    ).toEqual(["totalCents", "subtotalCents"]);
+  });
+
+  it("does not name a field a person already reviewed: it is absent, not withheld", () => {
+    expect(
+      withheldAmountFields(
+        mergeSuggestions(totalMisread, null, {
+          ...pending,
+          reviewedFields: ["totalCents"],
+        }),
+      ),
+    ).toEqual([]);
   });
 });

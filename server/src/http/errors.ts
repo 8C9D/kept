@@ -6,12 +6,20 @@ import { errorSummary } from "../observability/errorSummary.js";
  * The one error shape every route uses: throw an ApiError anywhere in a
  * handler and the app-level error handler renders it. One style, no
  * per-route variations.
+ *
+ * `extra` is for the rare error a client can act on beyond reading it -
+ * `existingReceiptId` on a create's `duplicate_image` is the case that needed
+ * it. Its keys are rendered beside `code` and `message` and can never replace
+ * them, so every client's decoding of those two stays true. Whatever goes in
+ * here reaches the wire verbatim: it is response data, chosen by the throwing
+ * route, and it must already be scoped to the session user.
  */
 export class ApiError extends Error {
   constructor(
     readonly status: ContentfulStatusCode,
     readonly code: string,
     message: string,
+    readonly extra?: Readonly<Record<string, unknown>>,
   ) {
     super(message);
     this.name = "ApiError";
@@ -34,7 +42,7 @@ export function unauthorizedError(): ApiError {
 export function renderError(error: unknown, c: Context): Response {
   if (error instanceof ApiError) {
     return c.json(
-      { error: { code: error.code, message: error.message } },
+      { error: { ...error.extra, code: error.code, message: error.message } },
       error.status,
     );
   }

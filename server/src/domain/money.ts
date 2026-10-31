@@ -32,6 +32,24 @@ export const MAX_STORABLE_CENTS = 2_147_483_647;
 export const MIN_STORABLE_CENTS = -2_147_483_648;
 
 /**
+ * A `sum()` of money columns, as the Postgres driver hands it back: `bigint`
+ * arrives as a string, because a JavaScript number cannot hold all of it.
+ *
+ * Deliberately not `cents()` above and not a `Cents`: an aggregate is not a
+ * storable amount, and a year of receipts is entitled to pass int4's ceiling
+ * that one receipt is not. The bound here is the one that matters for a sum -
+ * past 2^53 a number stops being able to say every cent, and rounding a tax
+ * figure quietly is the one thing this must never do, so it fails instead.
+ */
+export function summedCents(value: string): number {
+  const sum = Number(value);
+  if (!Number.isSafeInteger(sum)) {
+    throw new InvalidMoneyError(value, "Summed money is outside the safe integer range");
+  }
+  return sum;
+}
+
+/**
  * Negative values are allowed: a refund receipt is a real receipt.
  */
 export function cents(value: number): Cents {

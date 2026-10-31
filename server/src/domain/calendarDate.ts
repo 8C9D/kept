@@ -31,6 +31,12 @@ export function isValidCalendarDate(date: CalendarDate): boolean {
     Number.isInteger(date.year) &&
     Number.isInteger(date.month) &&
     Number.isInteger(date.day) &&
+    // Year 0000 is four well-formed digits naming a year that does not exist:
+    // the calendar Postgres stores goes straight from 1 BC to AD 1, so
+    // `'0000-01-01'::date` is a refused statement. Left to the database that
+    // refusal is a 500 on what is simply a bad date, and on a create it lands
+    // after the image has already been uploaded.
+    date.year >= 1 &&
     date.month >= 1 &&
     date.month <= 12 &&
     date.day >= 1 &&

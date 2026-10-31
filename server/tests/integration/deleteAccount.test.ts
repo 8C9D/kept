@@ -160,6 +160,109 @@ describe("DELETE /api/me (account deletion)", () => {
     expect(harness.storage.objects.size).toBe(0);
   });
 
+  it("removes objects no row ever named: the upload whose create got a 409", async () => {
+    // The promise this pins is spec §6's "every stored object". The image is
+    // PUT to its presigned URL before the receipt exists, so a create refused
+    // as a duplicate leaves bytes under the prefix with no row to name them.
+    const named = await captureReceipt(token, userId, "a".repeat(64));
+    const stranded = imageFor(userId, "a".repeat(64)).objectKey;
+    harness.storage.objects.set(stranded, IMAGE_BYTES);
+    const refused = await harness.request(
+      token,
+      "POST",
+      "/api/receipts",
+      receiptBody({
+        image: { objectKey: stranded, sha256: "a".repeat(64) },
+      }),
+    );
+    expect(refused.status).toBe(409);
+    const strandedExport = exportObjectKey(
+      userId,
+      "11111111-2222-4333-8444-555555555555",
+      "Receipts-2026.zip",
+    );
+    harness.storage.objects.set(strandedExport, IMAGE_BYTES);
+
+    const response = await harness.request(token, "DELETE", "/api/me");
+
+    expect(response.status).toBe(204);
+    expect(harness.storage.objects.has(named.objectKey)).toBe(false);
+    expect(harness.storage.objects.has(stranded)).toBe(false);
+    expect(harness.storage.objects.has(strandedExport)).toBe(false);
+    expect(harness.storage.objects.size).toBe(0);
+  });
+
+  it("lists only this account's prefixes, and a sibling id is not a prefix of it", async () => {
+    const other = await harness.signIn("surviving-lister", "Surviving Lister");
+    const theirs = await captureReceipt(
+      other.token,
+      other.userId,
+      "f".repeat(64),
+    );
+    const theirExport = await completedExport(other.userId);
+    // The character-prefix trap: a key beginning with this user's id without
+    // being inside its folder. Only the trailing slash keeps it out.
+    const lookalike = `${userId}0/2026/03/not-theirs.jpg`;
+    harness.storage.objects.set(lookalike, IMAGE_BYTES);
+
+    expect((await harness.request(token, "DELETE", "/api/me")).status).toBe(204);
+
+    expect(harness.storage.objects.has(theirs.objectKey)).toBe(true);
+    expect(harness.storage.objects.has(theirExport)).toBe(true);
+    expect(harness.storage.objects.has(lookalike)).toBe(true);
+  });
+
+  it("still deletes the account and the row-named objects when listing fails", async () => {
+    const named = await captureReceipt(token, userId, "a".repeat(64));
+    const stranded = imageFor(userId, "b".repeat(64)).objectKey;
+    harness.storage.objects.set(stranded, IMAGE_BYTES);
+
+    const originalListKeys = harness.storage.listKeys;
+    harness.storage.listKeys = async () => {
+      throw new Error("ListObjectsV2 is down");
+    };
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await harness.request(token, "DELETE", "/api/me");
+
+      expect(response.status).toBe(204);
+      expect(await harness.db.select().from(users)).toHaveLength(0);
+      // What the rows knew about still went...
+      expect(harness.storage.objects.has(named.objectKey)).toBe(false);
+      // ...what only a listing could have found is left, and that is stated
+      // loudly, once per prefix, with neither the user id nor a key in it.
+      expect(harness.storage.objects.has(stranded)).toBe(true);
+      const lines = logged.mock.calls
+        .map((call) => call.join(" "))
+        .filter((line) => line.includes("could not list"));
+      expect(lines).toHaveLength(2);
+      expect(lines.join("\n")).toContain("ListObjectsV2 is down");
+      expect(lines.join("\n")).not.toContain(userId);
+    } finally {
+      harness.storage.listKeys = originalListKeys;
+      logged.mockRestore();
+    }
+  });
+
+  it("does not count an object twice when a row and the listing both name it", async () => {
+    await captureReceipt(token, userId, "a".repeat(64));
+    const deletes: string[] = [];
+    const originalDelete = harness.storage.delete;
+    harness.storage.delete = async (objectKey) => {
+      deletes.push(objectKey);
+      return originalDelete(objectKey);
+    };
+    try {
+      expect((await harness.request(token, "DELETE", "/api/me")).status).toBe(
+        204,
+      );
+      expect(new Set(deletes).size).toBe(deletes.length);
+      expect(deletes).toHaveLength(1);
+    } finally {
+      harness.storage.delete = originalDelete;
+    }
+  });
+
   it("kills the session it was called with, without a token_version bump", async () => {
     expect(
       (await harness.request(token, "DELETE", "/api/me")).status,
