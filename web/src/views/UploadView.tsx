@@ -1,6 +1,13 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeptApi } from "../api.js";
-import { uploadOne, type UploadOutcome } from "../upload.js";
+import { LatestRequest } from "../requests.js";
+import {
+  settleQueuedFile,
+  uploadOne,
+  type QueuedFile,
+  type UploadOutcome,
+} from "../upload.js";
+import { useGuardedAction } from "../useGuardedAction.js";
 
 /**
  * Spec §6A consequence 2: the email backlog is a folder of PDFs on a
@@ -18,51 +25,87 @@ import { uploadOne, type UploadOutcome } from "../upload.js";
  * seconds and one that takes a minute.
  */
 
-interface QueuedFile {
-  name: string;
-  outcome: UploadOutcome | "uploading";
+export interface UploadQueueHandle {
+  queue: readonly QueuedFile[];
+  busy: boolean;
+  handleFiles: (files: File[]) => void;
 }
 
-export function UploadView({
-  api,
-  onChanged,
-}: {
-  api: KeptApi;
-  onChanged: () => void;
-}) {
-  const [queue, setQueue] = useState<QueuedFile[]>([]);
-  const [dragging, setDragging] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const fileInput = useRef<HTMLInputElement>(null);
+/**
+ * The batch and its results, held at the top of the app rather than in the
+ * screen below (2026-10), the same placement `useReceiptOptions` has and for
+ * a sharper reason: a backlog drop runs for minutes, people go and look at
+ * something else meanwhile, and App renders one view at a time. In the view,
+ * leaving unmounted the only record of what had failed while the loop kept
+ * running with nothing to report to - and coming back showed an empty screen
+ * that happily took a second batch alongside the first.
+ *
+ * Cleared with the session, so one person's filenames never outlive it, and
+ * a batch still running then stops at the next file: it holds the old
+ * session's `KeptApi`, and a sign-out should mean uploading stops.
+ */
+export function useUploadQueue(
+  api: KeptApi | null,
+  onChanged: () => void,
+): UploadQueueHandle {
+  const [queue, setQueue] = useState<readonly QueuedFile[]>([]);
+  const { busy, run } = useGuardedAction();
+  const nextId = useRef(0);
+  const session = useRef(new LatestRequest());
 
-  async function handleFiles(files: File[]) {
-    if (files.length === 0 || busy) {
-      return;
-    }
-    setBusy(true);
-    const startAt = queue.length;
-    setQueue((q) => [
-      ...q,
-      ...files.map((file) => ({ name: file.name, outcome: "uploading" as const })),
-    ]);
-    // One at a time, in the order dropped: parallel uploads would race the
-    // duplicate-image constraint on identical files within one drop, and a
-    // backlog import is not latency-sensitive.
-    for (const [index, file] of files.entries()) {
-      const outcome = await uploadOne(
-        api,
-        { name: file.name, type: file.type, bytes: () => file.arrayBuffer() },
-        new Date(),
-      );
-      setQueue((q) =>
-        q.map((entry, i) => (i === startAt + index ? { ...entry, outcome } : entry)),
-      );
-      if (outcome.state === "created") {
-        onChanged();
+  useEffect(() => {
+    session.current.begin();
+    setQueue([]);
+  }, [api]);
+
+  const handleFiles = useCallback(
+    (files: File[]) => {
+      if (api === null || files.length === 0) {
+        return;
       }
-    }
-    setBusy(false);
-  }
+      const ticket = session.current.current();
+      run(async () => {
+        const entries = files.map((file) => ({
+          id: (nextId.current += 1),
+          file,
+        }));
+        setQueue((q) => [
+          ...q,
+          ...entries.map(({ id, file }) => ({
+            id,
+            name: file.name,
+            outcome: "uploading" as const,
+          })),
+        ]);
+        // One at a time, in the order dropped: parallel uploads would race
+        // the duplicate-image constraint on identical files within one drop,
+        // and a backlog import is not latency-sensitive.
+        for (const { id, file } of entries) {
+          if (!session.current.isLatest(ticket)) {
+            return;
+          }
+          const outcome = await uploadOne(
+            api,
+            { name: file.name, type: file.type, bytes: () => file.arrayBuffer() },
+            new Date(),
+          );
+          setQueue((q) => settleQueuedFile(q, id, outcome));
+          if (outcome.state === "created") {
+            onChanged();
+          }
+        }
+      });
+    },
+    [api, onChanged, run],
+  );
+
+  return { queue, busy, handleFiles };
+}
+
+export function UploadView({ uploads }: { uploads: UploadQueueHandle }) {
+  const { queue, busy, handleFiles } = uploads;
+  const [dragging, setDragging] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   const created = queue.filter((f) => isOutcome(f, "created")).length;
 
@@ -88,7 +131,7 @@ export function UploadView({
         onDrop={(e) => {
           e.preventDefault();
           setDragging(false);
-          void handleFiles([...e.dataTransfer.files]);
+          handleFiles([...e.dataTransfer.files]);
         }}
       >
         <p>
@@ -109,7 +152,7 @@ export function UploadView({
           accept="image/jpeg,image/png,application/pdf"
           hidden
           onChange={(e) => {
-            void handleFiles([...(e.target.files ?? [])]);
+            handleFiles([...(e.target.files ?? [])]);
             e.target.value = "";
           }}
         />
@@ -121,8 +164,8 @@ export function UploadView({
             {created} of {queue.length} became receipts.
           </p>
           <ul className="upload-queue">
-            {queue.map((file, index) => (
-              <li key={index} className={outcomeClass(file)}>
+            {queue.map((file) => (
+              <li key={file.id} className={outcomeClass(file)}>
                 <span className="filename">{file.name}</span>
                 <span>{outcomeText(file)}</span>
               </li>

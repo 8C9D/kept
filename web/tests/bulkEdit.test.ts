@@ -1,16 +1,21 @@
 import { describe, expect, it } from "vitest";
+import { ApiError } from "../src/api.js";
 import {
   EMPTY_SELECTION,
   NO_TOTAL_REASON,
+  WITHHELD_AMOUNTS_REASON,
   allLoadedSelected,
   categoryPatch,
   confirmPatch,
+  describeBlocked,
+  inlineEditPatch,
   partitionConfirmable,
   paymentMethodPatch,
   runBatch,
   toggleRow,
   toggleSelectAll,
 } from "../src/bulkEdit.js";
+import type { MergedSuggestions, Receipt } from "../src/types.js";
 
 /**
  * Proposal #5, bulk edit on the web table
@@ -157,33 +162,198 @@ describe("runBatch - the batch runner", () => {
   });
 });
 
+/** What `partitionConfirmable` reads off a row. Pending, nothing withheld. */
+function row(
+  id: string,
+  totalCents: number | null,
+  overrides: Partial<Pick<Receipt, "status" | "suggestions">> = {},
+): Pick<Receipt, "id" | "totalCents" | "status" | "suggestions"> {
+  return { id, totalCents, status: "pending", suggestions: null, ...overrides };
+}
+
+function suggestions(overrides: Partial<MergedSuggestions>): MergedSuggestions {
+  return {
+    vendor: { value: null, source: null },
+    purchasedAt: { value: null, source: null, disagreement: false },
+    totalCents: { value: null, source: null },
+    hstCents: { value: null, source: null, disagreement: false },
+    subtotalCents: { value: null, source: null },
+    tipCents: { value: null, source: null },
+    ...overrides,
+  };
+}
+
+const WITHHELD = { value: null, source: null, withheld: true };
+
 describe("partitionConfirmable - the server's own total rule, checked client-side first", () => {
   it("blocks a row with no total and names the reason", () => {
     const { confirmable, blocked } = partitionConfirmable([
-      { id: "has-total", totalCents: 500 },
-      { id: "no-total", totalCents: null },
+      row("has-total", 500),
+      row("no-total", null),
     ]);
     expect(confirmable).toEqual(["has-total"]);
     expect(blocked).toEqual([{ id: "no-total", reason: NO_TOTAL_REASON }]);
   });
 
   it("a zero total is a real total, not an absence - confirmable", () => {
-    const { confirmable, blocked } = partitionConfirmable([
-      { id: "zero", totalCents: 0 },
-    ]);
+    const { confirmable, blocked } = partitionConfirmable([row("zero", 0)]);
     expect(confirmable).toEqual(["zero"]);
     expect(blocked).toEqual([]);
   });
 
   it("confirms everything when every selected row already has a total", () => {
-    const rows = [
-      { id: "a", totalCents: 100 },
-      { id: "b", totalCents: 200 },
-    ];
+    const rows = [row("a", 100), row("b", 200)];
     expect(partitionConfirmable(rows)).toEqual({
       confirmable: ["a", "b"],
       blocked: [],
     });
+  });
+
+  it("blocks a pending row with a withheld total even though the row holds one", () => {
+    // The Costco slip: $218.94 stored as $8.50, the merge refusing to serve
+    // it, and a bulk `{status: "confirmed"}` promoting the $8.50 anyway.
+    const { confirmable, blocked } = partitionConfirmable([
+      row("costco", 850, {
+        suggestions: suggestions({ totalCents: { ...WITHHELD } }),
+      }),
+      row("fine", 500),
+    ]);
+    expect(confirmable).toEqual(["fine"]);
+    expect(blocked).toEqual([{ id: "costco", reason: WITHHELD_AMOUNTS_REASON }]);
+  });
+
+  it("blocks on a withheld subtotal too, and on any other amount", () => {
+    for (const key of [
+      "subtotalCents",
+      "hstCents",
+      "tipCents",
+      "otherFeesCents",
+    ] as const) {
+      const { blocked } = partitionConfirmable([
+        row("r", 500, { suggestions: suggestions({ [key]: { ...WITHHELD } }) }),
+      ]);
+      expect(blocked).toEqual([{ id: "r", reason: WITHHELD_AMOUNTS_REASON }]);
+    }
+  });
+
+  it("the reason tells the person to open the receipt", () => {
+    expect(WITHHELD_AMOUNTS_REASON).toMatch(/open it/);
+  });
+
+  it("names the withheld reason when a row also has no total - it is the one with a remedy", () => {
+    const { blocked } = partitionConfirmable([
+      row("r", null, { suggestions: suggestions({ totalCents: { ...WITHHELD } }) }),
+    ]);
+    expect(blocked).toEqual([{ id: "r", reason: WITHHELD_AMOUNTS_REASON }]);
+  });
+
+  it("does not block a row whose flag is absent or false", () => {
+    const { confirmable } = partitionConfirmable([
+      row("absent", 500, { suggestions: suggestions({}) }),
+      row("false", 500, {
+        suggestions: suggestions({
+          totalCents: { value: 500, source: "heuristic", withheld: false },
+        }),
+      }),
+    ]);
+    expect(confirmable).toEqual(["absent", "false"]);
+  });
+
+  it("does not block an already-confirmed row - the server serves the flag on those too", () => {
+    // `withholdImpossibleAmounts` runs on every read regardless of status,
+    // and the 409 is only for pending -> confirmed: blocking here would
+    // report a failure for a receipt with nothing left to do.
+    const { confirmable, blocked } = partitionConfirmable([
+      row("done", 21894, {
+        status: "confirmed",
+        suggestions: suggestions({ totalCents: { ...WITHHELD } }),
+      }),
+    ]);
+    expect(confirmable).toEqual(["done"]);
+    expect(blocked).toEqual([]);
+  });
+});
+
+describe("a row the client could not see coming still fails as that row", () => {
+  it("surfaces amounts_need_review as the row's own failure and keeps going", async () => {
+    // The row's suggestions were loaded before the LLM sweep landed, so
+    // `partitionConfirmable` passed it and only the PATCH finds out.
+    const refusal = new ApiError(
+      409,
+      "amounts_need_review",
+      "Review the amounts on this receipt before confirming it.",
+    );
+    const result = await runBatch(["stale", "fine"], async (id) => {
+      if (id === "stale") {
+        throw refusal;
+      }
+    });
+    expect(result.succeeded).toEqual(["fine"]);
+    expect(result.failed).toEqual([{ id: "stale", reason: refusal.message }]);
+  });
+});
+
+describe("describeBlocked - the line beside the Confirm button", () => {
+  const noTotal = { id: "a", reason: NO_TOTAL_REASON };
+  const withheld = { id: "b", reason: WITHHELD_AMOUNTS_REASON };
+
+  it("states the count and the one reason", () => {
+    expect(describeBlocked([noTotal], 3)).toBe(
+      "1 of 3 selected will be skipped: 1 no total",
+    );
+    expect(describeBlocked([withheld], 3)).toBe(
+      "1 of 3 selected will be skipped: 1 to open - amounts withheld",
+    );
+  });
+
+  it("states both reasons, since they have different remedies", () => {
+    expect(describeBlocked([noTotal, withheld], 5)).toBe(
+      "2 of 5 selected will be skipped: 1 no total, 1 to open - amounts withheld",
+    );
+  });
+});
+
+describe("inlineEditPatch - what a table cell sends", () => {
+  it("on a pending row, adds the edited field to the reviewed set", () => {
+    // The defect: Total typed as 15.00 with no reviewedFields left the
+    // parser's $14.35 winning, and Confirm PATCHed 1435 over the 1500.
+    expect(
+      inlineEditPatch(
+        { status: "pending", reviewedFields: [] },
+        { totalCents: 1500 },
+      ),
+    ).toEqual({ totalCents: 1500, reviewedFields: ["totalCents"] });
+  });
+
+  it("unions rather than replaces - the PATCH replaces the stored set outright", () => {
+    expect(
+      inlineEditPatch(
+        { status: "pending", reviewedFields: ["vendor", "notes"] },
+        { hstCents: 165 },
+      ).reviewedFields,
+    ).toEqual(["vendor", "hstCents", "notes"]);
+  });
+
+  it("sends the same set in the same order whatever was edited first", () => {
+    expect(
+      inlineEditPatch(
+        { status: "pending", reviewedFields: ["totalCents"] },
+        { vendor: "Staples" },
+      ).reviewedFields,
+    ).toEqual(["vendor", "totalCents"]);
+  });
+
+  it("marks a field cleared to null as reviewed too - that is a human's value", () => {
+    expect(
+      inlineEditPatch({ status: "pending", reviewedFields: [] }, { vendor: null }),
+    ).toEqual({ vendor: null, reviewedFields: ["vendor"] });
+  });
+
+  it("on a confirmed row, sends the edit alone", () => {
+    const patch = { totalCents: 1500 };
+    expect(
+      inlineEditPatch({ status: "confirmed", reviewedFields: ["vendor"] }, patch),
+    ).toEqual(patch);
   });
 });
 

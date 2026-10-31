@@ -268,6 +268,27 @@ label > textarea {
 }
 .topbar .signout:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong); }
 
+/* Over the view, never instead of it: the point of this banner is that the
+   form underneath stays mounted, so it sticks to the top of a long form
+   rather than taking a modal's place in front of one. */
+.session-expired {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1rem;
+  padding: 0.6rem 1.5rem;
+  background: var(--danger-soft);
+  border-bottom: 1px solid var(--danger-line);
+  color: var(--danger);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.session-expired p { flex: 1 1 18rem; margin: 0; }
+.session-expired .dev-token { flex: 1 1 18rem; }
+
 main { padding: 1.25rem 1.5rem 3rem; max-width: 75rem; margin: 0 auto; }
 main > section > h2 { font-size: var(--fs-md); font-weight: 700; color: var(--ink); }
 
@@ -367,6 +388,16 @@ main > section > h2 { font-size: var(--fs-md); font-weight: 700; color: var(--in
 .bulk-bar input[list] { width: 10rem; }
 .bulk-confirm { display: flex; flex-direction: column; gap: 0.2rem; }
 .bulk-warning { font-size: var(--fs-2xs); color: var(--warning-ink); font-weight: 600; }
+/* Beside an amount that is not in the home currency - rendered only then, so
+   it is noticed. Under the box in a table cell, so the column stays aligned. */
+.currency-tag {
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--warning-ink);
+}
+table.receipts td .currency-tag { display: block; }
+.field-grid .currency-tag { margin-left: 0.4rem; }
 .bulk-scope-note {
   flex-basis: 100%;
   margin: 0.1rem 0 0;
@@ -673,7 +704,7 @@ table.export-jobs tbody tr:hover td { background: var(--stripe); }
 .export-status.failed { color: var(--danger); }
 .export-status.complete { color: var(--accent-ink); }
 .export-status.expired, .export-status.stale { color: var(--warning-ink); }
-.download-link {
+button.download-link {
   display: inline-block;
   font-weight: 700;
   font-size: var(--fs-xs);
@@ -684,7 +715,8 @@ table.export-jobs tbody tr:hover td { background: var(--stripe); }
   padding: 0.25rem 0.6rem;
   text-decoration: none;
 }
-.download-link:hover { background: var(--accent-line); }
+button.download-link { cursor: pointer; }
+button.download-link:hover:not(:disabled) { background: var(--accent-line); color: var(--accent-ink); }
 
 /* Manage values (2026-09-01) - three plain lists, an inline editor, and
    the same amber/danger families the rest of the app uses: the merge

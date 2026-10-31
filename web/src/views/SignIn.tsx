@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { KeptApi } from "../api.js";
+import { ApiError, KeptApi } from "../api.js";
 
 /**
  * Sign in with Apple for the web (spec §7A). Apple's JS drives a popup
@@ -41,6 +41,25 @@ export function SignIn({
 }: {
   onSignedIn: (token: string) => void;
 }) {
+  return (
+    <div className="signin">
+      <h1>Kept</h1>
+      <p>Sign in to see your receipts.</p>
+      <SignInControls onSignedIn={onSignedIn} />
+    </div>
+  );
+}
+
+/**
+ * The sign-in itself, without the page around it - the signed-out screen
+ * above, and the session-expired banner (App.tsx), which has to sign someone
+ * back in without unmounting the view underneath it.
+ */
+export function SignInControls({
+  onSignedIn,
+}: {
+  onSignedIn: (token: string) => void;
+}) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const appleReady = useRef<Promise<AppleIdAuth> | null>(null);
@@ -68,10 +87,7 @@ export function SignIn({
       );
       onSignedIn(signedIn.token);
     } catch (caught) {
-      // Apple's popup rejects with an object carrying `error` when the
-      // person closes it; that is a cancel, not a failure to report.
-      const detail =
-        caught instanceof Error ? caught.message : describeAppleError(caught);
+      const detail = describeSignInError(caught);
       if (detail !== null) {
         setError(detail);
       }
@@ -81,9 +97,7 @@ export function SignIn({
   }
 
   return (
-    <div className="signin">
-      <h1>Kept</h1>
-      <p>Sign in to see your receipts.</p>
+    <>
       {!import.meta.env.DEV && (
         <button className="primary" disabled={busy} onClick={() => void signInWithApple()}>
           Sign in with Apple
@@ -91,8 +105,25 @@ export function SignIn({
       )}
       {import.meta.env.DEV && <DevTokenEntry onSignedIn={onSignedIn} />}
       {error !== null && <p className="error">{error}</p>}
-    </div>
+    </>
   );
+}
+
+/**
+ * What a failed sign-in says, or null for a cancel. Apple's popup rejects
+ * with an object carrying `error` when the person closes it; that is not a
+ * failure to report.
+ *
+ * `apple_unavailable` is the server's 503 for Apple not answering (2026-10).
+ * Spelled out rather than left to the server's message because it is the one
+ * sign-in failure that says nothing about the person: they have done nothing
+ * wrong, and the useful thing to hear is that trying again later will work.
+ */
+export function describeSignInError(caught: unknown): string | null {
+  if (caught instanceof ApiError && caught.code === "apple_unavailable") {
+    return "Sign in with Apple isn't answering right now. Nothing is wrong with your account - try again in a few minutes.";
+  }
+  return caught instanceof Error ? caught.message : describeAppleError(caught);
 }
 
 /**

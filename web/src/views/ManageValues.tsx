@@ -4,6 +4,7 @@ import {
   OPTION_LISTS,
   deleteConfirmText,
   deleteResultMessage,
+  emptyListText,
   optionFieldNoun,
   renameResultMessage,
   validateRename,
@@ -117,6 +118,14 @@ export function ManageValuesView({
         rewrites it on every receipt that carries it. Removing one takes it
         off this list only: the receipts keep their text.
       </p>
+      {options.load.state === "failed" && (
+        <p className="error">
+          Your values could not be loaded: {options.load.detail}{" "}
+          <button className="link" onClick={options.reload}>
+            Try again
+          </button>
+        </p>
+      )}
       {error !== null && <p className="error">{error}</p>}
       {notice !== null && <p className="muted value-notice">{notice}</p>}
       {OPTION_LISTS.map((list) => (
@@ -124,6 +133,7 @@ export function ManageValuesView({
           key={list.field}
           list={list}
           values={options.values[list.key]}
+          emptyText={emptyListText(list, options.load)}
           busy={busy}
           editing={editing}
           draft={draft}
@@ -149,6 +159,7 @@ export function ManageValuesView({
 function ValueList({
   list,
   values,
+  emptyText,
   busy,
   editing,
   draft,
@@ -163,6 +174,7 @@ function ValueList({
 }: {
   list: OptionListSpec;
   values: readonly string[];
+  emptyText: string;
   busy: boolean;
   editing: { field: OptionField; from: string } | null;
   draft: string;
@@ -179,7 +191,7 @@ function ValueList({
     <div className="value-list">
       <h3>{list.title}</h3>
       {values.length === 0 ? (
-        <p className="muted">{list.empty}</p>
+        <p className="muted">{emptyText}</p>
       ) : (
         <ul>
           {values.map((value) => {

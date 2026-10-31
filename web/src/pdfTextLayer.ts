@@ -53,8 +53,12 @@ export async function extractPdfText(
     // silently start mattering to an upload.
     disableFontFace: true,
   });
-  const document = await loading.promise;
   try {
+    // Inside the `try`, and that is not cosmetic: this is the await that
+    // rejects for a corrupt or password-protected file, and it was above it,
+    // so exactly the files pdf.js could not open skipped the `destroy()`
+    // below and left a worker running per file.
+    const document = await loading.promise;
     const pages: PdfTextItem[][] = [];
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);

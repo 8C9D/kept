@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeptApi } from "./api.js";
+import { LatestRequest } from "./requests.js";
 import type { ReceiptOptions } from "./types.js";
 
 /**
@@ -53,9 +54,23 @@ export function introducesNewValue(
   );
 }
 
+/** Where the lists stand, for the one screen whose subject they are. */
+export type OptionsLoad =
+  | { state: "loading" }
+  | { state: "ready" }
+  | { state: "failed"; detail: string };
+
 export interface ReceiptOptionsHandle {
   /** The user's past values; empty until the first fetch answers. */
   values: ReceiptOptions;
+  /**
+   * How the latest fetch went (2026-10). The form's pickers ignore this: a
+   * refused fetch degrades them to plain free text with nothing for anyone
+   * to do about it. The manage-values screen cannot ignore it, because there
+   * the lists ARE the content, and an empty list is a statement about the
+   * person's data rather than a missing convenience.
+   */
+  load: OptionsLoad;
   /** Report a saved receipt: re-fetches only if it used a new value. */
   noteSaved: (saved: SavedValues) => void;
   /**
@@ -75,25 +90,39 @@ export interface ReceiptOptionsHandle {
  */
 export function useReceiptOptions(api: KeptApi | null): ReceiptOptionsHandle {
   const [values, setValues] = useState<ReceiptOptions>(NO_OPTIONS);
+  const [loadState, setLoadState] = useState<OptionsLoad>({ state: "loading" });
+  const requests = useRef(new LatestRequest());
 
   const load = useCallback(async () => {
     if (api === null) {
       return;
     }
+    const ticket = requests.current.begin();
+    setLoadState({ state: "loading" });
     try {
-      setValues(await api.receiptOptions());
-    } catch {
-      // Deliberately silent, and the only silent failure in this client:
-      // these are suggestions over an input that works without them, so a
-      // refused fetch degrades to plain free text with nothing for the
-      // person to do about it. The last good lists are kept - a failed
-      // refresh must not empty a working picker.
+      const loaded = await api.receiptOptions();
+      if (requests.current.isLatest(ticket)) {
+        setValues(loaded);
+        setLoadState({ state: "ready" });
+      }
+    } catch (caught) {
+      // The last good lists are kept - a failed refresh must not empty a
+      // working picker - and the failure goes in `load` for the one screen
+      // that has to say so (see its comment above).
+      if (requests.current.isLatest(ticket)) {
+        setLoadState({
+          state: "failed",
+          detail: caught instanceof Error ? caught.message : String(caught),
+        });
+      }
     }
   }, [api]);
 
   useEffect(() => {
+    // Cleared whichever way the session changed, so one person's values
+    // never sit on screen while the next person's are on their way.
+    setValues(NO_OPTIONS);
     if (api === null) {
-      setValues(NO_OPTIONS);
       return;
     }
     void load();
@@ -112,7 +141,7 @@ export function useReceiptOptions(api: KeptApi | null): ReceiptOptionsHandle {
     void load();
   }, [load]);
 
-  return { values, noteSaved, reload };
+  return { values, load: loadState, noteSaved, reload };
 }
 
 /**

@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import type { KeptApi } from "../api.js";
 import { duplicateLookupParams, lookupPossibleDuplicates } from "../duplicates.js";
 import { logEvent } from "../events.js";
+import { freeTextWrite } from "../freeText.js";
 import {
   MAX_STORABLE_CENTS,
   MIN_STORABLE_CENTS,
+  foreignCurrency,
   formatCents,
+  formatMoney,
   parseMoneyInput,
 } from "../money.js";
 import {
@@ -15,12 +18,17 @@ import {
   VENDOR_LIST_ID,
 } from "../options.js";
 import {
+  unionReviewedFields,
+  withheldAmount,
+  withheldAmountFields,
+} from "../suggestions.js";
+import {
   REVIEWED_FIELDS,
   type Receipt,
   type ReceiptOptions,
   type ReceiptPatch,
+  type ReceiptStatus,
   type ReviewedField,
-  type WithholdableAmountSuggestion,
 } from "../types.js";
 
 /**
@@ -160,20 +168,6 @@ export function draftFromPending(receipt: Receipt): ReceiptDraft {
 }
 
 /**
- * Whether the server declined to serve this amount because the set it
- * belongs to is arithmetically impossible (2026-09-01,
- * `domain/suggestedAmounts.ts`). One predicate, so the blanking rule above
- * and the note below read the flag the same way - including the `=== true`,
- * which is what makes an older response that carries no such key read as
- * "not withheld" rather than as anything else.
- */
-function withheldAmount(
-  suggestion: WithholdableAmountSuggestion | undefined,
-): boolean {
-  return suggestion?.withheld === true;
-}
-
-/**
  * Which prefill rule a receipt gets, in one place so no screen can pick the
  * wrong one. §7.1: "every read-only rendering of a pending receipt shows the
  * same merge" - a pending row's stored values are the capture-time heuristic
@@ -214,6 +208,38 @@ export function draftForDisplay(receipt: Receipt): ReceiptDraft {
   return receipt.status === "pending"
     ? draftFromPending(receipt)
     : draftFromReceipt(receipt);
+}
+
+/**
+ * Whether the person has changed something a save has not written yet -
+ * what "Open" on a duplicate has to warn about, since leaving this form
+ * drops the draft (2026-10).
+ *
+ * Reads `touched` and the value together, because neither alone means an
+ * unsaved edit. Touched alone over-warns: `touched` outlives a save, and it
+ * stays set on a field someone typed their way back to the original of.
+ * Value alone over-warns the other way: a vendor default lands in the draft
+ * and differs from the row without anybody having done anything, and warning
+ * about losing it would be warning about the form's own work.
+ *
+ * Compares against `draftForDisplay`, the one rule for what a box holds at
+ * rest, and money as cents - "1.65" over "$1.65" is not an edit, the same
+ * comparison `stillHoldsSuggestedValue` makes. An unparseable amount IS an
+ * edit: it is exactly the kind of half-typed thing that gets lost.
+ */
+export function hasUnsavedEdits(
+  receipt: Receipt,
+  draft: ReceiptDraft,
+  touched: ReadonlySet<keyof ReceiptDraft>,
+): boolean {
+  const saved = draftForDisplay(receipt);
+  return [...touched].some((key) => {
+    if (key !== "total" && !isComponentAmountField(key)) {
+      return draft[key] !== saved[key];
+    }
+    const current = tryParseMoney(draft[key]);
+    return current === INVALID_MONEY || current !== tryParseMoney(saved[key]);
+  });
 }
 
 export class DraftError extends Error {
@@ -259,9 +285,9 @@ function assignText(
   draft: string,
   current: string | null,
 ): void {
-  const next = draft.trim() === "" ? null : draft.trim();
-  if (next !== current) {
-    patch[key] = next;
+  const write = freeTextWrite(draft, current);
+  if (write !== undefined) {
+    patch[key] = write;
   }
 }
 
@@ -297,19 +323,18 @@ function assignMoney(
  * §10A.1's amber rule reads: touching a field is what "I have looked at
  * this" means everywhere else in this form, so it is what it means here.
  *
- * Ordered by `REVIEWED_FIELDS` rather than by insertion, so the same set
- * always serializes the same way - a request body that varies with click
- * order is one no test can pin.
+ * Ordered by `REVIEWED_FIELDS` rather than by insertion (`unionReviewedFields`),
+ * so the same set always serializes the same way - a request body that varies
+ * with click order is one no test can pin.
  */
 export function reviewedFieldsForSave(
   receipt: Receipt,
   touched: ReadonlySet<keyof ReceiptDraft>,
 ): ReviewedField[] {
-  const reviewed = new Set<ReviewedField>(receipt.reviewedFields);
-  for (const key of touched) {
-    reviewed.add(REVIEWED_FIELD_BY_DRAFT_KEY[key]);
-  }
-  return REVIEWED_FIELDS.filter((field) => reviewed.has(field));
+  return unionReviewedFields(
+    receipt.reviewedFields,
+    [...touched].map((key) => REVIEWED_FIELD_BY_DRAFT_KEY[key]),
+  );
 }
 
 /**
@@ -388,9 +413,25 @@ function limitPatchToFields(
  * field's value rather than only the reviewed ones. A confirm is the person
  * accepting the whole form as it stands - that is what constraint 2's
  * "a human confirming it" means - so what is on screen is what gets stored,
- * suggested values included. The reviewed set rides along harmlessly (a
- * confirmed receipt is served no suggestions at all, so nothing consumes
- * it) and is sent anyway so the two writes differ in as little as possible.
+ * suggested values included.
+ *
+ * ⚠ The reviewed set used to ride along harmlessly and is now load-bearing
+ * (2026-10): the server answers 409 `amounts_need_review` when an amount it
+ * withheld is not in this set. Typing in a withheld box reports it; the two
+ * other ways a value can reach one do not, and both are the normal path on
+ * the receipt the rule was written for, where the parts are right and only
+ * the total was misread:
+ *
+ * - "Fill" on `Total = subtotal + HST + tip + other fees`, whose own comment
+ *   explains why a fill is not reported reviewed.
+ * - The total following its components (`applyComponentEdit`), which is
+ *   marked touched but deliberately not reported.
+ *
+ * `filledWithheldAmounts` closes that without weakening the rule. A withheld
+ * box lands BLANK (`draftFromPending`), so anything in it at Confirm was put
+ * there by something this person did on this screen - which is a truthful
+ * thing to report, and is not true of a box still empty, which goes unreported
+ * and still gets the 409.
  */
 export function patchForConfirm(
   receipt: Receipt,
@@ -399,9 +440,22 @@ export function patchForConfirm(
 ): ReceiptPatch {
   return {
     ...patchFromDraft(receipt, draft),
-    reviewedFields: reviewedFieldsForSave(receipt, touched),
+    reviewedFields: reviewedFieldsForSave(
+      receipt,
+      new Set([...touched, ...filledWithheldAmounts(receipt, draft)]),
+    ),
     status: "confirmed",
   };
+}
+
+/** The withheld amounts whose box now holds something. */
+function filledWithheldAmounts(
+  receipt: Receipt,
+  draft: ReceiptDraft,
+): (keyof ReceiptDraft)[] {
+  return withheldAmountFields(receipt.suggestions)
+    .map((field) => DRAFT_KEY_BY_REVIEWED_FIELD[field])
+    .filter((key) => !blankAmountBox(draft[key]));
 }
 
 /**
@@ -1118,14 +1172,25 @@ export function vendorDefaultFill(
   draft: ReceiptDraft,
   touched: ReadonlySet<keyof ReceiptDraft>,
   vendorDefaults: ReceiptOptions["vendorDefaults"],
+  status: ReceiptStatus,
 ): VendorDefaultFill {
   const defaults = vendorDefaults[draft.vendor];
   if (defaults === undefined) {
     return { category: null, paymentMethod: null };
   }
+  // §7.2: a default fills a pending receipt, and "never ... a confirmed
+  // receipt's existing" value. A confirmed receipt with a BLANK category has
+  // an existing value too - the human confirmed it blank - and the patch
+  // diffs the whole draft on that path, so filling it here made any Save,
+  // with no edits at all, PATCH fields nobody touched. The one way back in
+  // is the person's own vendor edit, the "typed or corrected mid-session"
+  // case: changing who the receipt is from is them asking the question the
+  // default answers.
+  if (status !== "pending" && !touched.has("vendor")) {
+    return { category: null, paymentMethod: null };
+  }
   return {
-    // Never overwrites a value the person already typed, or a confirmed
-    // receipt's existing value - both read the same way here: the field is
+    // Never overwrites a value the person already typed - the field is
     // non-empty. Never re-applies once touched, even if touching emptied it
     // back out - touching a field is a permanent opt-out, same as §10A.1's
     // rule for every other suggestion source.
@@ -1871,6 +1936,9 @@ export function ReceiptFieldsForm({
   // cannot reach at all). Where both apply, the chip wins and the fill is
   // suppressed for HST alone; every other field's fill is untouched.
   const hstChip = hstSuggestionChip(draft, receipt.currency);
+  // The boxes below stay parseable, so they carry a plain "$"; on a foreign
+  // receipt this tag beside Total is what says which dollars they mean.
+  const currency = foreignCurrency(receipt.currency);
 
   /** Applies a derived-amount fill (the "Fill" button in `AmountDeriveNote`
    * below) - never wired to `text()`/`onFieldEdited`/`touched`, because
@@ -1939,7 +2007,12 @@ export function ReceiptFieldsForm({
   // instead, so the caller scores it at save time alongside every other
   // suggestion source rather than the instant the default lands.
   useEffect(() => {
-    const fill = vendorDefaultFill(draft, touched, options.vendorDefaults);
+    const fill = vendorDefaultFill(
+      draft,
+      touched,
+      options.vendorDefaults,
+      receipt.status,
+    );
     if (fill.category === null && fill.paymentMethod === null) {
       return;
     }
@@ -1960,12 +2033,21 @@ export function ReceiptFieldsForm({
     if (fill.paymentMethod !== null) {
       onSuggestionApplied?.("paymentMethod");
     }
-  }, [draft, touched, options.vendorDefaults, receipt.id, setDraft, onSuggestionApplied]);
+  }, [
+    draft,
+    touched,
+    options.vendorDefaults,
+    receipt.id,
+    receipt.status,
+    setDraft,
+    onSuggestionApplied,
+  ]);
 
   return (
     <div className="field-grid">
       <label className={["total-field", amber("total")].filter(Boolean).join(" ")}>
         Total
+        {currency !== null && <span className="currency-tag">{currency}</span>}
         <input
           className="money"
           value={draft.total}
@@ -1994,12 +2076,17 @@ export function ReceiptFieldsForm({
       <AmountDeriveNote
         offer={derived?.field === "total" ? derived : null}
         onApply={applyDerivedAmount}
+        disabled={disabled}
       />
       {/* Proposal #8: date + total (and vendor once typed) are what the
           lookup keys on, so this sits beside Total rather than any one of
           the three fields - "worth a look, not a blocker," the same
           register as the arithmetic warning above it. */}
-      <PossibleDuplicatesNote duplicates={duplicates} onOpenReceipt={onOpenReceipt} />
+      <PossibleDuplicatesNote
+        duplicates={duplicates}
+        unsavedEdits={hasUnsavedEdits(receipt, draft, touched)}
+        onOpenReceipt={onOpenReceipt}
+      />
       <label className={amber("purchasedAt")}>
         Purchase date
         <input
@@ -2050,10 +2137,11 @@ export function ReceiptFieldsForm({
           for a combined 13% before confirming.
         </p>
       )}
-      <AmountChipNote chip={hstChip} onApply={applyAmountChip} />
+      <AmountChipNote chip={hstChip} onApply={applyAmountChip} disabled={disabled} />
       <AmountDeriveNote
         offer={derived?.field === "hst" && hstChip === null ? derived : null}
         onApply={applyDerivedAmount}
+        disabled={disabled}
       />
       <label className={amber("subtotal")}>
         Subtotal
@@ -2068,6 +2156,7 @@ export function ReceiptFieldsForm({
       <AmountDeriveNote
         offer={derived?.field === "subtotal" ? derived : null}
         onApply={applyDerivedAmount}
+        disabled={disabled}
       />
       <label className={amber("tip")}>
         Tip
@@ -2086,6 +2175,7 @@ export function ReceiptFieldsForm({
       <AmountDeriveNote
         offer={derived?.field === "tip" ? derived : (reconciliation?.tip ?? null)}
         onApply={applyDerivedAmount}
+        disabled={disabled}
       />
       {/* Proposal #1 widened this field's amber source beyond the OCR merge
           (see `SuggestibleField`'s comment): no heuristic has ever
@@ -2105,6 +2195,7 @@ export function ReceiptFieldsForm({
       <AmountDeriveNote
         offer={derived?.field === "otherFees" ? derived : (reconciliation?.otherFees ?? null)}
         onApply={applyDerivedAmount}
+        disabled={disabled}
       />
       {/* Under the amounts block rather than beside the total: it can be
           about the total, the subtotal or both, and one line under the five
@@ -2166,9 +2257,11 @@ export function ReceiptFieldsForm({
 function AmountDeriveNote({
   offer,
   onApply,
+  disabled,
 }: {
   offer: DerivedAmount | null;
   onApply: (offer: DerivedAmount) => void;
+  disabled: boolean | undefined;
 }) {
   if (offer === null) {
     return null;
@@ -2176,7 +2269,12 @@ function AmountDeriveNote({
   return (
     <p className="warning derive-note">
       {offer.formula} = {formatCents(offer.cents)}
-      <button type="button" className="link" onClick={() => onApply(offer)}>
+      <button
+        type="button"
+        className="link"
+        disabled={disabled}
+        onClick={() => onApply(offer)}
+      >
         Fill
       </button>
     </p>
@@ -2194,9 +2292,11 @@ function AmountDeriveNote({
 function AmountChipNote({
   chip,
   onApply,
+  disabled,
 }: {
   chip: AmountChip | null;
   onApply: (chip: AmountChip) => void;
+  disabled: boolean | undefined;
 }) {
   if (chip === null) {
     return null;
@@ -2204,7 +2304,12 @@ function AmountChipNote({
   return (
     <p className="warning derive-note">
       {chip.formula} = {formatCents(chip.cents)}
-      <button type="button" className="link" onClick={() => onApply(chip)}>
+      <button
+        type="button"
+        className="link"
+        disabled={disabled}
+        onClick={() => onApply(chip)}
+      >
         Use this
       </button>
     </p>
@@ -2221,14 +2326,22 @@ function AmountChipNote({
  * flag" register as `arithmeticMismatch`'s own warning above), and adding
  * a separate dismiss would be a second way to make this go away that says
  * nothing about whether the person actually looked.
+ *
+ * "Open" leaves this form, so with `unsavedEdits` it asks first (2026-10) -
+ * inline and in two steps, the same as Delete, never `window.confirm`, which
+ * blocks the whole page. Comparing against a suspected duplicate is the
+ * moment someone is most likely to be halfway through typing this receipt.
  */
 function PossibleDuplicatesNote({
   duplicates,
+  unsavedEdits,
   onOpenReceipt,
 }: {
   duplicates: readonly Receipt[];
+  unsavedEdits: boolean;
   onOpenReceipt: (id: string) => void;
 }) {
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
   if (duplicates.length === 0) {
     return null;
   }
@@ -2244,15 +2357,35 @@ function PossibleDuplicatesNote({
           <li key={match.id}>
             <span>
               {match.purchasedAt} · {match.vendor ?? "no vendor"} ·{" "}
-              {formatCents(match.totalCents)}
+              {formatMoney(match.totalCents, match.currency)}
             </span>
-            <button
-              type="button"
-              className="link"
-              onClick={() => onOpenReceipt(match.id)}
-            >
-              Open
-            </button>
+            {confirmingId === match.id && unsavedEdits ? (
+              <span className="delete-confirm">
+                Opening it discards what you have changed here.
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => onOpenReceipt(match.id)}
+                >
+                  Discard and open
+                </button>
+                <button type="button" onClick={() => setConfirmingId(null)}>
+                  Stay here
+                </button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="link"
+                onClick={() =>
+                  unsavedEdits
+                    ? setConfirmingId(match.id)
+                    : onOpenReceipt(match.id)
+                }
+              >
+                Open
+              </button>
+            )}
           </li>
         ))}
       </ul>

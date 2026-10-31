@@ -6,6 +6,8 @@ import {
   allLoadedSelected,
   categoryPatch,
   confirmPatch,
+  describeBlocked,
+  inlineEditPatch,
   partitionConfirmable,
   paymentMethodPatch,
   runBatch,
@@ -16,7 +18,14 @@ import {
   type Selection,
 } from "../bulkEdit.js";
 import { logEvent } from "../events.js";
-import { formatCents, parseMoneyInput } from "../money.js";
+import { freeTextWrite } from "../freeText.js";
+import {
+  HOME_CURRENCY,
+  foreignCurrency,
+  formatCents,
+  formatMoney,
+  parseMoneyInput,
+} from "../money.js";
 import {
   CATEGORY_LIST_ID,
   PAYMENT_LIST_ID,
@@ -24,15 +33,19 @@ import {
   VENDOR_LIST_ID,
   type ReceiptOptionsHandle,
 } from "../options.js";
+import { LatestRequest, appendPage, serializeByKey } from "../requests.js";
+import { displayedTotalCents } from "../suggestions.js";
 import type {
   ListFilters,
   Receipt,
+  ReceiptCurrencySummary,
   ReceiptPatch,
   ReceiptSort,
   ReceiptStatus,
   ReceiptSummary,
   SortOrder,
 } from "../types.js";
+import { useGuardedAction } from "../useGuardedAction.js";
 
 /**
  * Which of list_searched / list_filtered / list_sorted (events.ts's
@@ -90,6 +103,15 @@ interface BulkOutcome {
  * page one by construction - a new `filters` object re-runs the first-page
  * effect with a null cursor, because a cursor encodes a position in one
  * particular ordered result set.
+ *
+ * A save is the opposite of a filter change, and this screen keeps the two
+ * apart (2026-10). A filter replaces the result set; a save changes one row
+ * of it and must leave the rest exactly where they are - the rows loaded past
+ * page one, the selection, whatever is half-typed in the next cell. So a
+ * save, single or bulk, updates its rows in place from the server's answer
+ * and refreshes the two figures it can have moved (`refreshCounts`), and
+ * never re-runs the first-page load. A consequence, accepted: a row edited
+ * out of the current filter or sort stays where it is until the next load.
  */
 export function ReceiptsTable({
   api,
@@ -97,17 +119,29 @@ export function ReceiptsTable({
   options,
   onOpen,
   onConfirmQueue,
-  onChanged,
 }: {
   api: KeptApi;
   dataVersion: number;
   options: ReceiptOptionsHandle;
   onOpen: (id: string) => void;
   onConfirmQueue: () => void;
-  onChanged: () => void;
 }) {
   const [filters, setFilters] = useState<ListFilters>({});
   const [rows, setRows] = useState<Receipt[]>([]);
+  // `rows` as of the newest response rather than the newest render, for the
+  // one reader that cannot wait for a render - see `saveField`.
+  const latestRows = useRef<Receipt[]>([]);
+  const commitRows = useCallback(
+    (next: (current: Receipt[]) => Receipt[]) => {
+      latestRows.current = next(latestRows.current);
+      setRows(latestRows.current);
+    },
+    [],
+  );
+  const replaceRow = (updated: Receipt) =>
+    commitRows((current) =>
+      current.map((row) => (row.id === updated.id ? updated : row)),
+    );
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -122,7 +156,19 @@ export function ReceiptsTable({
   // For classifyFilterChange below - the effect that fetches on `filters`
   // also fires on a `dataVersion` bump alone (another screen changed a
   // receipt), which must not be misread as a search/filter/sort action.
+  // Also the filter a background refresh reads: an edit's PATCH can come back
+  // after the filter changed, and it must refresh the figures for the filter
+  // on screen, not the one in force when the cell was blurred.
   const previousFilters = useRef(filters);
+  // Typing "cos" sends "c", "co" and "cos", and nothing makes the answers
+  // arrive in that order - a late "co" used to overwrite the "cos" rows, the
+  // cursor and the HST summary. One generation per kind of figure, since
+  // each can be refreshed on its own (`requests.ts`).
+  const listRequests = useRef(new LatestRequest());
+  const summaryRequests = useRef(new LatestRequest());
+  const pendingRequests = useRef(new LatestRequest());
+  const rowSaves = useRef(serializeByKey());
+  const { busy: loadingMore, run: runLoadMore } = useGuardedAction();
 
   // Bulk edit (proposal #5): selection is a set of receipt ids, always a
   // subset of what `rows` currently holds - see bulkEdit.ts for why that
@@ -135,6 +181,8 @@ export function ReceiptsTable({
 
   const loadFirstPage = useCallback(
     async (activeFilters: ListFilters) => {
+      const ticket = listRequests.current.begin();
+      const pendingTicket = pendingRequests.current.begin();
       setLoading(true);
       setError(null);
       // The cursor in hand belongs to the result set being replaced; the
@@ -143,22 +191,34 @@ export function ReceiptsTable({
       setNextCursor(null);
       try {
         const page = await api.listReceipts(activeFilters, null);
-        setRows(page.receipts);
-        setNextCursor(page.nextCursor);
-        setPendingCount(page.pendingCount);
+        if (listRequests.current.isLatest(ticket)) {
+          commitRows(() => page.receipts);
+          setNextCursor(page.nextCursor);
+        }
+        if (pendingRequests.current.isLatest(pendingTicket)) {
+          setPendingCount(page.pendingCount);
+        }
       } catch (caught) {
-        setError(caught instanceof Error ? caught.message : String(caught));
+        if (listRequests.current.isLatest(ticket)) {
+          setError(caught instanceof Error ? caught.message : String(caught));
+        }
       } finally {
-        setLoading(false);
+        if (listRequests.current.isLatest(ticket)) {
+          setLoading(false);
+        }
       }
     },
-    [api],
+    [api, commitRows],
   );
 
   const loadSummary = useCallback(
     async (activeFilters: ListFilters) => {
+      const ticket = summaryRequests.current.begin();
       try {
-        setSummary(await api.receiptSummary(activeFilters));
+        const loaded = await api.receiptSummary(activeFilters);
+        if (summaryRequests.current.isLatest(ticket)) {
+          setSummary(loaded);
+        }
       } catch {
         // Proposal #3's own instruction: a failed aggregate fetch must
         // never break the table sitting below it - degrade to no summary.
@@ -167,11 +227,36 @@ export function ReceiptsTable({
         // has since changed, which is actively misleading rather than
         // merely missing, and this row has nothing else on screen it could
         // silently disagree with the way a stale picker list would not.
-        setSummary(null);
+        if (summaryRequests.current.isLatest(ticket)) {
+          setSummary(null);
+        }
       }
     },
     [api],
   );
+
+  /**
+   * The two figures a save can move, and nothing else: the summary for the
+   * filter on screen, and the account-wide pending badge, which only the
+   * list route can answer (§5.2a: it has to come from the server, never a
+   * locally decremented guess). Both are background calls.
+   */
+  function refreshCounts() {
+    void loadSummary(previousFilters.current);
+    const ticket = pendingRequests.current.begin();
+    void api.pendingCount().then(
+      (count) => {
+        if (pendingRequests.current.isLatest(ticket)) {
+          setPendingCount(count);
+        }
+      },
+      () => {
+        // A badge over rows that are already right. The last count stays up
+        // until the next list load corrects it - the save itself landed, and
+        // a failed refresh of a figure beside it is not worth an error.
+      },
+    );
+  }
 
   useEffect(() => {
     // Logged for the action itself, not the fetch's outcome - there is no
@@ -183,10 +268,9 @@ export function ReceiptsTable({
     if (changed !== null) {
       logEvent({ action: changed });
       // A new search/filter/sort replaces `rows` with a different result
-      // set entirely - unlike the dataVersion-only refresh a bulk action or
-      // a single-row save triggers below, where the point is to keep the
-      // selection (narrowed to whatever failed) so a retry has something to
-      // retry.
+      // set entirely - unlike a bulk action or a single-row save, which
+      // update rows in place below, where the point is to keep the selection
+      // (narrowed to whatever failed) so a retry has something to retry.
       setSelected(EMPTY_SELECTION);
       setBulkOutcome(null);
     }
@@ -197,39 +281,67 @@ export function ReceiptsTable({
     void loadSummary(filters);
   }, [loadFirstPage, loadSummary, filters, dataVersion]);
 
+  /**
+   * Run through `runLoadMore`, which is what stops a double-click fetching
+   * one cursor twice and appending the same page twice. Ticketed against the
+   * current list without starting a new one: this extends the result set a
+   * first-page load produced, so a filter change that replaces that set
+   * discards this answer too.
+   */
   async function loadMore() {
     if (nextCursor === null) {
       return;
     }
+    const ticket = listRequests.current.current();
+    const pendingTicket = pendingRequests.current.begin();
     try {
       const page = await api.listReceipts(filters, nextCursor);
-      setRows((current) => [...current, ...page.receipts]);
-      setNextCursor(page.nextCursor);
-      setPendingCount(page.pendingCount);
+      if (listRequests.current.isLatest(ticket)) {
+        commitRows((current) => appendPage(current, page.receipts));
+        setNextCursor(page.nextCursor);
+      }
+      if (pendingRequests.current.isLatest(pendingTicket)) {
+        setPendingCount(page.pendingCount);
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      if (listRequests.current.isLatest(ticket)) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
     }
   }
 
-  async function saveField(
-    id: string,
-    patch: ReceiptPatch,
-  ): Promise<string | null> {
-    try {
-      const updated = await api.updateReceipt(id, patch);
-      setRows((current) =>
-        current.map((row) => (row.id === id ? updated : row)),
-      );
-      options.noteSaved(updated);
-      onChanged();
-      logEvent({ action: "receipt_edited", receiptId: id });
-      return null;
-    } catch (caught) {
-      if (caught instanceof ApiError) {
-        return caught.message;
+  /**
+   * One inline edit. In place, per the note on this component.
+   *
+   * ⚠ Saves on one row run one at a time, and the patch is built when its
+   * turn comes rather than when the cell was blurred, off `latestRows`. That
+   * is what makes `inlineEditPatch`'s union true: `reviewedFields` replaces
+   * the stored set outright, so tabbing Total -> HST with the first PATCH
+   * still out would otherwise send a set without `totalCents` in it, and the
+   * second save would hand the first field back to the parser. It also puts
+   * the responses in order, so an older answer cannot redraw a newer value.
+   */
+  function saveField(row: Receipt, patch: ReceiptPatch): Promise<string | null> {
+    return rowSaves.current(row.id, async () => {
+      const latest =
+        latestRows.current.find((candidate) => candidate.id === row.id) ?? row;
+      try {
+        const updated = await api.updateReceipt(
+          row.id,
+          inlineEditPatch(latest, patch),
+        );
+        replaceRow(updated);
+        options.noteSaved(updated);
+        refreshCounts();
+        logEvent({ action: "receipt_edited", receiptId: row.id });
+        return null;
+      } catch (caught) {
+        if (caught instanceof ApiError) {
+          return caught.message;
+        }
+        return caught instanceof Error ? caught.message : String(caught);
       }
-      return caught instanceof Error ? caught.message : String(caught);
-    }
+    });
   }
 
   /**
@@ -245,11 +357,11 @@ export function ReceiptsTable({
    * - Selection narrows to exactly the ids that failed (blocked or
    *   rejected), so "Confirm" pressed again acts on only what still needs
    *   it - the brief's "leave the failed ones still selected."
-   * - `onChanged()` fires once, only if something actually succeeded, and
-   *   only once per whole batch rather than once per row - it re-fetches
-   *   page one, which is the only path that refreshes `pendingCount`
-   *   honestly (§5.2a: that count has to come from the server, never a
-   *   locally decremented guess).
+   * - `refreshCounts()` fires once, only if something actually succeeded,
+   *   and only once per whole batch rather than once per row. Never a
+   *   re-fetch of page one: that dropped every row past it, so a failed row
+   *   on page two stayed selected with nothing on screen to act on, and the
+   *   button read `Confirm (0)`.
    * - `bulkOutcome` is set unconditionally, even on a clean sweep, so the
    *   screen always states a real count rather than ever implying success
    *   silently.
@@ -263,10 +375,10 @@ export function ReceiptsTable({
     setBulkRunning(kind);
     setBulkOutcome(null);
     const result = await runBatch(ids, async (id) => {
-      const updated = await api.updateReceipt(id, patch);
-      setRows((current) =>
-        current.map((row) => (row.id === id ? updated : row)),
+      const updated = await rowSaves.current(id, () =>
+        api.updateReceipt(id, patch),
       );
+      replaceRow(updated);
       options.noteSaved({
         category: updated.category,
         paymentMethod: updated.paymentMethod,
@@ -293,7 +405,7 @@ export function ReceiptsTable({
       setBulkPayment("");
     }
     if (result.succeeded.length > 0) {
-      onChanged();
+      refreshCounts();
     }
   }
 
@@ -515,15 +627,13 @@ export function ReceiptsTable({
                 bulkRunning !== null || confirmPreview.confirmable.length === 0
               }
               onClick={bulkConfirm}
-              title="Moves pending rows to confirmed. Rows with no total on file are skipped."
+              title="Moves pending rows to confirmed. Rows with no total on file, or with amounts to enter from the paper, are skipped."
             >
               Confirm ({confirmPreview.confirmable.length})
             </button>
             {confirmPreview.blocked.length > 0 && (
               <span className="bulk-warning">
-                {confirmPreview.blocked.length} of {selected.size} selected{" "}
-                {confirmPreview.blocked.length === 1 ? "has" : "have"} no total
-                and will be skipped
+                {describeBlocked(confirmPreview.blocked, selected.size)}
               </span>
             )}
           </div>
@@ -604,15 +714,19 @@ export function ReceiptsTable({
                   setSelected((current) => toggleRow(current, row.id))
                 }
                 onOpen={() => onOpen(row.id)}
-                onSave={(patch) => saveField(row.id, patch)}
+                onSave={(patch) => saveField(row, patch)}
               />
             ))}
           </tbody>
         </table>
       )}
       {nextCursor !== null && (
-        <button className="load-more" onClick={() => void loadMore()}>
-          Load more
+        <button
+          className="load-more"
+          disabled={loadingMore}
+          onClick={() => runLoadMore(loadMore)}
+        >
+          {loadingMore ? "Loading…" : "Load more"}
         </button>
       )}
     </section>
@@ -714,16 +828,49 @@ function BulkOutcomeBanner({
  * sitting next to it." Both halves of the mitigation are in this one
  * sentence - the money is captioned "confirmed only" in the same breath it
  * is stated, and the pending count is its own clause, read off
- * `summary.pendingCount` and never folded into `summary.confirmed`'s
- * figures beside it.
+ * `summary.pendingCount` and never folded into the confirmed figures beside
+ * it.
+ *
+ * ⚠ One clause per currency (2026-10), never one sum: $100 CAD and $100 USD
+ * are not $200 of anything, and the same sentence that keeps pending out of
+ * the money has to keep the currencies apart. The receipt COUNT does add up,
+ * and is stated once.
  */
 export function describeSummary(summary: ReceiptSummary): string {
-  const { count, totalCents, hstCents } = summary.confirmed;
+  const currencies = summaryCurrencies(summary);
+  const count = currencies.reduce((sum, row) => sum + row.count, 0);
+  const money = currencies
+    .map(
+      ({ currency, totalCents, hstCents }) =>
+        // HST is a Canadian tax: a USD receipt with none has no such line.
+        currency !== "CAD" && hstCents === 0
+          ? `${formatMoney(totalCents, currency)} spent`
+          : `${formatMoney(totalCents, currency)} spent · ${formatMoney(hstCents, currency)} HST`,
+    )
+    .join(" · ");
   return (
-    `${count} confirmed receipt${count === 1 ? "" : "s"} · ` +
-    `${formatCents(totalCents)} spent · ${formatCents(hstCents)} HST - ` +
+    `${count} confirmed receipt${count === 1 ? "" : "s"} · ${money} - ` +
     `confirmed only, excludes ${summary.pendingCount} pending`
   );
+}
+
+/**
+ * The currencies worth a clause: every `byCurrency` row that has receipts in
+ * it, or the CAD figures alone when none does, so an empty filter still
+ * states its $0.00 rather than a sentence with no amount in it.
+ *
+ * That fallback is also the whole of the compatibility with a server older
+ * than `byCurrency`, whose `confirmed` sums every currency: it renders that
+ * figure as it always has rather than taking this screen down, for the
+ * length of a deploy, over a key that has not landed yet.
+ */
+export function summaryCurrencies(
+  summary: ReceiptSummary,
+): ReceiptCurrencySummary[] {
+  const withReceipts = (summary.byCurrency ?? []).filter((row) => row.count > 0);
+  return withReceipts.length > 0
+    ? withReceipts
+    : [{ currency: HOME_CURRENCY, ...summary.confirmed }];
 }
 
 /**
@@ -757,6 +904,37 @@ export function describeOrder(sort: ReceiptSort, order: SortOrder): string {
   }
 }
 
+/**
+ * A row's error line, and the field it is about. `field` is null for a
+ * mistyped amount: that cell reverts to the stored value, so nothing is left
+ * unsaved and the line only explains what just happened.
+ */
+export interface RowError {
+  field: string | null;
+  message: string;
+}
+
+/**
+ * The row's error line once a save has answered, exported for its unit test.
+ *
+ * ⚠ A success only clears the error it answers (2026-10). This used to be
+ * one assignment, so a failed Total followed by a good HST wiped the failure
+ * and left the refused amount sitting in its cell, unsaved, with nothing on
+ * screen to say so. Saves on a row run in order now (`saveField`), which made
+ * that sequence the normal one rather than a matter of timing.
+ */
+export function rowErrorAfterSave(
+  current: RowError | null,
+  patch: ReceiptPatch,
+  failure: string | null,
+): RowError | null {
+  const field = Object.keys(patch)[0] ?? null;
+  if (failure !== null) {
+    return { field, message: failure };
+  }
+  return current?.field === null || current?.field === field ? null : current;
+}
+
 function ReceiptRow({
   row,
   selected,
@@ -772,11 +950,16 @@ function ReceiptRow({
   onOpen: () => void;
   onSave: (patch: ReceiptPatch) => Promise<string | null>;
 }) {
-  const [rowError, setRowError] = useState<string | null>(null);
+  const [rowError, setRowError] = useState<RowError | null>(null);
+  // The boxes below hold editable text, so they stay in the "$" form that
+  // parses back; this is what says so on a row that is not in dollars CAD.
+  const currency = foreignCurrency(row.currency);
 
   const save = async (patch: ReceiptPatch) => {
-    setRowError(await onSave(patch));
+    const failure = await onSave(patch);
+    setRowError((current) => rowErrorAfterSave(current, patch, failure));
   };
+  const badInput = (message: string) => setRowError({ field: null, message });
 
   return (
     <>
@@ -811,30 +994,31 @@ function ReceiptRow({
         </td>
         <td className="num">
           <MoneyCell
-            value={row.totalCents}
+            value={displayedTotalCents(row)}
             onSave={(v) => save({ totalCents: v })}
-            onBadInput={setRowError}
+            onBadInput={badInput}
           />
+          {currency !== null && <span className="currency-tag">{currency}</span>}
         </td>
         <td className="num">
           <MoneyCell
             value={row.hstCents}
             onSave={(v) => save({ hstCents: v })}
-            onBadInput={setRowError}
+            onBadInput={badInput}
           />
         </td>
         <td className="num">
           <MoneyCell
             value={row.tipCents}
             onSave={(v) => save({ tipCents: v })}
-            onBadInput={setRowError}
+            onBadInput={badInput}
           />
         </td>
         <td className="num">
           <MoneyCell
             value={row.otherFeesCents}
             onSave={(v) => save({ otherFeesCents: v })}
-            onBadInput={setRowError}
+            onBadInput={badInput}
           />
         </td>
         <td>
@@ -846,7 +1030,7 @@ function ReceiptRow({
       {rowError !== null && (
         <tr className="row-error">
           <td colSpan={9}>
-            <span className="error">{rowError}</span>
+            <span className="error">{rowError.message}</span>
             <button className="link" onClick={() => setRowError(null)}>
               dismiss
             </button>
@@ -901,9 +1085,9 @@ function TextCell({
       list={list}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={() => {
-        const next = draft.trim() === "" ? null : draft.trim();
-        if (next !== value) {
-          onSave(next);
+        const write = freeTextWrite(draft, value);
+        if (write !== undefined) {
+          onSave(write);
         }
       }}
       onKeyDown={(e) => {

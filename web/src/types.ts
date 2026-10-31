@@ -364,6 +364,19 @@ export interface ReceiptOptions {
   >;
 }
 
+export interface ReceiptSummaryTotals {
+  count: number;
+  subtotalCents: number;
+  hstCents: number;
+  tipCents: number;
+  otherFeesCents: number;
+  totalCents: number;
+}
+
+export interface ReceiptCurrencySummary extends ReceiptSummaryTotals {
+  currency: string;
+}
+
 /**
  * GET /api/receipts/summary (proposal #3, 2026-08-28, approved): the same
  * running-totals question a single receipt's arithmetic check answers,
@@ -374,16 +387,16 @@ export interface ReceiptOptions {
  * total that reads as a finished claim (spec: nothing pending may appear in
  * an export, and a summary that disagreed with the export sitting next to
  * it would be exactly the failure the proposal names by name).
+ *
+ * `byCurrency` (2026-10) is what to read for money: one row per currency,
+ * CAD first, because a sum across currencies is not an amount of anything.
+ * `confirmed` stays, and now covers CAD rows only. Optional here for the
+ * reason `withheld` is: a server from before this change sends no such key,
+ * and `summaryCurrencies` (ReceiptsTable.tsx) says what that means.
  */
 export interface ReceiptSummary {
-  confirmed: {
-    count: number;
-    subtotalCents: number;
-    hstCents: number;
-    tipCents: number;
-    otherFeesCents: number;
-    totalCents: number;
-  };
+  confirmed: ReceiptSummaryTotals;
+  byCurrency?: ReceiptCurrencySummary[];
   pendingCount: number;
 }
 

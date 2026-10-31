@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { ApiError, type KeptApi } from "../src/api.js";
-import { sortedByPage, addReceiptPage, replaceReceiptPage } from "../src/receiptImages.js";
+import {
+  addReceiptPage,
+  pageAddedNotice,
+  replaceReceiptPage,
+  sortedByPage,
+} from "../src/receiptImages.js";
 
 /**
  * Add-a-page / replace-a-page (proposal #6, 2026-08-28), pinned the same
@@ -236,5 +241,17 @@ describe("sortedByPage", () => {
     const original = [...images];
     sortedByPage(images);
     expect(images).toEqual(original);
+  });
+});
+
+describe("pageAddedNotice - what a drop actually did", () => {
+  it("is the plain sentence for one file", () => {
+    expect(pageAddedNotice(1)).toBe("Page added.");
+  });
+
+  it("says a multi-file drop added only the first, rather than implying all", () => {
+    const notice = pageAddedNotice(3);
+    expect(notice).toContain("only the first of the 3");
+    expect(notice).not.toBe("Page added.");
   });
 });

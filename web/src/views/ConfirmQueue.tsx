@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeptApi } from "../api.js";
+import { findNextPending } from "../confirmQueue.js";
 import { logEvent } from "../events.js";
 import type { ReceiptOptionsHandle } from "../options.js";
 import type { ReceiptDetail } from "../types.js";
+import { useGuardedAction } from "../useGuardedAction.js";
 import { ReceiptImage } from "./ReceiptDetail.js";
 import {
   DraftError,
@@ -57,18 +59,28 @@ export function ConfirmQueue({
   // Confirm and at Save for later, where `reviewedFieldsForSave` unions it
   // with whatever the receipt already carried.
   const reviewedRef = useRef<Set<keyof ReceiptDraft>>(new Set());
+  // ⚠ Constraint 2 rests on this one (2026-10). Confirm is PATCH + list +
+  // detail, and on a slow connection that is seconds in which the button
+  // looked live: a re-click landed after the screen had moved on, and
+  // confirmed the NEXT receipt with OCR values nobody had read. Every action
+  // here goes through `run`, which refuses a second one outright, and `busy`
+  // holds the form and all three buttons disabled until the commit that puts
+  // the next receipt on screen.
+  const { busy, run } = useGuardedAction();
 
   const loadNext = useCallback(
     async (skip: string[]) => {
       setError(null);
       try {
-        // A page of pending receipts, newest first as the server sorts;
-        // skipped ones stay pending, so they are filtered out client-side
-        // until the queue is left and re-entered.
-        const page = await api.listReceipts({ status: "pending" }, null);
-        setRemaining(page.pendingCount);
-        const next = page.receipts.find((r) => !skip.includes(r.id));
-        if (next === undefined) {
+        // Pending receipts, newest first as the server sorts; skipped ones
+        // stay pending, so they are filtered out client-side until the queue
+        // is left and re-entered - as many pages as that takes.
+        const { next, pendingCount } = await findNextPending(
+          (cursor) => api.listReceipts({ status: "pending" }, cursor),
+          skip,
+        );
+        setRemaining(pendingCount);
+        if (next === null) {
           setCurrent(null);
           setDraft(null);
           setExhausted(true);
@@ -82,6 +94,11 @@ export function ConfirmQueue({
         reviewedRef.current = new Set();
         logEvent({ action: "confirm_opened", receiptId: detail.id });
       } catch (caught) {
+        // The receipt on screen, if any, is one this queue has finished with
+        // - confirmed, saved or skipped - so it is not left there live to be
+        // confirmed a second time. The empty state below offers a retry.
+        setCurrent(null);
+        setDraft(null);
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     },
@@ -89,8 +106,8 @@ export function ConfirmQueue({
   );
 
   useEffect(() => {
-    void loadNext([]);
-  }, [loadNext]);
+    run(() => loadNext([]));
+  }, [loadNext, run]);
 
   async function confirm() {
     if (current === null || draft === null) {
@@ -162,13 +179,13 @@ export function ConfirmQueue({
     }
   }
 
-  function skip() {
+  async function skip() {
     if (current === null) {
       return;
     }
     const skip = [...skippedIds, current.id];
     setSkippedIds(skip);
-    void loadNext(skip);
+    await loadNext(skip);
   }
 
   if (exhausted) {
@@ -188,6 +205,11 @@ export function ConfirmQueue({
     return (
       <section className="confirm-queue-view">
         {error !== null ? <p className="error">{error}</p> : <p className="muted">Loading…</p>}
+        {error !== null && (
+          <button disabled={busy} onClick={() => run(() => loadNext(skippedIds))}>
+            Try again
+          </button>
+        )}
         <button className="link" onClick={onDone}>
           Leave the queue
         </button>
@@ -227,20 +249,25 @@ export function ConfirmQueue({
             options={options.values}
             api={api}
             onOpenReceipt={onOpenReceipt}
+            disabled={busy}
             onFieldEdited={(field) => editsRef.current.push(field)}
             onFieldReviewed={(field) => reviewedRef.current.add(field)}
             onSuggestionApplied={(field) => clientAppliedRef.current.add(field)}
           />
           {error !== null && <p className="error">{error}</p>}
           <div className="detail-actions">
-            <button className="primary" onClick={() => void confirm()}>
+            <button className="primary" disabled={busy} onClick={() => run(confirm)}>
               Confirm
             </button>
             {/* Between Confirm and Skip in both position and meaning:
                 Skip loses what is typed, Save for later keeps it, and
                 neither confirms anything. */}
-            <button onClick={() => void saveForLater()}>Save for later</button>
-            <button onClick={skip}>Skip for now</button>
+            <button disabled={busy} onClick={() => run(saveForLater)}>
+              Save for later
+            </button>
+            <button disabled={busy} onClick={() => run(skip)}>
+              Skip for now
+            </button>
           </div>
         </div>
       </div>

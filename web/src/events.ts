@@ -185,10 +185,10 @@ export function attachLifecycleFlush(
 
 /**
  * The one POST this whole module makes. Deliberately not routed through
- * `KeptApi.request` (api.ts): that method calls `onUnauthorized()` on every
- * 401, which is the right behaviour for a person's own action but wrong
- * here - a background flush discovering an expired token must never be
- * what silently signs someone out. A non-ok response (the strict 400 rule
+ * `KeptApi.request` (api.ts): that method ends the session on a 401 from
+ * anything the person did, and the same rule its background calls follow
+ * applies here - a flush discovering an expired token must never be what
+ * silently signs someone out. A non-ok response (the strict 400 rule
  * 2 names, a 401, anything else) just throws, for `EventQueue.flush`'s own
  * catch to swallow; this function never touches the session.
  */

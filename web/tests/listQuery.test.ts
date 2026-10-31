@@ -49,10 +49,20 @@ describe("listQuery", () => {
 
   it("drops blank category and payment filters the same way", () => {
     expect(listQuery({ category: "   ", paymentMethod: "" }, null)).toBe("");
-    expect(listQuery({ category: " meals " }, null)).toBe("category=meals");
-    expect(listQuery({ paymentMethod: " visa " }, null)).toBe(
-      "paymentMethod=visa",
+  });
+
+  it("sends category and payment verbatim - they are exact matches over stored text", () => {
+    // The defect: picking "  Office   Supplies  " from the person's own list
+    // sent a trimmed value no row holds, and the table said zero rows and
+    // a $0 summary for a category that plainly had receipts in it.
+    const params = new URLSearchParams(
+      listQuery(
+        { category: "  Office   Supplies  ", paymentMethod: " visa " },
+        null,
+      ),
     );
+    expect(params.get("category")).toBe("  Office   Supplies  ");
+    expect(params.get("paymentMethod")).toBe(" visa ");
   });
 
   it("sends sort and order only when chosen - the server has the defaults", () => {

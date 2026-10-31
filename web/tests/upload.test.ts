@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import { ApiError, type KeptApi } from "../src/api.js";
 import {
   isoDateToday,
+  settleQueuedFile,
   sha256Hex,
   supportedContentType,
   uploadOne,
   type PdfTextExtractor,
+  type QueuedFile,
 } from "../src/upload.js";
 
 /**
@@ -247,5 +249,34 @@ describe("uploadOne", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("settleQueuedFile - a batch reporting to a queue that has moved on", () => {
+  const queue: QueuedFile[] = [
+    { id: 1, name: "a.pdf", outcome: "uploading" },
+    { id: 2, name: "b.pdf", outcome: "uploading" },
+  ];
+
+  it("settles exactly the file it names", () => {
+    expect(settleQueuedFile(queue, 2, { state: "duplicate" })).toEqual([
+      queue[0],
+      { id: 2, name: "b.pdf", outcome: { state: "duplicate" } },
+    ]);
+  });
+
+  it("finds its file by id wherever a second batch has left it", () => {
+    // By index, this is what a queue that had grown would have got wrong.
+    const grown = [{ id: 9, name: "z.pdf", outcome: "uploading" as const }, ...queue];
+    const settled = settleQueuedFile(grown, 1, { state: "failed", detail: "no" });
+    expect(settled.map((file) => file.outcome)).toEqual([
+      "uploading",
+      { state: "failed", detail: "no" },
+      "uploading",
+    ]);
+  });
+
+  it("changes nothing for a file the queue no longer holds - a cleared session", () => {
+    expect(settleQueuedFile([], 1, { state: "duplicate" })).toEqual([]);
   });
 });

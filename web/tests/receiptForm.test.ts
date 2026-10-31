@@ -12,6 +12,7 @@ import {
   patchForConfirm,
   patchForSaveForLater,
   reviewedFieldsForSave,
+  hasUnsavedEdits,
   suggestDefaultRateHst,
   checkHstRatePlausibility,
   dateDisagreementNote,
@@ -546,8 +547,7 @@ describe("vendorDefaultFill - proposal #2's live vendor default", () => {
     const fill = vendorDefaultFill(
       draft({ vendor: "Food Basics" }),
       NO_TOUCH,
-      vendorDefaults,
-    );
+      vendorDefaults, "pending");
     expect(fill).toEqual({ category: "groceries", paymentMethod: "visa" });
   });
 
@@ -555,47 +555,79 @@ describe("vendorDefaultFill - proposal #2's live vendor default", () => {
     const fill = vendorDefaultFill(
       draft({ vendor: "Food Basics", category: "office supplies" }),
       NO_TOUCH,
-      vendorDefaults,
-    );
+      vendorDefaults, "pending");
     expect(fill.category).toBeNull();
     expect(fill.paymentMethod).toBe("visa");
   });
 
   it("never re-applies to a field that has been touched, even if it is empty again", () => {
     const touched = new Set<keyof ReceiptDraft>(["category"]);
-    const fill = vendorDefaultFill(draft({ vendor: "Food Basics" }), touched, vendorDefaults);
+    const fill = vendorDefaultFill(draft({ vendor: "Food Basics" }), touched, vendorDefaults, "pending");
     expect(fill.category).toBeNull();
     expect(fill.paymentMethod).toBe("visa");
   });
 
-  it("never overwrites a confirmed receipt's existing values - covered by the same empty-only rule", () => {
-    // A confirmed receipt's draft carries its own stored category/payment
-    // (draftFromReceipt), so this is the same "field is non-empty" check
-    // as the typed-value case above, exercised against a value that came
-    // from the row itself rather than a keystroke.
+  it("never overwrites a value already in the box - the row's own included", () => {
+    // A draft carrying its own stored category/payment is the same "field
+    // is non-empty" check as the typed-value case above, exercised against
+    // a value that came from the row itself rather than a keystroke.
     const fill = vendorDefaultFill(
       draft({ vendor: "Food Basics", category: "meals", paymentMethod: "amex" }),
       NO_TOUCH,
+      vendorDefaults, "pending");
+    expect(fill).toEqual({ category: null, paymentMethod: null });
+  });
+
+  it("fills nothing on a confirmed receipt nobody has edited, even with blank boxes", () => {
+    // The defect: a confirmed receipt with a blank category and a known
+    // vendor. The fill landed in the draft, the confirmed path diffs the
+    // whole draft, and a Save with no edits PATCHed two fields nobody
+    // touched. §7.2: never over a confirmed receipt's existing value - and
+    // a human confirmed that blank.
+    const fill = vendorDefaultFill(
+      draft({ vendor: "Food Basics" }),
+      NO_TOUCH,
       vendorDefaults,
+      "confirmed",
     );
     expect(fill).toEqual({ category: null, paymentMethod: null });
+  });
+
+  it("does fill a confirmed receipt whose vendor the person just changed", () => {
+    // "A vendor typed or corrected mid-session" (§7.2): the person changed
+    // who this receipt is from, which is them asking what the default
+    // answers. It lands amber and it is still their Save that writes it.
+    const fill = vendorDefaultFill(
+      draft({ vendor: "Food Basics" }),
+      new Set<keyof ReceiptDraft>(["vendor"]),
+      vendorDefaults,
+      "confirmed",
+    );
+    expect(fill).toEqual({ category: "groceries", paymentMethod: "visa" });
+  });
+
+  it("the end-to-end claim: a no-edit Save on a confirmed receipt patches nothing", () => {
+    const row = receipt({ status: "confirmed", vendor: "Food Basics" });
+    const shown = draftForDisplay(row);
+    const fill = vendorDefaultFill(shown, NO_TOUCH, vendorDefaults, row.status);
+    expect(fill).toEqual({ category: null, paymentMethod: null });
+    expect(patchFromDraft(row, shown)).toEqual({});
   });
 
   it("offers nothing for a vendor with no stored default", () => {
     const fill = vendorDefaultFill(
       draft({ vendor: "Somewhere New" }),
       NO_TOUCH,
-      vendorDefaults,
-    );
+      vendorDefaults, "pending");
     expect(fill).toEqual({ category: null, paymentMethod: null });
   });
 
   it("matches the vendor string exactly - no trim, no case fold", () => {
     expect(
-      vendorDefaultFill(draft({ vendor: "food basics" }), NO_TOUCH, vendorDefaults),
+      vendorDefaultFill(draft({ vendor: "food basics" }), NO_TOUCH, vendorDefaults, "pending"),
     ).toEqual({ category: null, paymentMethod: null });
     expect(
-      vendorDefaultFill(draft({ vendor: "Food Basics " }), NO_TOUCH, vendorDefaults),
+      vendorDefaultFill(draft({ vendor: "Food Basics " }), NO_TOUCH, vendorDefaults, "pending"),
     ).toEqual({ category: null, paymentMethod: null });
   });
 
@@ -604,8 +636,7 @@ describe("vendorDefaultFill - proposal #2's live vendor default", () => {
     const fill = vendorDefaultFill(
       draft({ vendor: "Cash Only Diner" }),
       NO_TOUCH,
-      vendorDefaults,
-    );
+      vendorDefaults, "pending");
     expect(fill).toEqual({ category: "meals", paymentMethod: null });
   });
 });
@@ -1093,6 +1124,37 @@ describe("summarizeFieldEdits - client-applied sources folded into the save-time
    that came with them. Everything below is pure - the React component
    these feed is not under test here, the decisions it renders are.
    ──────────────────────────────────────────────────────────────────────── */
+
+describe("verbatim free text (2026-10)", () => {
+  // The stored shape the filter defect was found on: this is someone's own
+  // value, out of their own list, and it has to survive being looked at.
+  const UNTIDY = "  Office   Supplies  ";
+
+  it("a no-edit save does not rewrite a stored value by trimming it", () => {
+    const row = receipt({
+      status: "confirmed",
+      vendor: UNTIDY,
+      category: UNTIDY,
+      paymentMethod: UNTIDY,
+      notes: UNTIDY,
+    });
+    expect(patchFromDraft(row, draftFromReceipt(row))).toEqual({});
+  });
+
+  it("an edit that really changes the text still trims what was typed", () => {
+    const row = receipt({ status: "confirmed", category: UNTIDY });
+    expect(
+      patchFromDraft(row, { ...draftFromReceipt(row), category: "  Meals " }),
+    ).toEqual({ category: "Meals" });
+  });
+
+  it("clearing the box clears the value", () => {
+    const row = receipt({ status: "confirmed", category: UNTIDY });
+    expect(
+      patchFromDraft(row, { ...draftFromReceipt(row), category: "   " }),
+    ).toEqual({ category: null });
+  });
+});
 
 describe("reviewedFieldsForSave - what a save reports as looked at", () => {
   it("unions the receipt's stored set with this session's touched fields", () => {
@@ -1786,6 +1848,117 @@ describe("patchChangesNothing - the confirmed-receipt edit that sends no reviewe
   });
 });
 
+describe("patchForConfirm with a withheld amount (the 2026-10 409)", () => {
+  /**
+   * The server refuses a pending -> confirmed PATCH whose reviewedFields omit
+   * an amount it withheld. The receipt that rule exists for is the Costco
+   * slip: the subtotal and HST were read correctly and only the total was
+   * misread, so the form lands with a blank total and a one-click fill for
+   * exactly the right number. Fill does not report the field reviewed, so
+   * without the rule under test that receipt could never be confirmed
+   * through the form's own offer.
+   */
+  const withheldTotal = (): Receipt =>
+    receipt({
+      subtotalCents: 21160,
+      hstCents: 734,
+      totalCents: 850,
+      suggestions: merged({
+        totalCents: { value: null, source: null, withheld: true },
+        subtotalCents: { value: 21160, source: "heuristic" },
+        hstCents: { value: 734, source: "heuristic", disagreement: false },
+      }),
+    });
+
+  it("reports a withheld total that a Fill put in the box, with nothing touched", () => {
+    const row = withheldTotal();
+    const filled = { ...draftFromPending(row), total: "$218.94" };
+    const patch = patchForConfirm(row, filled, new Set());
+    expect(patch.reviewedFields).toEqual(["totalCents"]);
+    expect(patch.totalCents).toBe(21894);
+    expect(patch.status).toBe("confirmed");
+  });
+
+  it("does not report a withheld amount whose box is still blank", () => {
+    // Nothing a person did put a value there, so nothing is claimed - the
+    // server's 409 stands, which is the rule working.
+    const row = withheldTotal();
+    const patch = patchForConfirm(row, draftFromPending(row), new Set());
+    expect(patch.reviewedFields).toEqual([]);
+  });
+
+  it("does not report a filled amount that was never withheld", () => {
+    const row = receipt({
+      suggestions: merged({ totalCents: { value: 1435, source: "heuristic" } }),
+    });
+    const patch = patchForConfirm(row, draftFromPending(row), new Set());
+    expect(patch.reviewedFields).toEqual([]);
+  });
+
+  it("keeps everything already reviewed or touched alongside it", () => {
+    const row = { ...withheldTotal(), reviewedFields: ["vendor" as const] };
+    const filled = { ...draftFromPending(row), total: "$218.94" };
+    expect(patchForConfirm(row, filled, new Set(["notes"])).reviewedFields).toEqual([
+      "vendor",
+      "totalCents",
+      "notes",
+    ]);
+  });
+});
+
+describe("hasUnsavedEdits - what Open on a duplicate has to warn about", () => {
+  const row = receipt({
+    status: "confirmed",
+    vendor: "Staples",
+    totalCents: 1435,
+    category: "office",
+  });
+  const shown = draftFromReceipt(row);
+
+  it("is false for an untouched form", () => {
+    expect(hasUnsavedEdits(row, shown, new Set())).toBe(false);
+  });
+
+  it("is true once a touched field differs from what the row holds", () => {
+    expect(
+      hasUnsavedEdits(row, { ...shown, vendor: "Staples Inc" }, new Set(["vendor"])),
+    ).toBe(true);
+  });
+
+  it("is false once the person typed their way back to the original", () => {
+    expect(hasUnsavedEdits(row, shown, new Set(["vendor"]))).toBe(false);
+  });
+
+  it("ignores a value nobody touched - a vendor default landing is not an edit", () => {
+    expect(
+      hasUnsavedEdits(row, { ...shown, paymentMethod: "visa" }, new Set()),
+    ).toBe(false);
+  });
+
+  it("compares money as cents, so a reformat is not an edit", () => {
+    expect(hasUnsavedEdits(row, { ...shown, total: "14.35" }, new Set(["total"]))).toBe(
+      false,
+    );
+    expect(hasUnsavedEdits(row, { ...shown, total: "14.36" }, new Set(["total"]))).toBe(
+      true,
+    );
+  });
+
+  it("counts an unparseable amount as an edit - half-typed work is what gets lost", () => {
+    expect(hasUnsavedEdits(row, { ...shown, total: "14." }, new Set(["total"]))).toBe(
+      true,
+    );
+  });
+
+  it("compares a pending receipt against its prefill, not its bare row", () => {
+    const pending = receipt({
+      suggestions: merged({ vendor: { value: "Costco", source: "llm" } }),
+    });
+    const prefilled = draftFromPending(pending);
+    expect(hasUnsavedEdits(pending, prefilled, new Set(["vendor"]))).toBe(false);
+  });
+});
+
 describe("withheldAmountsNote - why an amount box is empty (2026-09-01)", () => {
   /**
    * A withheld amount lands the box BLANK (`draftFromPending`), so the
@@ -2088,7 +2261,7 @@ describe("the vendor default never overrides a served payment-method suggestion"
     });
     const d = draftFromPending(row);
     expect(d.paymentMethod).toBe("MASTERCARD");
-    const fill = vendorDefaultFill(d, new Set(), vendorDefaults);
+    const fill = vendorDefaultFill(d, new Set(), vendorDefaults, "pending");
     expect(fill.paymentMethod).toBeNull();
     // Category has no served suggestion, so the default still applies there.
     expect(fill.category).toBe("groceries");
@@ -2100,7 +2273,7 @@ describe("the vendor default never overrides a served payment-method suggestion"
       paymentMethod: null,
       suggestions: merged({ vendor: { value: "Food Basics", source: "llm" } }),
     });
-    const fill = vendorDefaultFill(draftFromPending(row), new Set(), vendorDefaults);
+    const fill = vendorDefaultFill(draftFromPending(row), new Set(), vendorDefaults, "pending");
     expect(fill).toEqual({ category: "groceries", paymentMethod: "visa" });
   });
 
@@ -2117,7 +2290,7 @@ describe("the vendor default never overrides a served payment-method suggestion"
     });
     const d = draftFromPending(row);
     expect(d.paymentMethod).toBe("Amex");
-    expect(vendorDefaultFill(d, new Set(), vendorDefaults).paymentMethod).toBeNull();
+    expect(vendorDefaultFill(d, new Set(), vendorDefaults, "pending").paymentMethod).toBeNull();
   });
 });
 

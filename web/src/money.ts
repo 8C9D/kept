@@ -5,21 +5,65 @@
  * to or from a person.
  */
 
-/** 1234 -> "$12.34", -1234 -> "-$12.34", null -> "". */
-export function formatCents(cents: number | null): string {
-  if (cents === null) {
-    return "";
-  }
+/** The sign and the digits of an amount, with no currency attached. */
+function amountParts(cents: number): { sign: string; digits: string } {
   if (!Number.isSafeInteger(cents)) {
     throw new Error(`Not an integer number of cents: ${cents}`);
   }
-  const sign = cents < 0 ? "-" : "";
   const abs = Math.abs(cents);
   const centsPart = abs % 100;
   // Exact: abs - centsPart is divisible by 100, so this division is
   // integer-valued and IEEE 754 represents it without rounding.
   const dollars = (abs - centsPart) / 100;
-  return `${sign}$${dollars}.${String(centsPart).padStart(2, "0")}`;
+  return {
+    sign: cents < 0 ? "-" : "",
+    digits: `${dollars}.${String(centsPart).padStart(2, "0")}`,
+  };
+}
+
+/**
+ * 1234 -> "$12.34", -1234 -> "-$12.34", null -> "".
+ *
+ * ⚠ The "$" names no currency. This is the form an amount takes in an
+ * editable box, where it has to parse back through `parseMoneyInput`; beside
+ * a value that could be in any other currency, use `formatMoney`.
+ */
+export function formatCents(cents: number | null): string {
+  if (cents === null) {
+    return "";
+  }
+  const { sign, digits } = amountParts(cents);
+  return `${sign}$${digits}`;
+}
+
+/**
+ * The currency every web-created receipt defaults to, and so the one a bare
+ * "$" is allowed to mean. `receipt.currency` is the server's three-letter
+ * code (validated `/^[A-Z]{3}$/` on every write), so this compares exactly.
+ */
+export const HOME_CURRENCY = "CAD";
+
+/**
+ * The currency worth stating beside an amount, or null when it is the home
+ * currency and stating it would only be noise on every row of a CAD account.
+ */
+export function foreignCurrency(currency: string): string | null {
+  return currency === HOME_CURRENCY ? null : currency;
+}
+
+/**
+ * An amount in its own currency, for reading: 1234 in CAD -> "$12.34", in
+ * USD -> "USD 12.34". Production holds both (2026-09-01), and a USD total
+ * under a bare "$" reads as a Canadian one - and worse, invites being added
+ * to one, which is the mistake `describeSummary` exists not to make.
+ */
+export function formatMoney(cents: number | null, currency: string): string {
+  const foreign = foreignCurrency(currency);
+  if (foreign === null || cents === null) {
+    return formatCents(cents);
+  }
+  const { sign, digits } = amountParts(cents);
+  return `${foreign} ${sign}${digits}`;
 }
 
 /**

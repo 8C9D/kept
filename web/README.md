@@ -46,7 +46,7 @@ Email Routing on the zone.
    `keptapp.net` and return URL `https://keptapp.net/` saved - re-read from
    the portal on a fresh page load after the save. Apple demanded no
    domain-verification file.*
-2. **Fly secrets:** `fly secrets set APPLE_WEB_CLIENT_ID="com.arthurzhang.kept.web" WEB_ORIGIN="https://keptapp.net"` -
+2. **Server secrets:** `APPLE_WEB_CLIENT_ID="com.arthurzhang.kept.web"` and `WEB_ORIGIN="https://keptapp.net"` in `/etc/kept/kept.env` on the VM (`fly secrets set` when this ran) -
    without these the API neither accepts web sign-ins nor answers the
    browser at all (exact-origin CORS, no origin configured means none
    granted).

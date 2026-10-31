@@ -92,16 +92,51 @@ export interface PossibleDuplicateParams {
 }
 
 /**
+ * What a 401 interrupted, which decides what ending the session may cost.
+ *
+ * - `read`: the person asked to see something (opened a screen, pressed
+ *   Load more). Nothing they typed depends on it, so the app signs out as it
+ *   always has - that is the path a dead token takes on a fresh page load.
+ * - `write`: the person pressed Save, or Confirm, or Delete, with their work
+ *   on screen. Signing out here would unmount the very form holding it, so
+ *   the app keeps the view mounted and asks for a new sign-in over the top
+ *   (App.tsx's `resumeSession`).
+ */
+export type UnauthorizedAttempt = "read" | "write";
+
+/**
+ * Background calls (2026-10): lookups the person did not ask for, which run
+ * from timers and effects while they are doing something else. Their 401
+ * means exactly what the server said, and nothing more - it throws like any
+ * other failure, for the caller to degrade over, and never touches the
+ * session. A debounced duplicate check finding an expired token used to sign
+ * the person out and destroy a half-typed form with Save never pressed.
+ * `events.ts`'s `postEvents` keeps the same rule by not coming through here
+ * at all.
+ */
+const BACKGROUND = { background: true } as const;
+
+/**
  * The typed client. A thin seam: every method is one route, the shapes are
  * the server's, and nothing here retries, caches, or interprets - the
  * views decide what a failure means where the person can see it.
  */
 export class KeptApi {
   constructor(
-    private readonly token: string,
-    /** Called on any 401: the session is over and the app signs out. */
-    private readonly onUnauthorized: () => void,
+    private token: string,
+    /** Called on a 401 from a request the person made themselves. */
+    private readonly onUnauthorized: (attempt: UnauthorizedAttempt) => void,
   ) {}
+
+  /**
+   * Swaps in a fresh token for the same session. A mutable token rather than
+   * a new `KeptApi` on purpose: every screen's load effect is keyed on this
+   * object, so a new instance would re-fetch and overwrite the very draft a
+   * re-sign-in exists to preserve.
+   */
+  renew(token: string): void {
+    this.token = token;
+  }
 
   static async signInWithApple(
     identityToken: string,
@@ -152,7 +187,12 @@ export class KeptApi {
 
   /** The user's own past categories and payment methods, for reuse. */
   receiptOptions(): Promise<ReceiptOptions> {
-    return this.request<ReceiptOptions>("GET", "/api/receipts/options");
+    return this.request<ReceiptOptions>(
+      "GET",
+      "/api/receipts/options",
+      undefined,
+      BACKGROUND,
+    );
   }
 
   /**
@@ -215,7 +255,27 @@ export class KeptApi {
     return this.request<ReceiptSummary>(
       "GET",
       `/api/receipts/summary${query === "" ? "" : `?${query}`}`,
+      undefined,
+      BACKGROUND,
     );
+  }
+
+  /**
+   * The account's whole pending count - the Confirm queue badge, which the
+   * list route computes independent of its filters and paging, unlike
+   * `ReceiptSummary.pendingCount` (scoped to the filter). This is that same
+   * route asked for a single row, because the count is the only part wanted
+   * and there is no route that serves it alone: a table that has to refresh
+   * its badge after a save must not disturb the rows on screen to do it.
+   */
+  async pendingCount(): Promise<number> {
+    const page = await this.request<ReceiptList>(
+      "GET",
+      "/api/receipts?status=pending&limit=1",
+      undefined,
+      BACKGROUND,
+    );
+    return page.pendingCount;
   }
 
   /**
@@ -231,6 +291,8 @@ export class KeptApi {
     return this.request<{ receipts: Receipt[] }>(
       "GET",
       `/api/receipts/possible-duplicates${query === "" ? "" : `?${query}`}`,
+      undefined,
+      BACKGROUND,
     );
   }
 
@@ -294,8 +356,23 @@ export class KeptApi {
     return this.request<ExportJob>("POST", "/api/export", body);
   }
 
+  /**
+   * One job as it stands now - and, for a finished one, a download URL minted
+   * for this request. Presigned URLs live five minutes, so this is the only
+   * URL the export screen ever uses, fetched at the moment of the click.
+   */
   exportJob(id: string): Promise<ExportJob> {
     return this.request<ExportJob>("GET", `/api/export/${id}`);
+  }
+
+  /** The same route on a timer, watching a job nobody is clicking on. */
+  pollExportJob(id: string): Promise<ExportJob> {
+    return this.request<ExportJob>(
+      "GET",
+      `/api/export/${id}`,
+      undefined,
+      BACKGROUND,
+    );
   }
 
   exportJobs(): Promise<{ jobs: ExportJob[] }> {
@@ -306,17 +383,24 @@ export class KeptApi {
     method: string,
     path: string,
     body?: unknown,
+    { background = false }: { background?: boolean } = {},
   ): Promise<T> {
+    // Read once, for the comparison below: `renew` can swap the token while
+    // this request is out, and a 401 on the old one says nothing about the new.
+    const sentWith = this.token;
     const response = await fetch(`${API_ORIGIN}${path}`, {
       method,
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        Authorization: `Bearer ${sentWith}`,
         ...(body !== undefined && { "Content-Type": "application/json" }),
       },
       ...(body !== undefined && { body: JSON.stringify(body) }),
     });
-    if (response.status === 401) {
-      this.onUnauthorized();
+    // A request sent before the person signed in at the expiry banner comes
+    // back 401 after they did. Acting on it would sign the renewed session out
+    // and take the draft the banner exists to keep.
+    if (response.status === 401 && !background && sentWith === this.token) {
+      this.onUnauthorized(method === "GET" ? "read" : "write");
     }
     return readJson<T>(response);
   }
@@ -341,14 +425,21 @@ function filterQuery(filters: ListFilters): URLSearchParams {
   if (filters.q !== undefined && filters.q.trim() !== "") {
     params.set("q", filters.q.trim());
   }
+  // Category and payment method go verbatim, unlike `q` above. These two are
+  // exact matches over the person's own stored text, picked from their own
+  // list (the same ruling `introducesNewValue` states), so trimming a value
+  // like "  Office   Supplies  " asked the server for a string no row holds:
+  // zero rows and a $0 summary for a value the screen had just offered.
+  // Whitespace alone still means "no filter" - the schema's min(1) would
+  // accept it, but no person means it.
   if (filters.category !== undefined && filters.category.trim() !== "") {
-    params.set("category", filters.category.trim());
+    params.set("category", filters.category);
   }
   if (
     filters.paymentMethod !== undefined &&
     filters.paymentMethod.trim() !== ""
   ) {
-    params.set("paymentMethod", filters.paymentMethod.trim());
+    params.set("paymentMethod", filters.paymentMethod);
   }
   return params;
 }

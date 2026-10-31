@@ -34,6 +34,18 @@ export type ReceiptImageOutcome =
   | UploadStepOutcome;
 
 /**
+ * What to say once a page has been added. The add-a-page control takes one
+ * file, so a multi-file drop adds the first and leaves the rest; saying only
+ * "Page added." let a person believe all of them had landed, and the missing
+ * pages of a receipt are the kind of thing nobody re-checks.
+ */
+export function pageAddedNotice(droppedCount: number): string {
+  return droppedCount <= 1
+    ? "Page added."
+    : `Page added - only the first of the ${droppedCount} files dropped. Add the others one at a time.`;
+}
+
+/**
  * POST /api/receipts/:id/images - add a page. The server assigns the page
  * number (current max LIVE page + 1); nothing here guesses one or sends
  * one.

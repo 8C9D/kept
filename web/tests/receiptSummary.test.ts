@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { API_ORIGIN, KeptApi, summaryQuery } from "../src/api.js";
-import { describeSummary } from "../src/views/ReceiptsTable.js";
+import { describeSummary, summaryCurrencies } from "../src/views/ReceiptsTable.js";
 import type { ReceiptSummary } from "../src/types.js";
 
 /**
@@ -108,6 +108,74 @@ describe("KeptApi.receiptSummary", () => {
     await new KeptApi("session-jwt", vi.fn()).receiptSummary({});
     const [url] = calls[0] as [string, RequestInit];
     expect(url).toBe(`${API_ORIGIN}/api/receipts/summary`);
+  });
+});
+
+describe("describeSummary - per currency, from byCurrency (2026-10)", () => {
+  const totals = {
+    subtotalCents: 0,
+    tipCents: 0,
+    otherFeesCents: 0,
+  };
+  const cad = {
+    ...totals,
+    currency: "CAD",
+    count: 3,
+    totalCents: 24515,
+    hstCents: 2815,
+  };
+  const usd = {
+    ...totals,
+    currency: "USD",
+    count: 2,
+    totalCents: 3000,
+    hstCents: 120,
+  };
+
+  it("states each currency on its own and never sums across them", () => {
+    const text = describeSummary({
+      ...summary({ count: 3, totalCents: 24515, hstCents: 2815 }),
+      byCurrency: [cad, usd],
+    });
+    expect(text).toBe(
+      "5 confirmed receipts · $245.15 spent · $28.15 HST · USD 30.00 spent · USD 1.20 HST - confirmed only, excludes 2 pending",
+    );
+    // $245.15 + $30.00 would be the bug this exists to prevent.
+    expect(text).not.toContain("275.15");
+  });
+
+  it("reads exactly as it always has for a CAD-only account", () => {
+    const text = describeSummary({
+      ...summary({ count: 3, totalCents: 24515, hstCents: 2815 }),
+      byCurrency: [cad],
+    });
+    expect(text).toBe(
+      "3 confirmed receipts · $245.15 spent · $28.15 HST - confirmed only, excludes 2 pending",
+    );
+  });
+
+  it("prefers byCurrency over the CAD-only `confirmed` when a filter holds only USD", () => {
+    const text = describeSummary({
+      ...summary({ count: 0, totalCents: 0, hstCents: 0 }),
+      byCurrency: [{ ...cad, count: 0, totalCents: 0, hstCents: 0 }, usd],
+    });
+    expect(text).toContain("2 confirmed receipts · USD 30.00 spent");
+    expect(text).not.toContain("$");
+  });
+
+  it("still states $0.00 when nothing matches", () => {
+    const empty = summary({ count: 0, totalCents: 0, hstCents: 0 });
+    for (const byCurrency of [[], [{ ...cad, count: 0, totalCents: 0, hstCents: 0 }]]) {
+      expect(describeSummary({ ...empty, byCurrency })).toContain(
+        "0 confirmed receipts · $0.00 spent · $0.00 HST",
+      );
+    }
+  });
+
+  it("falls back to `confirmed` for a server that does not send byCurrency yet", () => {
+    expect(summaryCurrencies(summary())).toEqual([
+      expect.objectContaining({ currency: "CAD", count: 3 }),
+    ]);
   });
 });
 

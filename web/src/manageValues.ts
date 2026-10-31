@@ -1,3 +1,4 @@
+import type { OptionsLoad } from "./options.js";
 import type { OptionField, ReceiptOptions } from "./types.js";
 
 /**
@@ -45,6 +46,23 @@ export const OPTION_LISTS = [
 }[];
 
 export type OptionListSpec = (typeof OPTION_LISTS)[number];
+
+/**
+ * What an empty list says. "No vendors yet" is a claim about the person's
+ * data, so it may only be made once the server has actually answered: a
+ * failed fetch used to render the identical sentence, telling someone with
+ * two hundred vendors that they had none.
+ */
+export function emptyListText(list: OptionListSpec, load: OptionsLoad): string {
+  switch (load.state) {
+    case "loading":
+      return "Loading…";
+    case "ready":
+      return list.empty;
+    case "failed":
+      return "Couldn't load this list.";
+  }
+}
 
 /** The field as it reads inside a sentence ("the payment-method list"). */
 export function optionFieldNoun(field: OptionField): string {

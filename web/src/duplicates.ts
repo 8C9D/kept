@@ -68,10 +68,14 @@ export function duplicateLookupParams(
 /**
  * The lookup itself, isolated from React so it is testable without a
  * component. Never throws: a failed lookup (a network error, an expired
- * token, anything at all) resolves to no matches, the same "silent,
- * degrade to nothing" rule `useReceiptOptions`'s own `load` follows
- * (options.tsx) - this is an assist over a save that must keep working
- * when the assist cannot, never a gate on it.
+ * token, anything at all) resolves to no matches, the same "degrade to
+ * nothing" rule a form's option pickers follow - this is an assist over a
+ * save that must keep working when the assist cannot, never a gate on it.
+ *
+ * ⚠ Silence needed the route to be silent too. `api.possibleDuplicates` is a
+ * background call: this catch used to swallow a 401 only after `KeptApi` had
+ * already acted on it, so the debounce finding an expired token signed the
+ * person out mid-form with Save never pressed.
  */
 export async function lookupPossibleDuplicates(
   api: KeptApi,

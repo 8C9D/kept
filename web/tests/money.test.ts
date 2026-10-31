@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { MoneyParseError, formatCents, parseMoneyInput } from "../src/money.js";
+import {
+  MoneyParseError,
+  foreignCurrency,
+  formatCents,
+  formatMoney,
+  parseMoneyInput,
+} from "../src/money.js";
 
 /**
  * Money is integer cents, never floats (CLAUDE.md) - here that means the
@@ -7,6 +13,35 @@ import { MoneyParseError, formatCents, parseMoneyInput } from "../src/money.js";
  * strings and integers only, and anything unparseable refuses rather than
  * rounds.
  */
+describe("formatMoney - an amount in its own currency", () => {
+  it("renders CAD as the plain dollars this client has always shown", () => {
+    expect(formatMoney(1234, "CAD")).toBe("$12.34");
+    expect(formatMoney(-1234, "CAD")).toBe("-$12.34");
+  });
+
+  it("names any other currency rather than letting it read as a $", () => {
+    expect(formatMoney(1234, "USD")).toBe("USD 12.34");
+    expect(formatMoney(-1234, "USD")).toBe("USD -12.34");
+    expect(formatMoney(5, "EUR")).toBe("EUR 0.05");
+  });
+
+  it("renders null as empty in every currency", () => {
+    expect(formatMoney(null, "CAD")).toBe("");
+    expect(formatMoney(null, "USD")).toBe("");
+  });
+
+  it("refuses a non-integer in every currency", () => {
+    expect(() => formatMoney(12.5, "USD")).toThrow(/Not an integer/);
+  });
+});
+
+describe("foreignCurrency - what a row has to say", () => {
+  it("says nothing for CAD and the code for anything else", () => {
+    expect(foreignCurrency("CAD")).toBeNull();
+    expect(foreignCurrency("USD")).toBe("USD");
+  });
+});
+
 describe("formatCents", () => {
   it("renders cents as dollars without float arithmetic artifacts", () => {
     expect(formatCents(0)).toBe("$0.00");

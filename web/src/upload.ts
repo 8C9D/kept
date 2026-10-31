@@ -88,6 +88,27 @@ export type UploadOutcome =
   | { state: "duplicate" }
   | UploadStepOutcome;
 
+/**
+ * One dropped file on the upload screen. `id` rather than an array index:
+ * the queue outlives the screen now (`useUploadQueue`, UploadView.tsx), so
+ * nothing about where a file sat when its upload started can be assumed to
+ * still be true when the outcome comes back.
+ */
+export interface QueuedFile {
+  id: number;
+  name: string;
+  outcome: UploadOutcome | "uploading";
+}
+
+/** The next queue once one file's upload has finished. */
+export function settleQueuedFile(
+  queue: readonly QueuedFile[],
+  id: number,
+  outcome: UploadOutcome,
+): QueuedFile[] {
+  return queue.map((file) => (file.id === id ? { ...file, outcome } : file));
+}
+
 /** Today's date where the API expects yyyy-mm-dd, in local time. */
 export function isoDateToday(now: Date): string {
   const month = String(now.getMonth() + 1).padStart(2, "0");

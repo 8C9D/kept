@@ -3,6 +3,12 @@ import type { KeptApi } from "../api.js";
 import { ApiError, type ExportRequest } from "../api.js";
 import { logEvent } from "../events.js";
 import {
+  isLiveExport,
+  liveExportJob,
+  pollGivesUp,
+  startDownload,
+} from "../exportJobs.js";
+import {
   fiscalQuarters,
   fiscalYearToDate,
   lastFiscalYear,
@@ -11,13 +17,21 @@ import {
   type DateRange,
   type FiscalYearEnd,
 } from "../fiscalPresets.js";
+import { LatestRequest } from "../requests.js";
 import type { ExportJob, Profile } from "../types.js";
+import { useGuardedAction } from "../useGuardedAction.js";
 
 /**
  * Spec §7A screen 4: pick a period, generate, download the zip. The job is
  * a row the server owns; this screen starts one, polls it, and lists the
  * history. The statuses that mean "re-run" instead of "wait" - expired,
  * stale - come computed from the server and are rendered as themselves.
+ *
+ * Since the job is the server's, this screen's knowledge of it must not be
+ * what keeps it alive (2026-10). Which job to watch is re-derived from the
+ * list on every arrival and after every 409, so leaving mid-generation and
+ * coming back, or being told an export is already running, resumes the
+ * watching instead of leaving a live job that nothing is looking at.
  */
 const POLL_INTERVAL_MS = 2_000;
 const MONTH_NAMES = [
@@ -86,6 +100,10 @@ function resolvePreset(
 
 export function ExportView({ api }: { api: KeptApi }) {
   const [profile, setProfile] = useState<Profile | null>(null);
+  // Separate from `error` below because it has its own remedy. A failed
+  // profile fetch used to be indistinguishable from one still loading: the
+  // presets just never appeared, with nothing to say why.
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [jobs, setJobs] = useState<ExportJob[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,6 +112,15 @@ export function ExportView({ api }: { api: KeptApi }) {
   const [rangeEnd, setRangeEnd] = useState("");
   const [preset, setPreset] = useState<PeriodPreset>("lastFiscalYear");
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // One generation per poll loop, so starting a loop retires any other and a
+  // poll already in flight cannot reschedule itself past a loop's end.
+  const polls = useRef(new LatestRequest());
+  // Whether this screen is showing. Read by anything that would start a loop
+  // once an await resolves: a timer set after the unmount cleanup has run
+  // has nothing left to clear it, and polls for the life of the tab.
+  const onScreen = useRef(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const { busy: downloading, run: runDownload } = useGuardedAction();
 
   // Computed once per mount, not re-read on every render: the export
   // screen is opened, used for a moment, and left - there is no realistic
@@ -120,43 +147,102 @@ export function ExportView({ api }: { api: KeptApi }) {
     }
   }, [api]);
 
-  useEffect(() => {
-    void api.me().then(setProfile, () => setProfile(null));
-    void refreshJobs();
-    return () => {
-      if (pollTimer.current !== null) {
-        clearTimeout(pollTimer.current);
-      }
-    };
-  }, [api, refreshJobs]);
+  const loadProfile = useCallback(async () => {
+    setProfileError(null);
+    try {
+      setProfile(await api.me());
+    } catch (caught) {
+      setProfile(null);
+      setProfileError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }, [api]);
 
-  const poll = useCallback(
-    async (jobId: string) => {
-      try {
-        const job = await api.exportJob(jobId);
-        setJobs((current) =>
-          current.map((j) => (j.id === jobId ? job : j)),
-        );
-        if (job.status === "queued" || job.status === "running") {
-          pollTimer.current = setTimeout(() => void poll(jobId), POLL_INTERVAL_MS);
-        } else {
-          setActiveJobId(null);
-          // A job can fail after it was accepted (generation itself errors
-          // out), distinct from `start` below's request-time failure - both
-          // are export_failed, the vocabulary has no separate name for
-          // "failed later."
-          if (job.status === "failed") {
-            logEvent({ action: "export_failed" });
+  const stopPolling = useCallback(() => {
+    polls.current.begin();
+    if (pollTimer.current !== null) {
+      clearTimeout(pollTimer.current);
+      pollTimer.current = null;
+    }
+  }, []);
+
+  /**
+   * Watches one job until it stops being live. A failed poll is waited out
+   * rather than ending the watch (`pollGivesUp` has the rule), and the count
+   * restarts on any good answer, so a flaky connection never adds up to
+   * giving up.
+   */
+  const startPolling = useCallback(
+    (jobId: string) => {
+      if (!onScreen.current) {
+        return;
+      }
+      stopPolling();
+      const ticket = polls.current.begin();
+      setActiveJobId(jobId);
+      let failures = 0;
+      const schedule = () => {
+        pollTimer.current = setTimeout(() => void poll(), POLL_INTERVAL_MS);
+      };
+      const poll = async () => {
+        let job: ExportJob;
+        try {
+          job = await api.pollExportJob(jobId);
+        } catch (caught) {
+          if (!polls.current.isLatest(ticket)) {
+            return;
           }
-          await refreshJobs();
+          failures += 1;
+          if (pollGivesUp(caught, failures)) {
+            setActiveJobId(null);
+            setError(caught instanceof Error ? caught.message : String(caught));
+          } else {
+            schedule();
+          }
+          return;
         }
-      } catch (caught) {
+        if (!polls.current.isLatest(ticket)) {
+          return;
+        }
+        failures = 0;
+        setJobs((current) => current.map((j) => (j.id === jobId ? job : j)));
+        if (isLiveExport(job.status)) {
+          schedule();
+          return;
+        }
         setActiveJobId(null);
-        setError(caught instanceof Error ? caught.message : String(caught));
+        // A job can fail after it was accepted (generation itself errors
+        // out), distinct from `start` below's request-time failure - both
+        // are export_failed, the vocabulary has no separate name for
+        // "failed later."
+        if (job.status === "failed") {
+          logEvent({ action: "export_failed" });
+        }
+        await refreshJobs();
+      };
+      schedule();
+    },
+    [api, refreshJobs, stopPolling],
+  );
+
+  const resumePolling = useCallback(
+    (loaded: readonly ExportJob[]) => {
+      const live = liveExportJob(loaded);
+      if (live !== undefined) {
+        startPolling(live.id);
       }
     },
-    [api, refreshJobs],
+    [startPolling],
   );
+
+  useEffect(() => {
+    onScreen.current = true;
+    void loadProfile();
+    void refreshJobs().then(resumePolling);
+    return () => {
+      onScreen.current = false;
+      stopPolling();
+    };
+  }, [loadProfile, refreshJobs, resumePolling, stopPolling]);
 
   async function start(request: ExportRequest) {
     setError(null);
@@ -164,16 +250,45 @@ export function ExportView({ api }: { api: KeptApi }) {
     try {
       const job = await api.startExport(request);
       setJobs((current) => [job, ...current]);
-      setActiveJobId(job.id);
-      pollTimer.current = setTimeout(() => void poll(job.id), POLL_INTERVAL_MS);
+      startPolling(job.id);
     } catch (caught) {
       if (caught instanceof ApiError && caught.code === "export_already_running") {
         setError(caught.message);
-        await refreshJobs();
+        resumePolling(await refreshJobs());
         return;
       }
       logEvent({ action: "export_failed" });
       setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  /**
+   * Download asks the server for a URL at the moment of the click, because a
+   * presigned URL lives five minutes (`PRESIGN_EXPIRY_SECONDS`) and the zip
+   * behind it lives thirty days. The URL the job list carried was dead long
+   * before the screen said it would be: clicking it replaced this tab with
+   * R2's error XML, and logged a download that never happened. So the event
+   * here fires only with a live URL in hand, and every way of not getting
+   * one is said on this screen.
+   */
+  async function download(job: ExportJob) {
+    setError(null);
+    setDownloadingId(job.id);
+    try {
+      const fresh = await api.exportJob(job.id);
+      setJobs((current) => current.map((j) => (j.id === job.id ? fresh : j)));
+      if (fresh.downloadUrl === null) {
+        setError(
+          "This export can no longer be downloaded - re-run the period for a fresh zip.",
+        );
+        return;
+      }
+      startDownload(fresh.downloadUrl);
+      logEvent({ action: "export_downloaded" });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setDownloadingId(null);
     }
   }
 
@@ -187,9 +302,9 @@ export function ExportView({ api }: { api: KeptApi }) {
       <h2>Year-end export</h2>
       <p className="muted">
         A zip with the same rows in three formats - XLSX, CSV and JSON - and
-        every image, named for the period. Links stay good for 30 days;
-        after that, re-run the period - the receipts are the records, the
-        zip is regenerable.
+        every image, named for the period. A finished export can be
+        downloaded for 30 days; after that, re-run the period - the receipts
+        are the records, the zip is regenerable.
       </p>
 
       <div className="export-starters">
@@ -249,7 +364,16 @@ export function ExportView({ api }: { api: KeptApi }) {
             silently different one from the two starters beside it. Hidden
             entirely until the profile loads rather than rendered with a
             guessed year end, since a wrong preset here would look exactly
-            as plausible as a right one. */}
+            as plausible as a right one - and when the load fails, the note
+            below says so, rather than the presets simply not being there. */}
+        {profileError !== null && (
+          <p className="error">
+            The fiscal period presets could not be loaded: {profileError}{" "}
+            <button className="link" onClick={() => void loadProfile()}>
+              Try again
+            </button>
+          </p>
+        )}
         {profile !== null && resolvedPreset !== null && (
           <div className="starter">
             <label>
@@ -312,19 +436,16 @@ export function ExportView({ api }: { api: KeptApi }) {
                 {describeStatus(job)}
               </td>
               <td>
+                {/* The URL here only says the job has a zip; it is never
+                    followed, for the reason on `download` above. */}
                 {job.downloadUrl !== null && (
-                  <a
+                  <button
                     className="download-link"
-                    href={job.downloadUrl}
-                    // The click itself, not a completed transfer - a plain
-                    // navigating anchor gives this component no signal once
-                    // the browser takes over the download, and no
-                    // preventDefault here (rule 1: never block a user
-                    // action on telemetry).
-                    onClick={() => logEvent({ action: "export_downloaded" })}
+                    disabled={downloading}
+                    onClick={() => runDownload(() => download(job))}
                   >
-                    Download zip
-                  </a>
+                    {downloadingId === job.id ? "Preparing…" : "Download zip"}
+                  </button>
                 )}
               </td>
             </tr>

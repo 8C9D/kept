@@ -4,6 +4,7 @@ import { logEvent } from "../events.js";
 import type { ReceiptOptionsHandle } from "../options.js";
 import {
   addReceiptPage,
+  pageAddedNotice,
   replaceReceiptPage,
   sortedByPage,
   type ReceiptImageOutcome,
@@ -13,6 +14,7 @@ import type {
   ReceiptImage as ReceiptImageT,
 } from "../types.js";
 import type { UploadCandidate } from "../upload.js";
+import { useGuardedAction } from "../useGuardedAction.js";
 import {
   DraftError,
   ReceiptFieldsForm,
@@ -47,7 +49,8 @@ export function ReceiptDetailView({
   onBack: () => void;
   onChanged: () => void;
   /** Proposal #8: "open the matching receipt" - switches this same screen
-   * to a different receipt's id, App.tsx owns the view state this drives. */
+   * to a different receipt's id, App.tsx owns the view state this drives
+   * (keyed by that id, so everything below starts fresh for it). */
   onOpenReceipt: (id: string) => void;
 }) {
   const [receipt, setReceipt] = useState<ReceiptDetail | null>(null);
@@ -73,6 +76,11 @@ export function ReceiptDetailView({
   // PENDING receipt's save carries these: a confirmed receipt is served no
   // suggestions to review away from in the first place.
   const reviewedRef = useRef<Set<keyof ReceiptDraft>>(new Set());
+  // Save and Delete, in flight (2026-10). `busy` also disables the form,
+  // because `save` below redraws the draft from the server's answer: without
+  // this, anything typed while the PATCH was on its way was overwritten by
+  // the answer to a question asked before it was typed.
+  const { busy, run } = useGuardedAction();
   // Which image write is in flight, if any - "add" for the add-a-page
   // control, or the page number being replaced. Not a plain boolean: the
   // per-page Replace button needs to know whether IT is the one running,
@@ -250,7 +258,7 @@ export function ReceiptDetailView({
     }
   }
 
-  async function addPage(file: File) {
+  async function addPage(file: File, droppedCount: number) {
     if (imageBusy !== null) {
       return;
     }
@@ -258,7 +266,7 @@ export function ReceiptDetailView({
     setImageNotice(null);
     setImageBusy("add");
     const outcome = await addReceiptPage(api, receiptId, toCandidate(file));
-    await finishImageWrite(outcome, "Page added.");
+    await finishImageWrite(outcome, pageAddedNotice(droppedCount));
   }
 
   async function replacePage(page: number, file: File) {
@@ -333,11 +341,11 @@ export function ReceiptDetailView({
                 setAddPageDragging(false);
                 const file = e.dataTransfer.files[0];
                 if (file !== undefined) {
-                  void addPage(file);
+                  void addPage(file, e.dataTransfer.files.length);
                 }
               }}
             >
-              <AddPagePicker busy={imageBusy === "add"} onPick={(file) => void addPage(file)} />
+              <AddPagePicker busy={imageBusy === "add"} onPick={(file) => void addPage(file, 1)} />
             </div>
           </div>
         </div>
@@ -349,6 +357,7 @@ export function ReceiptDetailView({
             options={options.values}
             api={api}
             onOpenReceipt={onOpenReceipt}
+            disabled={busy}
             onFieldEdited={(field) => editsRef.current.push(field)}
             onFieldReviewed={(field) => reviewedRef.current.add(field)}
             onSuggestionApplied={(field) => clientAppliedRef.current.add(field)}
@@ -356,20 +365,26 @@ export function ReceiptDetailView({
           {error !== null && <p className="error">{error}</p>}
           {notice !== null && <p className="muted">{notice}</p>}
           <div className="detail-actions">
-            <button className="primary" onClick={() => void save()}>
+            <button className="primary" disabled={busy} onClick={() => run(save)}>
               {receipt.status === "pending" ? "Save for later" : "Save"}
             </button>
             {!confirmingDelete ? (
-              <button className="danger" onClick={() => setConfirmingDelete(true)}>
+              <button
+                className="danger"
+                disabled={busy}
+                onClick={() => setConfirmingDelete(true)}
+              >
                 Delete…
               </button>
             ) : (
               <span className="delete-confirm">
                 Delete this receipt and its image from every future export?
-                <button className="danger" onClick={() => void remove()}>
+                <button className="danger" disabled={busy} onClick={() => run(remove)}>
                   Delete receipt
                 </button>
-                <button onClick={() => setConfirmingDelete(false)}>Keep it</button>
+                <button disabled={busy} onClick={() => setConfirmingDelete(false)}>
+                  Keep it
+                </button>
               </span>
             )}
           </div>

@@ -4,6 +4,7 @@ import {
   OPTION_LISTS,
   deleteConfirmText,
   deleteResultMessage,
+  emptyListText,
   optionFieldNoun,
   renameResultMessage,
   validateRename,
@@ -186,5 +187,23 @@ describe("OPTION_LISTS", () => {
       ["category", "categories"],
       ["paymentMethod", "paymentMethods"],
     ]);
+  });
+});
+
+describe("emptyListText - an empty list only says so once the server has", () => {
+  const vendors = OPTION_LISTS[0];
+
+  it("makes the claim about the person's data only after a real answer", () => {
+    expect(emptyListText(vendors, { state: "ready" })).toBe(vendors.empty);
+  });
+
+  it("never says 'No vendors yet' over a failed fetch", () => {
+    const text = emptyListText(vendors, { state: "failed", detail: "offline" });
+    expect(text).not.toBe(vendors.empty);
+    expect(text).not.toMatch(/No vendors/);
+  });
+
+  it("says loading while it is", () => {
+    expect(emptyListText(vendors, { state: "loading" })).toBe("Loading…");
   });
 });
