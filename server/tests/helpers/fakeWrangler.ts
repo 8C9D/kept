@@ -45,17 +45,27 @@ while [ $# -gt 0 ]; do
 done
 stored="$state/objects/$object"
 
+# Pops the first line of a plan, under a lock. The job runs two of these at
+# once, and without one the pop can eat the whole plan: the second process's
+# shell truncates the .next file, the first moves that same empty file over the
+# plan, and the second's tail then reads the file it is writing to.
+next_step() {
+  until mkdir "$state/plan.lock" 2>/dev/null; do sleep 0.01; done
+  step=""
+  if [ -s "$1" ]; then
+    step="$(head -n 1 "$1")"
+    tail -n +2 "$1" > "$1.next"
+    mv "$1.next" "$1"
+  fi
+  rmdir "$state/plan.lock"
+}
+
 case "$verb" in
   get)
     # Created before the request, exactly as the real CLI does.
     : > "$file"
     printf '%s\n' "$file" >> "$state/temp-files.log"
-    step=""
-    if [ -s "$state/plan" ]; then
-      step="$(head -n 1 "$state/plan")"
-      tail -n +2 "$state/plan" > "$state/plan.next"
-      mv "$state/plan.next" "$state/plan"
-    fi
+    next_step "$state/plan"
     case "$step" in
       transient)
         printf '\033[31m✘ \033[41;31m[\033[41;97mERROR\033[41;31m]\033[0m \033[1mFailed to fetch /r2/objects - 500: Internal Server Error;\033[0m\n' >&2
@@ -77,12 +87,7 @@ case "$verb" in
     printf '%s\n' "$content_type" > "$stored.content-type"
     ;;
   delete)
-    step=""
-    if [ -s "$state/delete-plan" ]; then
-      step="$(head -n 1 "$state/delete-plan")"
-      tail -n +2 "$state/delete-plan" > "$state/delete-plan.next"
-      mv "$state/delete-plan.next" "$state/delete-plan"
-    fi
+    next_step "$state/delete-plan"
     case "$step" in
       transient)
         printf '\033[31m✘ \033[41;31m[\033[41;97mERROR\033[41;31m]\033[0m \033[1mFailed to fetch /r2/objects - 500: Internal Server Error;\033[0m\n' >&2

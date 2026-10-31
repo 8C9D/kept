@@ -471,8 +471,7 @@ describe("pruning a deleted account", SLOW, () => {
 
       // What a mistyped bucket would look like: exit 0, nothing gone. Deletes
       // run two at a time and the plan is shared, so it has to outlast every
-      // retry of every object; a plan of exactly four let two objects split it
-      // on a faster machine, and each then succeeded for real.
+      // retry of every object.
       fake.planDeletes(Array<"noop">(64).fill("noop"));
       const lying = await world.runBackup(wrangler);
       expect(lying.code, lying.output).toBe(1);
