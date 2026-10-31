@@ -1,0 +1,26 @@
+# The web client's half of §10B's CI story: strict typecheck, the production
+# build, and the logic suite on push. It needs no backing services and no
+# secrets: the suite is Vitest over the client's own logic, and `npm run build`
+# is the same `tsc --noEmit && vite build` Cloudflare Pages deploys from.
+name: web
+
+on:
+  push:
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
