@@ -241,7 +241,7 @@ built bundle rather than the source.
 | Data | Postgres (Neon in production), S3-compatible object storage (Cloudflare R2; MinIO locally) |
 | Web | React 19, Vite |
 | Infra | Docker on a VM behind a Cloudflare Tunnel, Cloudflare proxy + rate limiting + Pages, GitHub Actions |
-| Tests | vitest (416 backend + 38 web cases), XCTest (632 unit cases, plus UI tests) |
+| Tests | vitest (1,195 backend + 461 web cases), XCTest (762 unit cases, plus UI tests) |
 
 ## Repository map
 
