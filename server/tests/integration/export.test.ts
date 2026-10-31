@@ -447,12 +447,12 @@ describe("the export pipeline", () => {
     });
     expect(response.status).toBe(201);
 
-    // No bytes are planted: the stub below replaces `download` outright, so
-    // whether the object exists is irrelevant to what this test asserts.
+    // No bytes are planted: the stub below replaces `downloadStream` outright,
+    // so whether the object exists is irrelevant to what this test asserts.
     // (An earlier draft planted them under a comment claiming it mattered;
     // deleting that block changed nothing, which is how it was caught.)
-    const originalDownload = harness.storage.download;
-    harness.storage.download = async () => {
+    const originalDownload = harness.storage.downloadStream;
+    harness.storage.downloadStream = async () => {
       const error = new Error("connect ETIMEDOUT 1.2.3.4:443");
       error.name = "TimeoutError";
       throw error;
@@ -471,7 +471,7 @@ describe("the export pipeline", () => {
       expect(job.error).not.toMatch(/never finished uploading/);
       expect(job.error).not.toMatch(/delete/i);
     } finally {
-      harness.storage.download = originalDownload;
+      harness.storage.downloadStream = originalDownload;
     }
   });
 
@@ -493,11 +493,10 @@ describe("the export pipeline", () => {
   });
 
   /**
-   * One export at a time per user, because an export at the budget peaks
-   * near 890 MB RSS and the origin is provisioned at a fixed 2 GB - two at
-   * once does not fit. The live job is inserted directly rather than
-   * started through the API: a real one can finish in milliseconds here,
-   * which would make the assertion race.
+   * One export at a time per user: a job spends minutes of a small box, and a
+   * second one for the same person would only compete with the first. The
+   * live job is inserted directly rather than started through the API: a real
+   * one can finish in milliseconds here, which would make the assertion race.
    */
   describe("one live export per user", () => {
     async function insertJob(

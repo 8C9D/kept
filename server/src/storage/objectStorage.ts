@@ -1,8 +1,11 @@
+import type { Readable } from "node:stream";
+
 /**
  * The image store boundary. Images travel client ↔ storage directly via
  * presigned URLs and never transit the API server (spec §6); export
- * generation is the one server-side reader (it must bundle every image
- * into the zip) and writer (the finished zip itself).
+ * generation is the one routine server-side reader (it must bundle every
+ * image into the zip) and writer (the finished zip itself), and it does both
+ * as streams, so that no object is ever held whole in this process.
  *
  * The interface is defined here and tested against a fake; the Cloudflare
  * R2 implementation arrives when credentials exist (deployment work, after
@@ -20,14 +23,38 @@ export interface ObjectStorage {
   presignUpload(objectKey: string, contentType: string): Promise<string>;
   /** A URL the client can GET the image bytes from, valid briefly. */
   presignDownload(objectKey: string): Promise<string>;
-  /** Server-side write, used for generated export zips. */
+  /**
+   * Server-side write of bytes already in memory. Exports no longer come this
+   * way (see `uploadStream`); it remains for a caller that holds a small,
+   * whole object.
+   */
   upload(
     objectKey: string,
     data: Uint8Array,
     contentType: string,
   ): Promise<void>;
   /**
-   * Server-side read, used to bundle images into an export.
+   * Server-side write of a stream of unknown length, used for generated
+   * export zips, holding a bounded window of it in memory however long the
+   * stream runs.
+   *
+   * ⚠ All or nothing, by contract: when this rejects - the stream errored,
+   * the store refused, anything - no object exists at `objectKey`, not a
+   * partial one, because a truncated zip that looks finished is the worst
+   * thing an export can produce. An adapter that buffers must also not stop
+   * reading early and resolve: it resolves only once `body` has ended and
+   * every byte is stored. Reading `body` is how backpressure reaches the
+   * producer, so a caller starts this BEFORE it starts writing.
+   */
+  uploadStream(
+    objectKey: string,
+    body: Readable,
+    contentType: string,
+  ): Promise<void>;
+  /**
+   * Server-side read of a whole object into memory, for a caller that knows
+   * the object is small. Anything a user uploaded is not known to be small:
+   * the export path reads through `downloadStream` for that reason.
    *
    * ⚠ Every adapter must honour one distinction here, and it is the contract
    * rather than a detail of any one implementation: an object that is not
@@ -45,6 +72,26 @@ export interface ObjectStorage {
    */
   download(objectKey: string): Promise<Uint8Array>;
   /**
+   * Server-side read as a stream, used to bundle images into an export.
+   *
+   * The same absence contract as `download` above, and it is decided up
+   * front: an object that is not there REJECTS with `ObjectNotFoundError`
+   * here, never as an error on `body` part-way through. Anything else that
+   * goes wrong after this resolves arrives as an `error` on `body`, and is
+   * not absence.
+   *
+   * The caller owns `body` from the moment this resolves: an open body is an
+   * open socket, so it must be read to the end or destroyed.
+   */
+  downloadStream(objectKey: string): Promise<DownloadedObject>;
+  /**
+   * Every key under `prefix`, however many there are. Used by account
+   * deletion, the one caller that has to know what is in storage beyond what
+   * the database remembers; a prefix is matched as a string, so pass one that
+   * ends in the separator it means (objectKeys.ts).
+   */
+  listKeys(prefix: string): Promise<string[]>;
+  /**
    * Server-side erase, used by account deletion (spec §6, `DELETE /api/me`)
    * and by nothing else. Receipt deletion is soft - CRA retention makes a
    * per-receipt hard delete off the table (§10B) - so this exists for the
@@ -61,6 +108,13 @@ export interface ObjectStorage {
    * failure) into a reported failure of the whole deletion.
    */
   delete(objectKey: string): Promise<void>;
+}
+
+/** An object being read: its bytes, and the size if the store stated one. */
+export interface DownloadedObject {
+  body: Readable;
+  /** Null when the store did not say, which a caller must not read as zero. */
+  contentLength: number | null;
 }
 
 /**

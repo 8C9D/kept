@@ -251,10 +251,11 @@ export const exportJobs = pgTable(
      * do not exist yet. Two taps of Export land two rows and two concurrent
      * generations.
      *
-     * That matters for memory, not for tidiness: an export at the 256 MiB
-     * budget was measured peaking at ~890 MB RSS (roughly 2.8x its payload,
-     * since the assembled zip exists twice), and the origin is provisioned
-     * at a fixed 2 GB. One at a time fits; two does not.
+     * This began as a memory rule, when an export was assembled in the
+     * process and peaked at ~890 MB RSS. Exports stream now and that argument
+     * is gone; what remains is that a job spends minutes of a 2 vCPU box and
+     * the store's bandwidth, and a second run of the same person's export
+     * would only compete with the first. Refusing costs a sentence.
      *
      * ⚠ A crashed job leaves its row 'running' forever, which this index
      * would otherwise turn into a permanent lockout for that user. The

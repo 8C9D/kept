@@ -1,8 +1,19 @@
+import { createHash, randomBytes } from "node:crypto";
 import { createServer, type Socket } from "node:net";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Readable } from "node:stream";
+import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  HeadObjectCommand,
+  ListMultipartUploadsCommand,
+  S3Client,
+  UploadPartCommand,
+} from "@aws-sdk/client-s3";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ObjectNotFoundError } from "../../src/storage/objectStorage.js";
 import {
   LOCAL_DEV_STORAGE_CONFIG,
+  MULTIPART_PART_BYTES,
   assertStorageReachable,
   createBucketIfMissing,
   createS3ObjectStorage,
@@ -25,11 +36,20 @@ beforeAll(async () => {
   await createBucketIfMissing(LOCAL_DEV_STORAGE_CONFIG);
 });
 
-afterAll(() => {
-  // Objects under runPrefix are left behind deliberately: MinIO's volume
-  // is disposable dev state, and deleting would need list+delete surface
-  // the ObjectStorage interface does not (and should not) expose.
+afterAll(async () => {
+  // These tests upload tens of megabytes of random bytes per run, which is too
+  // much to leave in even a disposable volume.
+  await deleteUnder(runPrefix);
 });
+
+async function deleteUnder(prefix: string): Promise<void> {
+  const keys = await storage.listKeys(prefix);
+  for (let index = 0; index < keys.length; index += 32) {
+    await Promise.all(
+      keys.slice(index, index + 32).map((key) => storage.delete(key)),
+    );
+  }
+}
 
 describe("s3ObjectStorage against MinIO", () => {
   it("round-trips bytes through presigned PUT and GET, as a client would", async () => {
@@ -155,6 +175,355 @@ describe("s3ObjectStorage against MinIO", () => {
     expect(error).toBeInstanceOf(Error);
     expect(error).not.toBeInstanceOf(ObjectNotFoundError);
   });
+});
+
+/**
+ * A stream that hands over `bytes` in chunks of a size nothing would choose,
+ * so a part boundary can never accidentally line up with a chunk boundary.
+ */
+function chunked(bytes: Buffer, chunkSize = 1_300_021): Readable {
+  function* chunks() {
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      yield bytes.subarray(offset, offset + chunkSize);
+    }
+  }
+  return Readable.from(chunks(), { objectMode: false });
+}
+
+/** A stream that delivers `bytes` and then fails. */
+function failingAfter(bytes: Buffer, failure: Error): Readable {
+  return Readable.from(
+    (function* () {
+      yield bytes;
+      throw failure;
+    })(),
+    { objectMode: false },
+  );
+}
+
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/**
+ * The real multipart path, against MinIO. What this cannot prove is R2's own
+ * enforcement of the same-size rule: MinIO accepts mixed part sizes, so a test
+ * here passing does not mean R2 would. That is why the part sizes are read back
+ * and asserted rather than inferred from the upload having worked.
+ */
+describe("uploadStream against MinIO", () => {
+  const s3 = new S3Client({
+    endpoint: LOCAL_DEV_STORAGE_CONFIG.endpoint,
+    region: LOCAL_DEV_STORAGE_CONFIG.region,
+    credentials: {
+      accessKeyId: LOCAL_DEV_STORAGE_CONFIG.accessKeyId,
+      secretAccessKey: LOCAL_DEV_STORAGE_CONFIG.secretAccessKey,
+    },
+    forcePathStyle: LOCAL_DEV_STORAGE_CONFIG.forcePathStyle,
+  });
+  const bucket = LOCAL_DEV_STORAGE_CONFIG.bucket;
+
+  const head = (objectKey: string, partNumber?: number) =>
+    s3.send(
+      new HeadObjectCommand({
+        Bucket: bucket,
+        Key: objectKey,
+        ...(partNumber !== undefined && { PartNumber: partNumber }),
+      }),
+    );
+
+  const inProgressUploads = async (objectKey: string) => {
+    const { Uploads } = await s3.send(
+      new ListMultipartUploadsCommand({ Bucket: bucket, Prefix: objectKey }),
+    );
+    return Uploads ?? [];
+  };
+
+  it("round-trips more than a part, in parts of exactly one size", async () => {
+    const objectKey = `${runPrefix}/exports/multipart.zip`;
+    const bytes = randomBytes(2 * MULTIPART_PART_BYTES + 4_000_000);
+
+    await storage.uploadStream(objectKey, chunked(bytes), "application/zip");
+
+    expect(sha256(await storage.download(objectKey))).toBe(sha256(bytes));
+    const object = await head(objectKey);
+    // `-3` is the store's own statement that this went up as three parts.
+    expect(object.ETag).toMatch(/-3"$/);
+    expect(object.ContentType).toBe("application/zip");
+    // R2's rule, checked on what was stored.
+    expect((await head(objectKey, 1)).ContentLength).toBe(MULTIPART_PART_BYTES);
+    expect((await head(objectKey, 2)).ContentLength).toBe(MULTIPART_PART_BYTES);
+    expect((await head(objectKey, 3)).ContentLength).toBe(4_000_000);
+  }, 30_000);
+
+  it("handles a stream that ends exactly on a part boundary", async () => {
+    // The off-by-one case: a final flush of zero bytes would be an empty part,
+    // and an empty last part is an upload the store refuses.
+    const objectKey = `${runPrefix}/exports/exact-part.zip`;
+    const bytes = randomBytes(MULTIPART_PART_BYTES);
+
+    await storage.uploadStream(objectKey, chunked(bytes), "application/zip");
+
+    expect(sha256(await storage.download(objectKey))).toBe(sha256(bytes));
+    expect((await head(objectKey)).ETag).toMatch(/-1"$/);
+  }, 30_000);
+
+  it("stores a stream shorter than a part as one plain object", async () => {
+    const objectKey = `${runPrefix}/exports/short.zip`;
+    const bytes = randomBytes(1024);
+
+    await storage.uploadStream(objectKey, chunked(bytes, 100), "application/zip");
+
+    expect(await storage.download(objectKey)).toEqual(new Uint8Array(bytes));
+    const object = await head(objectKey);
+    expect(object.ETag).not.toContain("-");
+    expect(object.ContentType).toBe("application/zip");
+  });
+
+  it("stores an empty stream as an empty object, which multipart cannot do", async () => {
+    const objectKey = `${runPrefix}/exports/empty.zip`;
+
+    await storage.uploadStream(
+      objectKey,
+      Readable.from([], { objectMode: false }),
+      "application/zip",
+    );
+
+    expect((await head(objectKey)).ContentLength).toBe(0);
+    expect(await storage.download(objectKey)).toEqual(new Uint8Array());
+  });
+
+  it("aborts when the stream fails after a part has gone up, leaving nothing", async () => {
+    const objectKey = `${runPrefix}/exports/stream-fails.zip`;
+    const failure = new Error("the zip stream broke");
+
+    await expect(
+      storage.uploadStream(
+        objectKey,
+        failingAfter(randomBytes(MULTIPART_PART_BYTES + 1024), failure),
+        "application/zip",
+      ),
+    ).rejects.toBe(failure);
+
+    await expect(storage.download(objectKey)).rejects.toBeInstanceOf(
+      ObjectNotFoundError,
+    );
+    expect(await inProgressUploads(objectKey)).toEqual([]);
+  }, 30_000);
+
+  it("leaves nothing when the stream fails before a part ever filled", async () => {
+    const objectKey = `${runPrefix}/exports/fails-early.zip`;
+    const failure = new Error("failed before a part");
+
+    await expect(
+      storage.uploadStream(
+        objectKey,
+        failingAfter(randomBytes(1024), failure),
+        "application/zip",
+      ),
+    ).rejects.toBe(failure);
+
+    await expect(storage.download(objectKey)).rejects.toBeInstanceOf(
+      ObjectNotFoundError,
+    );
+  });
+
+  describe("when the store itself fails", () => {
+    /**
+     * Fails the first command of this type and sends everything else, so the
+     * real client does the real work up to the moment under test.
+     */
+    function failFirst(commandType: unknown, failure: Error) {
+      const send = S3Client.prototype.send as (
+        this: S3Client,
+        ...args: unknown[]
+      ) => unknown;
+      let failed = false;
+      return vi
+        .spyOn(S3Client.prototype, "send")
+        .mockImplementation(function (this: S3Client, ...args: unknown[]) {
+          if (
+            !failed &&
+            args[0] instanceof (commandType as new (...a: never[]) => object)
+          ) {
+            failed = true;
+            return Promise.reject(failure);
+          }
+          return send.apply(this, args) as never;
+        });
+    }
+
+    it("aborts when a part is refused", async () => {
+      const objectKey = `${runPrefix}/exports/part-refused.zip`;
+      const failure = new Error("InternalError on part 1");
+      const spy = failFirst(UploadPartCommand, failure);
+      try {
+        await expect(
+          storage.uploadStream(
+            objectKey,
+            chunked(randomBytes(MULTIPART_PART_BYTES + 1024)),
+            "application/zip",
+          ),
+        ).rejects.toBe(failure);
+      } finally {
+        spy.mockRestore();
+      }
+
+      await expect(storage.download(objectKey)).rejects.toBeInstanceOf(
+        ObjectNotFoundError,
+      );
+      expect(await inProgressUploads(objectKey)).toEqual([]);
+    }, 30_000);
+
+    it("aborts when completion is refused", async () => {
+      const objectKey = `${runPrefix}/exports/complete-refused.zip`;
+      const failure = new Error("InvalidPart");
+      const spy = failFirst(CompleteMultipartUploadCommand, failure);
+      try {
+        await expect(
+          storage.uploadStream(
+            objectKey,
+            chunked(randomBytes(MULTIPART_PART_BYTES + 1024)),
+            "application/zip",
+          ),
+        ).rejects.toBe(failure);
+      } finally {
+        spy.mockRestore();
+      }
+
+      await expect(storage.download(objectKey)).rejects.toBeInstanceOf(
+        ObjectNotFoundError,
+      );
+      expect(await inProgressUploads(objectKey)).toEqual([]);
+    }, 30_000);
+
+    it("logs a failed abort and still reports the original failure", async () => {
+      const objectKey = `${runPrefix}/exports/abort-fails.zip`;
+      const failure = new Error("the original failure");
+      const abortFailure = new Error("abort was refused too");
+      const spy = failFirst(AbortMultipartUploadCommand, abortFailure);
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(
+          storage.uploadStream(
+            objectKey,
+            failingAfter(randomBytes(MULTIPART_PART_BYTES + 1024), failure),
+            "application/zip",
+          ),
+        ).rejects.toBe(failure);
+        const line = logged.mock.calls.flat().join(" ");
+        expect(line).toContain("Could not abort multipart upload");
+        expect(line).toContain("abort was refused too");
+        // An export key contains the user id.
+        expect(line).not.toContain(objectKey);
+      } finally {
+        spy.mockRestore();
+        logged.mockRestore();
+      }
+
+      // The positive control the "nothing in progress" assertions above lean
+      // on: the listing really does see an upload that was left behind.
+      const uploads = await inProgressUploads(objectKey);
+      expect(uploads).toHaveLength(1);
+      await s3.send(
+        new AbortMultipartUploadCommand({
+          Bucket: bucket,
+          Key: objectKey,
+          UploadId: uploads[0]?.UploadId,
+        }),
+      );
+    }, 30_000);
+  });
+});
+
+describe("downloadStream against MinIO", () => {
+  it("streams the bytes and states the size", async () => {
+    const objectKey = `${runPrefix}/2026/08/stream-me.jpg`;
+    const bytes = randomBytes(100_000);
+    await storage.upload(objectKey, bytes, "image/jpeg");
+
+    const { body, contentLength } = await storage.downloadStream(objectKey);
+
+    expect(contentLength).toBe(100_000);
+    expect(body).toBeInstanceOf(Readable);
+    const received: Uint8Array[] = [];
+    for await (const chunk of body as AsyncIterable<Uint8Array>) {
+      received.push(chunk);
+    }
+    expect(sha256(Buffer.concat(received))).toBe(sha256(bytes));
+  });
+
+  it("answers absence on the same contract as download, up front", async () => {
+    const error = await storage
+      .downloadStream(`${runPrefix}/does-not-exist.jpg`)
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      );
+    expect(error).toBeInstanceOf(ObjectNotFoundError);
+    expect((error as Error).cause).toMatchObject({ name: "NoSuchKey" });
+  });
+
+  it("does not report a refused credential as an absent object", async () => {
+    const objectKey = `${runPrefix}/2026/08/stream-credential.jpg`;
+    await storage.upload(objectKey, new Uint8Array([1, 2, 3]), "image/jpeg");
+    const wrongCredential = createS3ObjectStorage({
+      ...LOCAL_DEV_STORAGE_CONFIG,
+      secretAccessKey: "not-the-secret",
+    });
+
+    const error = await wrongCredential.downloadStream(objectKey).then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ObjectNotFoundError);
+  });
+});
+
+describe("listKeys against MinIO", () => {
+  it("returns every key under a prefix and nothing beside it", async () => {
+    const prefix = `${runPrefix}/list-scoped/`;
+    await storage.upload(`${prefix}a.jpg`, new Uint8Array([1]), "image/jpeg");
+    await storage.upload(`${prefix}b/c.jpg`, new Uint8Array([1]), "image/jpeg");
+    await storage.upload(
+      `${runPrefix}/list-scoped-sibling/d.jpg`,
+      new Uint8Array([1]),
+      "image/jpeg",
+    );
+
+    expect((await storage.listKeys(prefix)).sort()).toEqual([
+      `${prefix}a.jpg`,
+      `${prefix}b/c.jpg`,
+    ]);
+  });
+
+  it("answers an empty list for a prefix nothing is under", async () => {
+    expect(await storage.listKeys(`${runPrefix}/nothing-here/`)).toEqual([]);
+  });
+
+  it("walks past one page: S3 answers at most 1000 keys per request", async () => {
+    // Reached through a real listing or not at all - a page size here would
+    // be a parameter nothing in production passes. 1001 is the smallest count
+    // that fails if the continuation token is ignored.
+    const prefix = `${runPrefix}/list-paged/`;
+    const keys = Array.from(
+      { length: 1001 },
+      (_, index) => `${prefix}${String(index).padStart(4, "0")}.jpg`,
+    );
+    for (let index = 0; index < keys.length; index += 32) {
+      await Promise.all(
+        keys
+          .slice(index, index + 32)
+          .map((key) => storage.upload(key, new Uint8Array([1]), "image/jpeg")),
+      );
+    }
+
+    expect((await storage.listKeys(prefix)).sort()).toEqual(keys);
+
+    await deleteUnder(prefix);
+    expect(await storage.listKeys(prefix)).toEqual([]);
+  }, 60_000);
 });
 
 describe("resolveStorageConfig", () => {

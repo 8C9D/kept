@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import {
   ObjectNotFoundError,
   type ObjectStorage,
@@ -5,8 +6,8 @@ import {
 
 /**
  * In-memory object storage. Presigned URLs are recognizable fakes that
- * embed the object key so tests can assert the right key was signed;
- * upload/download work against a Map so export generation runs for real.
+ * embed the object key so tests can assert the right key was signed; the
+ * reads and writes work against a Map so export generation runs for real.
  */
 export interface FakeObjectStorage extends ObjectStorage {
   /** Test-side inspection of what was stored. */
@@ -41,6 +42,31 @@ export function fakeObjectStorage(): FakeObjectStorage {
         throw new ObjectNotFoundError(objectKey);
       }
       return data;
+    },
+    async downloadStream(objectKey: string) {
+      const data = objects.get(objectKey);
+      if (data === undefined) {
+        // The same contract as `download` above: absence is decided here,
+        // up front, never as an error on the stream.
+        throw new ObjectNotFoundError(objectKey);
+      }
+      return {
+        body: Readable.from([Buffer.from(data)], { objectMode: false }),
+        contentLength: data.byteLength,
+      };
+    },
+    async uploadStream(objectKey: string, body: Readable) {
+      // Stored only once the stream has ended: a stream that errors rejects
+      // out of this loop and leaves nothing behind, which is the all-or-nothing
+      // contract the real adapter keeps by aborting the multipart upload.
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of body as AsyncIterable<Uint8Array>) {
+        chunks.push(chunk);
+      }
+      objects.set(objectKey, Buffer.concat(chunks));
+    },
+    async listKeys(prefix: string) {
+      return [...objects.keys()].filter((key) => key.startsWith(prefix));
     },
     async delete(objectKey: string) {
       // Absent is success, per the ObjectStorage contract: the real adapter

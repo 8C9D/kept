@@ -1,12 +1,21 @@
+import { Readable } from "node:stream";
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
   CreateBucketCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
+  UploadPartCommand,
+  type CompletedPart,
+  type S3ClientConfig,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { errorSummary } from "../observability/errorSummary.js";
 import { ObjectNotFoundError, type ObjectStorage } from "./objectStorage.js";
 
 /**
@@ -29,6 +38,36 @@ export interface S3StorageConfig {
 /** Presigned URLs are short-lived by design (spec §10B): long enough for
  * an upload or an image render, useless to anyone who finds one later. */
 const PRESIGN_EXPIRY_SECONDS = 300;
+
+/**
+ * The size of every multipart part but the last, and so the bound on how much
+ * of an uploading stream this process holds.
+ *
+ * ⚠ Fixed, not merely a minimum, and that is R2's rule rather than a taste: S3
+ * asks that a non-final part be at least 5 MiB, but R2 also requires every
+ * non-final part to be the SAME size and refuses the upload at completion
+ * otherwise (error 10048, `InvalidPart`). Slicing on whatever chunk boundaries
+ * a stream happens to produce would pass against MinIO and fail in production.
+ *
+ * Eight rather than the minimum five because the 10,000-part ceiling then sits
+ * at 80 GiB, far above any export the budget allows, and because one extra part
+ * of slack costs nothing against a 4 GiB budget.
+ */
+export const MULTIPART_PART_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The bound on one multipart request, retries included.
+ *
+ * The SDK imposes no timeout of its own (see `assertStorageReachable` for the
+ * measurement), and an upload is the one place a hang is unusually bad: the
+ * producer is held by backpressure and nothing else moves, so a store that
+ * stopped answering would leave an export 'running' until the stale clock
+ * retired it, still holding its socket and its part buffer. This is a ceiling
+ * on a hang rather than a rate limit, which is why it is minutes against a
+ * request measured in seconds; completing a large upload is the slowest of
+ * these and it must never be the one that gets cut off.
+ */
+const MULTIPART_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
  * The docker-compose MinIO instance, used when no STORAGE_* environment is
@@ -84,7 +123,90 @@ export function resolveStorageConfig(
 
 export function createS3ObjectStorage(config: S3StorageConfig): ObjectStorage {
   const client = makeClient(config);
+  // ⚠ Multipart gets its own client, with the SDK's default checksums off.
+  // Left on, the SDK adds `x-amz-checksum-crc32` to every UploadPart, and an
+  // upload whose CreateMultipartUpload did not declare the algorithm is one
+  // S3-compatible stores are entitled to refuse at completion - which is why
+  // the SDK's own `Upload` helper declares it, and a hand-rolled upload has to
+  // choose. Plain multipart, with no checksum headers anywhere, is the oldest
+  // shape of this API and the one with nothing left to disagree about. The
+  // default client stays as it is: `upload` and every presigned URL are proven
+  // against production with those settings.
+  const multipartClient = makeClient(config, {
+    requestChecksumCalculation: "WHEN_REQUIRED",
+  });
   const bucket = config.bucket;
+
+  /**
+   * The one place S3's spelling of "not there" becomes this project's (see
+   * ObjectNotFoundError), shared by both read paths so they cannot answer the
+   * question differently. Only absence is translated; everything else - a
+   * timeout, a signature failure, NoSuchBucket - rethrows untouched and
+   * reports as what it was.
+   */
+  async function getObject(objectKey: string) {
+    let response;
+    try {
+      response = await client.send(
+        new GetObjectCommand({ Bucket: bucket, Key: objectKey }),
+      );
+    } catch (error) {
+      if (isMissingObject(error)) {
+        throw new ObjectNotFoundError(objectKey, { cause: error });
+      }
+      throw error;
+    }
+    const { Body: body, ContentLength: contentLength } = response;
+    if (body === undefined) {
+      // A 200 with no body is not a state S3 defines; refuse loudly
+      // rather than hand back empty bytes.
+      throw new Error(`Object ${objectKey} returned no body`);
+    }
+    return { body, contentLength };
+  }
+
+  async function createMultipartUpload(objectKey: string, contentType: string) {
+    const { UploadId: uploadId } = await multipartClient.send(
+      new CreateMultipartUploadCommand({
+        Bucket: bucket,
+        Key: objectKey,
+        ContentType: contentType,
+      }),
+      requestBound(),
+    );
+    if (uploadId === undefined) {
+      throw new Error("Storage opened a multipart upload with no upload id");
+    }
+    return uploadId;
+  }
+
+  /**
+   * Abort an upload that has already failed. Never throws: whatever went wrong
+   * before this is what the caller needs to hear, and a store too broken to
+   * abort is probably the same fault, not a new one. Logged rather than
+   * swallowed, because the parts it leaves behind are invisible to a listing
+   * and billed as storage until R2's default expiry takes them after 7 days.
+   * The upload id is in the line and the key deliberately is not: an export
+   * key contains the user id.
+   */
+  async function abortMultipartUpload(objectKey: string, uploadId: string) {
+    try {
+      await multipartClient.send(
+        new AbortMultipartUploadCommand({
+          Bucket: bucket,
+          Key: objectKey,
+          UploadId: uploadId,
+        }),
+        requestBound(),
+      );
+    } catch (error) {
+      console.error(
+        `Could not abort multipart upload ${uploadId}; its parts stay in ` +
+          `the bucket until storage expires them:`,
+        errorSummary(error),
+      );
+    }
+  }
 
   return {
     async presignUpload(objectKey, contentType) {
@@ -127,28 +249,140 @@ export function createS3ObjectStorage(config: S3StorageConfig): ObjectStorage {
       );
     },
 
-    async download(objectKey) {
-      let response;
+    /**
+     * ⚠ Hand-rolled rather than the SDK's `Upload`, because `Upload` would be
+     * a dependency this project does not declare, and because this is small
+     * enough to read: one fixed buffer, filled and flushed, one part at a time.
+     *
+     * Sequential on purpose. `await` on the part is what stops this reading
+     * `body`, and that is the backpressure that holds the zip, the archiver and
+     * ultimately the GetObject socket to this upload's speed. Parallel parts
+     * would be faster and would mean a part's worth of memory per slot, on a
+     * process whose whole reason for streaming is 1 GiB of RAM.
+     *
+     * Multipart is opened lazily, when the first part fills. A stream that
+     * never fills one - an empty one included, and S3 refuses a multipart
+     * completion with no parts - goes up as one PutObject of what was buffered,
+     * so "no parts" is not a case the multipart path ever has to handle.
+     */
+    async uploadStream(objectKey, body, contentType) {
+      // Reused for every part: each send finishes, retries included, before
+      // the buffer is written again, so nothing can be reading it by then.
+      const pending = Buffer.allocUnsafe(MULTIPART_PART_BYTES);
+      let filled = 0;
+      let uploadId: string | undefined;
+      const parts: CompletedPart[] = [];
+
+      const sendPart = async (bytes: Uint8Array) => {
+        uploadId ??= await createMultipartUpload(objectKey, contentType);
+        const partNumber = parts.length + 1;
+        const { ETag } = await multipartClient.send(
+          new UploadPartCommand({
+            Bucket: bucket,
+            Key: objectKey,
+            UploadId: uploadId,
+            PartNumber: partNumber,
+            Body: bytes,
+          }),
+          requestBound(),
+        );
+        if (ETag === undefined) {
+          // Completion cannot be asked for without it, and S3 defines no
+          // answer that omits one.
+          throw new Error(`Part ${partNumber} was stored with no ETag`);
+        }
+        parts.push({ ETag, PartNumber: partNumber });
+      };
+
       try {
-        response = await client.send(
-          new GetObjectCommand({ Bucket: bucket, Key: objectKey }),
+        for await (const chunk of body as AsyncIterable<Uint8Array>) {
+          let consumed = 0;
+          while (consumed < chunk.byteLength) {
+            const taken = Math.min(
+              chunk.byteLength - consumed,
+              MULTIPART_PART_BYTES - filled,
+            );
+            pending.set(chunk.subarray(consumed, consumed + taken), filled);
+            consumed += taken;
+            filled += taken;
+            if (filled === MULTIPART_PART_BYTES) {
+              await sendPart(pending);
+              filled = 0;
+            }
+          }
+        }
+
+        if (uploadId === undefined) {
+          await client.send(
+            new PutObjectCommand({
+              Bucket: bucket,
+              Key: objectKey,
+              Body: pending.subarray(0, filled),
+              ContentType: contentType,
+            }),
+          );
+          return;
+        }
+
+        if (filled > 0) {
+          await sendPart(pending.subarray(0, filled));
+        }
+        await multipartClient.send(
+          new CompleteMultipartUploadCommand({
+            Bucket: bucket,
+            Key: objectKey,
+            UploadId: uploadId,
+            MultipartUpload: { Parts: parts },
+          }),
+          requestBound(),
         );
       } catch (error) {
-        // The one place S3's spelling of "not there" becomes this project's
-        // (see ObjectNotFoundError). Only absence is translated; everything
-        // else - a timeout, a signature failure, NoSuchBucket - rethrows
-        // untouched and reports as what it was.
-        if (isMissingObject(error)) {
-          throw new ObjectNotFoundError(objectKey, { cause: error });
+        // Whatever failed - the stream, a part, the completion - no object
+        // may appear, and the parts must not linger.
+        if (uploadId !== undefined) {
+          await abortMultipartUpload(objectKey, uploadId);
         }
         throw error;
       }
-      if (response.Body === undefined) {
-        // A 200 with no body is not a state S3 defines; refuse loudly
-        // rather than hand back empty bytes.
-        throw new Error(`Object ${objectKey} returned no body`);
+    },
+
+    async download(objectKey) {
+      const { body } = await getObject(objectKey);
+      return body.transformToByteArray();
+    },
+
+    async downloadStream(objectKey) {
+      const { body, contentLength } = await getObject(objectKey);
+      if (!(body instanceof Readable)) {
+        // The SDK's type admits browser bodies; on Node it is always a stream.
+        // Stated as a check so a surprise fails here, naming itself, instead
+        // of as a missing method somewhere inside the zip.
+        throw new Error(`Object ${objectKey} returned a non-stream body`);
       }
-      return response.Body.transformToByteArray();
+      return { body, contentLength: contentLength ?? null };
+    },
+
+    async listKeys(prefix) {
+      const keys: string[] = [];
+      let continuationToken: string | undefined;
+      do {
+        const page = await client.send(
+          new ListObjectsV2Command({
+            Bucket: bucket,
+            Prefix: prefix,
+            ContinuationToken: continuationToken,
+          }),
+        );
+        for (const object of page.Contents ?? []) {
+          if (object.Key !== undefined) {
+            keys.push(object.Key);
+          }
+        }
+        continuationToken = page.IsTruncated
+          ? page.NextContinuationToken
+          : undefined;
+      } while (continuationToken !== undefined);
+      return keys;
     },
 
     async delete(objectKey) {
@@ -163,6 +397,11 @@ export function createS3ObjectStorage(config: S3StorageConfig): ObjectStorage {
       );
     },
   };
+}
+
+/** A fresh `MULTIPART_REQUEST_TIMEOUT_MS` for one multipart request. */
+function requestBound(): { abortSignal: AbortSignal } {
+  return { abortSignal: AbortSignal.timeout(MULTIPART_REQUEST_TIMEOUT_MS) };
 }
 
 /**
@@ -211,8 +450,8 @@ const PROBE_TIMEOUT_MS = 10_000;
  * R2 (`npm run storage:probe-keys` exercises `GetObject` and `PutObject`).
  * A token that could serve every request in the app but not answer
  * `HeadBucket` would have blocked the deploy outright, which is a P0 traded
- * for a P1. Reading a key is exactly what `download` does on the export path,
- * so a credential that fails this probe cannot serve an export either.
+ * for a P1. Reading a key is exactly what `downloadStream` does on the export
+ * path, so a credential that fails this probe cannot serve an export either.
  *
  * `NoSuchKey`/`NotFound` is therefore SUCCESS: it is storage answering, in
  * full sentences, that the bucket is there and the credential may read it.
@@ -357,8 +596,12 @@ function isMissingBucket(error: unknown): boolean {
   return name === "NoSuchBucket" || name === "NotFound";
 }
 
-function makeClient(config: S3StorageConfig): S3Client {
+function makeClient(
+  config: S3StorageConfig,
+  overrides: Pick<S3ClientConfig, "requestChecksumCalculation"> = {},
+): S3Client {
   return new S3Client({
+    ...overrides,
     endpoint: config.endpoint,
     region: config.region,
     credentials: {

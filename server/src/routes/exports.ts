@@ -45,7 +45,12 @@ const STALE_QUEUED_AFTER_MINUTES = 5;
 /**
  * A crash mid-run strands a poller identically, so running jobs go stale
  * too - on a far longer clock, since generation legitimately takes time.
- * Thirty minutes is well above anything the size budget permits.
+ *
+ * ⚠ A pair with `DEFAULT_EXPORT_LIMITS`, which is what keeps this honest. Since
+ * exports stream, memory no longer bounds a job; the byte budget is set so that
+ * even a job at the limit fits inside this clock at any plausible speed between
+ * the origin and storage. Raising one means re-checking the other, because this
+ * clock retires a job without knowing whether it is dead or merely slow.
  */
 const STALE_RUNNING_AFTER_MINUTES = 30;
 

@@ -37,7 +37,8 @@ EXPOSE 3000
 # /app and node_modules are root-owned - which is FINE and is the point of not
 # chowning them: the runtime user can read them and cannot modify them, so the
 # image's own code is not writable by the process running it. Nothing here
-# writes to disk; exports are built in memory and streamed to object storage.
+# writes to disk; exports are streamed from object storage back to object
+# storage, holding one upload part in memory rather than the zip.
 USER node
 
 CMD ["node", "--import", "tsx", "src/index.ts"]

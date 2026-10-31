@@ -62,6 +62,23 @@ export function exportObjectKey(
 }
 
 /**
+ * The two prefixes everything a user owns in storage sits under, for the one
+ * act that has to name them whole: account deletion (`DELETE /api/me`).
+ *
+ * The trailing slash is load-bearing. A bare id is a string prefix, not a
+ * folder, and the listing that consumes these matches characters: without the
+ * slash, a prefix would answer for any key that merely begins with those
+ * characters, and what is done to the answer is deletion.
+ */
+export function userImagePrefix(userId: string): string {
+  return `${userId}/`;
+}
+
+export function userExportPrefix(userId: string): string {
+  return `${EXPORTS_PREFIX}${userId}/`;
+}
+
+/**
  * Exactly the keys `receiptImageObjectKey` produces for this user, and
  * nothing else.
  *
