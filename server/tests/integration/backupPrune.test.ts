@@ -469,14 +469,18 @@ describe("pruning a deleted account", SLOW, () => {
       await world.deleteAccount(alice.id);
       await greenAt(32, wrangler);
 
-      // What a mistyped bucket would look like: exit 0, four tries, nothing gone.
-      fake.planDeletes(["noop", "noop", "noop", "noop"]);
+      // What a mistyped bucket would look like: exit 0, nothing gone. Deletes
+      // run two at a time and the plan is shared, so it has to outlast every
+      // retry of every object; a plan of exactly four let two objects split it
+      // on a faster machine, and each then succeeded for real.
+      fake.planDeletes(Array<"noop">(64).fill("noop"));
       const lying = await world.runBackup(wrangler);
       expect(lying.code).toBe(1);
       expect(lying.output).toContain("still there after the delete");
       expect(pendingFile()).toContain(alice.id);
       expect(existsSync(localPath(oldest))).toBe(true);
 
+      fake.planDeletes([]);
       await expectGreenNow(wrangler);
 
       expect(pendingFile()).toBe("");
