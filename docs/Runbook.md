@@ -3,10 +3,10 @@
 Written for someone who was not in the session that wrote it, including the owner in six months.
 
 This covers the deployed system: how to deploy, how to run a migration, how to roll back, and how to take and restore a backup.
-The one-time setup that creates the accounts and secrets is not here - it is the ordered checklist in `docs/gates/wave-6.md` §3, and it runs once.
+The one-time setup that created the accounts and secrets is not here: it ran once, in August 2026, from a checklist that left the repo on 2026-09-04 (`docs/gates/wave-6.md` wherever this file still cites it).
 
 **The shape of the thing.**
-An iPhone app and (later) a web client talk to one Node process on Fly.io, which talks to Postgres on Neon and object storage on Cloudflare R2.
+An iPhone app and a web client talk to one Node process on an Azure VM behind a Cloudflare Tunnel, which talks to Postgres on Neon and object storage on Cloudflare R2.
 Cloudflare sits in front of the origin and carries the rate limiter.
 Spec §4.2 has the reasoning; this file has the commands.
 
@@ -96,6 +96,8 @@ Ship the commit that is on `main`; the VM builds from the repository, not from t
 
 **Migrations do not run on deploy** unless you pass `--migrate`, and then they run from the image being deployed, before the swap. See §2.
 
+⚠ **The 2026-10-31 batch had an order too.** No migration. Server first, then Pages, then a TestFlight build. Until the phones update, a swipe on a withheld row answers 409 `amounts_need_review` with its message, which is the guard working.
+
 *Until 2026-10-02 this section read `fly deploy` from `server/`; the Fly app still exists at zero machines and `server/fly.toml` still describes it, so that command still works as the fallback (§5) and nowhere else.*
 
 ⚠ **The 2026-09-01 batch had an order, and it was not the default one.** Executed in full the same afternoon (`docs/DECISIONS.md`, 2026-09-01, last entry) - kept here because the next batch that pairs a migration with code that reads it will need the same sequence. In sequence:
@@ -156,7 +158,7 @@ The accepted caveat is that a Cloudflare account compromise reaches both the rec
 Still open as of 2026-08-16: the `kept-backups` bucket exists, but nothing schedules the dump yet and no dump file has been verified - this is the one first-deploy item left.
 Progress 2026-08-18: the tooling now exists - `npm run db:backup` (dump, upload, size-check, sha256) and the launchd template `server/ops/net.keptapp.backup.plist` (§4, "The scheduled dump").
 Executed 2026-08-20 to the token boundary: `~/.kept/backup.env` written (production direct-endpoint `DATABASE_URL`; quoting and `PATH` facts in §4), the agent installed and loaded (nightly 02:00, refusing loudly to its log until the token exists), the full dump→upload→size-check→sha256 path rehearsed end to end against the dev database and a local `kept-backups` MinIO bucket, and the §4 drill run against a manual production dump - row counts verified 1/0/0/0, the image leg refused as vacuous because production holds no images yet, which is the verifier working as designed.
-Still the owner's, the one piece code cannot mint: the R2 API token scoped to `kept-backups` (§4 has the dashboard path), pasted into `~/.kept/backup.env`; then `launchctl start net.keptapp.backup` and the §4 drill against that scheduled dump's file - and the drill's image leg re-runs after the first receipt with an image lands in production.
+*(Superseded 2026-10-31: the job no longer needs that token. §4 has the current procedure.)*
 
 **3. Decide the Neon plan, knowing what the history window is not.**
 Neon's point-in-time restore is a **history window measured in hours** (6 on Free, 7 days on Launch, 30 on Scale) - a good answer to "I ran the wrong thing twenty minutes ago" and **not any part of the six-year retention story** (§4).
@@ -277,61 +279,58 @@ docker run --rm -v "$PWD:/out" postgres:16 \
 
 Keep the file. It is a tax record.
 
-### The scheduled dump *(tooling added 2026-08-18; installed and running to the token boundary 2026-08-20)*
+### The scheduled backup *(rebuilt 2026-10-31)*
 
-`npm run db:backup` is the scriptable form of the dump above: `pg_dump -Fc`
-of `DATABASE_URL`, uploaded to a dedicated backup bucket with a
-UTC-timestamped key (`pg/kept-YYYYMMDD-HHMMSS.dump`), the upload re-read and
-size-checked, the file's sha256 printed. It requires all five of
+`npm run db:backup` is the whole procedure, both stores, in one run. It is what the hand-run backups before it did, and what the older dump-only script never was:
+
+1. **Preflight.** `pg_dump`, `pg_restore`, `initdb` and `pg_ctl` at 16 or newer, plus wrangler in wrangler mode; a missing one refuses by name.
+2. **Dump** to `<BACKUP_LOCAL_DIR>/pg/kept-<UTC stamp>.dump`, mode 600.
+3. **Restore it, every run,** into a throwaway Postgres cluster bound to loopback, and compare `count(*)` against the source for every table plus `drizzle.__drizzle_migrations`. A difference redoes the dump once, since a client can write at 02:00, then fails. No receipts or no images restored is a failure, not a pass. The cluster is stopped and deleted however the run ends.
+4. **Images.** Every `receipt_images` row is read from the *restored* database, tombstoned ones included, because a soft-deleted image is still a retained record. Each object is fetched from the source bucket once, hashed against its row's digest and kept at `<BACKUP_LOCAL_DIR>/images/<key>`. Wrong bytes never replace a good local copy. `MISSING` on a live row fails the run; on a tombstone it is a warning.
+5. **Off-site.** The dump goes to `kept-backups/pg/`, new images to `images/mirror/<key>`, a manifest of every row to `manifests/`, and each is re-downloaded and compared. `offsite-ledger-<destination>.tsv` remembers what is already there, so losing it costs only a re-upload.
+6. **Record.** `last-success.json` is written only when all of the above was green; `last-run.json` always, with the failures listed.
+
+**What it needs in `~/.kept/backup.env`** (chmod 600, every value quoted: the file is sourced by zsh and a Neon URL carries `&`):
 
 ```
-DATABASE_URL
-BACKUP_STORAGE_ENDPOINT      # https://<account-id>.r2.cloudflarestorage.com
-BACKUP_STORAGE_BUCKET        # kept-backups - NEVER the image bucket
-BACKUP_STORAGE_ACCESS_KEY_ID
-BACKUP_STORAGE_SECRET_ACCESS_KEY
+DATABASE_URL            # the DIRECT (non-pooler) Neon endpoint: pg_dump needs session semantics
+BACKUP_LOCAL_DIR        # absolute, e.g. "$HOME/.kept/backups"
+BACKUP_TRANSPORT        # wrangler
+BACKUP_SOURCE_BUCKET    # kept
+BACKUP_STORAGE_BUCKET   # kept-backups - NEVER the image bucket
 ```
 
-and refuses on any missing value, on the image bucket as the target (the
-`exports/` lifecycle rule must never live near backups), and on a local
-`pg_dump` older than 16 (`src/db/backupConfig.ts` carries the refusals and
-their unit tests).
+`wrangler` is the transport because its OAuth login reads and writes R2 objects, which is why no R2 API token is needed; nobody can script minting one, and the job waited 72 days for it. Run `wrangler whoami` if a run reports it cannot authenticate. `BACKUP_TRANSPORT=s3` plus `BACKUP_STORAGE_ENDPOINT`, `_ACCESS_KEY_ID` and `_SECRET_ACCESS_KEY` uses one token scoped to both buckets instead.
 
-**Scheduling** is a launchd agent on the Mac:
-`server/ops/net.keptapp.backup.plist` is the template, with its
-installation steps in its own header comment - replace the repo path, put
-the five variables in `~/.kept/backup.env` (chmod 600), copy to
-`~/Library/LaunchAgents`, load, run once by hand, read the log. Daily 02:00;
-launchd runs a missed slot at next wake.
+**Is it working?**
 
-**Installed 2026-08-20**, and three facts the first run taught, recorded so
-the next install does not relearn them:
+```sh
+cd server && BACKUP_LOCAL_DIR="$HOME/.kept/backups" npm run db:backup-status    # exits 1 past 48 hours
+```
 
-- **`~/.kept/backup.env` values must be quoted.** The file is `source`d by
-  zsh and the Neon `DATABASE_URL` carries `&` in its query string; unquoted,
-  the shell reads it as a background operator and the whole file fails to
-  parse.
-- **The file also has to carry `PATH`.** launchd's shell inherits almost
-  none: Homebrew's `postgresql@16` is keg-only (`pg_dump` lives in
-  `/opt/homebrew/opt/postgresql@16/bin`) and `npm` is nvm-managed, so a node
-  version change must update the nvm segment of that line.
-- **`DATABASE_URL` in `backup.env` is the direct (non-`-pooler`) Neon
-  endpoint**, not the pooled one the app uses: `pg_dump` needs session
-  semantics the PgBouncer pooled endpoint does not provide.
+That reads two local files and needs no credentials. A failed run also posts a macOS notification. **A job that never runs posts nothing**: that is how this one went unnoticed from about 2026-09-25, so look at the status now and then.
 
-The installed agent runs nightly and **refuses loudly into
-`~/Library/Logs/kept-backup.log`** (the refusal names the missing variables)
-until the last piece is in place. Still needed before wave-6 §3 step 17
-counts as done, and it is one dashboard task plus one re-run: **the R2 API
-token scoped to `kept-backups`** (Cloudflare dashboard → R2 → Manage R2 API
-Tokens → Create → Object Read & Write → specify bucket `kept-backups` -
-neither the connected Cloudflare MCP token nor wrangler's OAuth token is
-allowed to mint API tokens, so this is a by-hand step), pasted into
-`~/.kept/backup.env`, then `launchctl start net.keptapp.backup`,
-read the log, and run the drill below **against that scheduled dump's
-file**. The drill procedure itself was executed 2026-08-20 against a manual
-production dump - row counts verified; the image leg is vacuous until
-production holds an image (see below).
+**Scheduling** is a launchd agent on the Mac: `server/ops/com.arthurzhang.kept-backup.plist` is the template, with the install steps in its header, and it runs `server/ops/kept-backup.sh`, which rebuilds `PATH` after sourcing the env file so a stale line there cannot break the job. Daily 02:00; launchd runs a missed slot at next wake. ⚠ The label is **disabled in launchd's own database**, and that survives a reload, so the install needs `launchctl enable`.
+
+**Enabled 2026-10-31.** The first run through launchd took 12 minutes (263 images, 176 MB), and the next took 18 seconds. Everything lives under `~/.kept/backups/`.
+
+**Keeping a deleted account out of the backups.** Only `DELETE /api/me` hard-deletes, so the trigger is a user id vanishing, never rows or images vanishing. When a green run sees a mirrored user who is no longer in `users`, it records them in `pending-prune.tsv` and posts a notification. 30 days later it removes that user's off-site images and every dump and manifest taken before the deletion, off-site and local, and the local mirror; later dumps stay, so a restore point always exists. **A prune also removes every other user's history from before that date**, which is inherent in the dumps holding everyone. It refuses when the run was not green, when `users` restored empty, or when every known user vanished at once: a wiped database looks exactly like that, and the backup must not destroy itself over it. `db:backup-status` shows what is pending and when. To stop a prune, restore the user or unload the agent; deleting the line only re-adds it with a new date. **Out of its reach:** the hand-run copies (`kept-prod-*.dump` and `images-<date>/` locally, `pg/kept-*-manual-*.dump` and `images/<date>/` off-site), since wrangler cannot list a bucket, and a user who never had an image. Delete those by hand.
+
+**The dead man's switch.** `server/ops/backup-watch/` is the Worker `kept-backup-watch`. Once a day at 12:00 UTC it lists `kept-backups` and emails if the newest dump or manifest is over 48 hours old, empty or missing. It does not depend on this laptop. Its tick is a Durable Object alarm that re-arms itself, because the account's five free cron triggers are held by other projects. `POST /check` with `x-watch-token` (the value is in `~/.kept/backup-watch.token`) checks on demand and reports the next alarm; `?test=1` also sends a test mail. ⚠ `keptapp.net` has no SPF or DMARC records, and Outlook files this sender under Junk until told otherwise. An alert in Junk is silence, so keep `alerts@keptapp.net` on the Safe senders list.
+
+**What it does not do.** An image already mirrored is not re-read from the bucket, so an object damaged in R2 after its first backup is not noticed by this job; the good copy is safe in the mirror, and `npm run db:verify-restore` does re-hash the bucket. `kept-backups` is the same Cloudflare account as the images; the local mirror is the copy an account compromise cannot reach.
+
+### Restore the images
+
+```sh
+cd server
+BACKUP_LOCAL_DIR="$HOME/.kept/backups" BACKUP_TRANSPORT=wrangler \
+BACKUP_STORAGE_BUCKET=kept-backups RESTORE_TARGET_BUCKET=<new bucket> \
+RESTORE_MANIFEST=manifests/kept-<stamp>.tsv \
+npm run db:restore-images
+```
+
+It uploads every image in the manifest to the target from the local mirror, falling back to off-site. It refuses the backup bucket as a target, skips an object already there with the right digest, and reports rather than overwrites one with a different digest. Then point `STORAGE_BUCKET` at it and run the §4 verification below. A test wipes a bucket and database and rebuilds them this way from the backup alone.
 
 ### Three verified backups exist for 2026-09-01, and each one is a photograph, not a policy
 
@@ -344,7 +343,7 @@ Both were taken by hand, both were **restored and verified** rather than merely 
 
 ⚠ **Each is a point-in-time artifact and stops being a pre-migration backup the moment anything is written.** None of them is the backup for the *next* migration — **take a fresh dump then**, and verify it. A dump's value is entirely in how little has happened since.
 
-⚠ **Both are manual, and that is still the standing gap.** The scheduled agent below refuses every night for want of the R2 `kept-backups` API token, so what protects the data between hand-run dumps is Neon's 6-hour history window and nothing else.
+⚠ **Manual backups were all there was until 2026-10-31**, the latest being the 2026-10-02 pre-cutover run. Between them, what protected the data was Neon's 6-hour history window and nothing else.
 
 ### Restore it, and verify the restore
 
@@ -372,7 +371,7 @@ STORAGE_ENDPOINT=... STORAGE_BUCKET=... STORAGE_ACCESS_KEY_ID=... STORAGE_SECRET
 npm run db:verify-restore
 ```
 
-Step 3 compares row counts per table between the two databases, then takes every live receipt image row in the **restored** database, downloads the object behind it, and checks that the bytes hash to the digest that row carries.
+Step 3 compares row counts for every table between the two databases, then takes every live receipt image row in the **restored** database, downloads the object behind it, and checks that the bytes hash to the digest that row carries.
 The digest is the part that matters: a key that resolves proves an object is there, and only the hash proves it is the right object.
 Read the labels precisely: `MISSING` means storage answered and the object is not there - the backup really is short an image - while `UNREACHABLE` means storage did not answer, the object may be fine, and the run proves nothing about it either way. *(The script labelled both `MISSING` until 2026-08-21 - round 4 §4a.)*
 It exits non-zero and names every problem if anything fails, and it refuses to report success if the restored database holds no images at all - a restore verified against zero images has verified nothing.
