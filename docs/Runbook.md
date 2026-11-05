@@ -176,11 +176,15 @@ Edit `/etc/kept/kept.env` on the VM (mode 0600, never echoed), then restart the 
 ```sh
 ssh <ssh-host>
 sudoedit /etc/kept/kept.env
-docker compose -f /opt/kept/server/ops/prod/docker-compose.prod.yml up -d
-docker compose -f /opt/kept/server/ops/prod/docker-compose.prod.yml logs --tail 30 api
+cd /opt/kept/server/ops/prod
+export KEPT_IMAGE_TAG=$(docker inspect -f '{{.Config.Image}}' "$(docker compose -f docker-compose.prod.yml ps -q api)" | sed 's/^kept-api://')
+echo "$KEPT_IMAGE_TAG"   # the deployed commit's 12-char sha, never "untagged"
+docker compose -f docker-compose.prod.yml up -d --no-build api
+docker compose -f docker-compose.prod.yml logs --tail 30 api
 ```
 
 `up -d` recreates the container when its environment changed; nothing re-reads the file without it.
+⚠ Pin `KEPT_IMAGE_TAG` to the running image and pass `--no-build`. Without the tag, compose resolves the image to `kept-api:untagged` and, because the service has a `build:` section, builds one from whatever `/opt/kept` has checked out: a deploy nobody tagged, which §3 cannot roll back to. With `--no-build` a wrong tag fails instead of building.
 *(On Fly this was `fly secrets set NAME=value`, which restarted the machine by itself.)*
 ⚠ Changing `SESSION_JWT_SECRET` invalidates every existing session; everyone signs in again.
 To sign one person out without touching the secret, bump their `token_version` instead (§6).
