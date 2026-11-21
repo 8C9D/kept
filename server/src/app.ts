@@ -134,14 +134,15 @@ export function createApp(deps: AppDependencies): Hono {
     c.header("Cache-Control", "no-store");
   });
 
-  // The liveness check Fly's HTTP health check probes (fly.toml points at
-  // it; decision recorded 2026-08-15 in docs/DECISIONS.md). Three properties
+  // The liveness check the production container's healthcheck probes
+  // (ops/prod/docker-compose.prod.yml; Fly's HTTP check until 2026-10-02;
+  // decision recorded 2026-08-15 in docs/DECISIONS.md). Three properties
   // are load-bearing, and each is pinned by a test:
   //
   //   - It answers WITHOUT the edge secret, so it is registered above that
-  //     middleware. Fly's checker probes the machine directly and cannot
-  //     carry the Cloudflare header: fly.toml is committed, so putting
-  //     EDGE_SHARED_SECRET in a check header would commit a secret.
+  //     middleware. The healthcheck probes from inside the container and
+  //     cannot carry the Cloudflare header: the compose file is committed, so
+  //     putting EDGE_SHARED_SECRET in a check header would commit a secret.
   //   - It touches NO backing service. Boot already refuses to bind the port
   //     until both answered (the 2026-08-11 startup probes), and a probe
   //     that pinged the database every 30 seconds would never let Neon's

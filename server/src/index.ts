@@ -391,17 +391,19 @@ server.on("error", (error: NodeJS.ErrnoException) => {
  * before it stops waiting and exits anyway.
  *
  * 3 s is a judgement, not a measurement, and is written down as one. The budget
- * it has to fit inside is the platform's: `fly deploy` and `fly machine stop`
- * signal the old machine, wait `kill_timeout` - fly.toml sets none, so the
- * platform default of 5 s - and then SIGKILL, which severs exactly what this
- * path exists to protect. Three seconds of drain plus the pool's second below
- * leaves a second of that budget spare for the signal to reach a busy event
- * loop; a cap that overruns the platform's own is not a cap, it is a wish.
+ * it has to fit inside is the platform's: `docker stop`, and a deploy's
+ * container swap, signal the old container, wait `stop_grace_period` - 10 s
+ * in ops/prod/docker-compose.prod.yml, and Fly's default of 5 s when this was
+ * written - and then SIGKILL, which severs exactly what this path exists to
+ * protect. Three seconds of drain plus the pool's second below left a second
+ * of Fly's budget spare for the signal to reach a busy event loop, and leave
+ * six of Docker's; a cap that overruns the platform's own is not a cap, it is
+ * a wish.
  *
  * What it is measured against on the other side: every route here answers from
  * a small number of Postgres round trips against a pool whose connect bound is
  * 10 s, so a request still running at 3 s was not going to finish inside the
- * kill_timeout under any cap. The known exception is an export DOWNLOAD, which
+ * grace period under any cap. The known exception is an export DOWNLOAD, which
  * streams a year of images and can legitimately run longer - it is severed, and
  * that is safe because the export job is a row: it survives the restart and the
  * client asks for the file again.

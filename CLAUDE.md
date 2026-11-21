@@ -18,7 +18,7 @@ HST arithmetic, export generation, filename derivation, fiscal-period slicing, a
 The origin is `https://api.keptapp.net`.
 Since 2026-10-02 it is a single Ubuntu VM on the owner's Azure subscription running the `server/Dockerfile` image under `server/ops/prod/docker-compose.prod.yml`, reachable only through the Cloudflare Tunnel `kept-api`; `server/ops/prod/deploy.sh` is how a commit gets there.
 What is *not* in the repo is the VM itself, its `/etc/kept/kept.env`, Neon Postgres, the Cloudflare R2 bucket `kept`, and Cloudflare proxying the zone `keptapp.net` and carrying the rate limiter and the tunnel.
-The Fly app `keptapp-api` (`server/fly.toml`) served the origin from 2026-08-16 to 2026-10-02 and is kept at zero machines as the fallback until no earlier than 2026-11-02 (`docs/DECISIONS.md` 2026-10-02).
+The Fly app `keptapp-api` served the origin from 2026-08-16 to 2026-10-02 and was destroyed on 2026-11-21, with `server/fly.toml` (`docs/DECISIONS.md` 2026-11-21).
 Images never transit the API: the client PUTs straight to object storage through a presigned URL.
 Backups run nightly from a launchd agent on the owner's Mac, and the Worker `kept-backup-watch` (`server/ops/backup-watch/`) emails if they stop arriving.
 `docs/Runbook.md` is the operations authority - deploy, migrate, roll back, back up, restore.

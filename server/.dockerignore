@@ -4,5 +4,4 @@ node_modules
 *.log
 tests
 docker-compose.yml
-fly.toml
 Dockerfile

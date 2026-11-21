@@ -4,6 +4,16 @@ Append-only.
 One dated entry per decision: what was decided, what was rejected, and why.
 Ordered newest-first by decision date: a new entry is inserted at the top, never at the bottom, and a late-reconstructed entry files under the date the decision was made, not the date it was written.
 
+## 2026-11-21 - Fly is destroyed and the `api-next` rehearsal hostname is removed: the tunnel is the only way in
+
+*Executed 2026-11-21 on the owner's instruction, 49 days after the cutover, closing the follow-up the 2026-10-02 entry scheduled for no earlier than 2026-11-02.*
+
+**Decided: the Fly app `keptapp-api` is destroyed, and with it the fallback.** It had sat suspended at zero machines since 2026-10-03 while the VM served every request. `fly apps destroy keptapp-api` ran after the checks below, and the app's secrets went with it. The `_acme-challenge.api` CNAME and `_fly-ownership.api` TXT, kept only for Fly's certificate, are deleted. `server/fly.toml` is deleted, and the test that pinned `GET /health` to its HTTP check now pins the route to the production compose file's healthcheck, which is what probes it today. Rolling back is now `deploy.sh` to the previous image on the VM (Runbook §3); there is no second host.
+
+**Decided: `api-next.keptapp.net` is removed.** Its tunnel route was deleted first, which took its CNAME with it, and the `edge-secret` Transform Rule's expression is back to `http.host eq "api.keptapp.net"`. The rule was changed without displaying the header value: its edit page was driven by a script that read and wrote only the expression field, because the rules pages print the value in plain text (2026-10-02).
+
+**Checked at each step:** `api.keptapp.net` `/health` 200 and `/api/me` 401 JSON with `no-store` - the 401 rather than 403 also proves the Transform Rule still adds the header; `api-next` stopped answering 200; afterwards `keptapp-api.fly.dev` no longer answers, `fly apps list` no longer lists the app, and the zone holds seven records. **Spec amended in this commit:** §4.2 deployment row and edge-secret note, §4.4 layout, §6 `/health` row, and the update log; `CLAUDE.md`, `server/CLAUDE.md` and `docs/Runbook.md` §0, §1 and §5 alongside.
+
 ## 2026-10-31 - Backups cover both stores and prove themselves every run; exports stream; an amount the merge withheld cannot be promoted
 
 *The owner asked for the strongest available improvement to the project, without naming one. Read-only audits of the server, web and iOS clients ran first, and the tests were green before they did: server 760, web 334, iOS 632. The owner then ruled on what shipped: the backup enabled, the batch committed and deployed, a prune window, and an off-laptop check.*

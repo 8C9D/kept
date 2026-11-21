@@ -14,10 +14,11 @@ const fronted = createTestHarness({ edgeSharedSecret: EDGE_SECRET });
 afterAll(() => fronted.close());
 
 /**
- * The one route Fly's HTTP health check probes (fly.toml). Its contract,
- * decided 2026-08-15 (docs/DECISIONS.md): liveness only - a constant 200
- * from the process itself, reachable without the edge secret Fly's checker
- * cannot carry, touching neither backing service so it can never keep
+ * The one route the production container's healthcheck probes
+ * (ops/prod/docker-compose.prod.yml; Fly's HTTP check until 2026-10-02). Its
+ * contract, decided 2026-08-15 (docs/DECISIONS.md): liveness only - a
+ * constant 200 from the process itself, reachable without the edge secret
+ * the healthcheck cannot carry, touching neither backing service so it can never keep
  * Neon's autosuspending compute awake and never tells an outside observer
  * which backing service is up.
  */
@@ -30,11 +31,11 @@ describe("GET /health", () => {
     expect(await response.json()).toEqual({ status: "ok" });
   });
 
-  // Fly's checker probes the machine directly, not through Cloudflare, and
-  // fly.toml is committed so a check header cannot carry the secret. If the
-  // route slides below the edge-secret middleware, every probe answers 403,
-  // Fly marks the machine failing, and the deploy that shipped it is refused.
-  it("answers without the edge secret, which Fly's checker cannot carry", async () => {
+  // The healthcheck probes from inside the container, not through
+  // Cloudflare, and the compose file is committed so a check header cannot
+  // carry the secret. If the route slides below the edge-secret middleware,
+  // every probe answers 403 and Docker marks the container unhealthy.
+  it("answers without the edge secret, which the healthcheck cannot carry", async () => {
     const response = await fronted.app.request("/health");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "ok" });
@@ -71,17 +72,16 @@ describe("GET /health", () => {
     expect(await response.json()).toEqual({ status: "ok" });
   });
 
-  // The other half of the fix lives in fly.toml: the endpoint without the
-  // check block is a route nothing probes, and the check block without the
-  // endpoint fails every probe. Pin the wiring so neither half can be
-  // removed alone with the suite green.
-  it("is what fly.toml's HTTP check points at", () => {
-    const flyToml = readFileSync(
-      fileURLToPath(new URL("../../fly.toml", import.meta.url)),
+  // The other half lives in the production compose file: the endpoint
+  // without the healthcheck is a route nothing probes, and the healthcheck
+  // without the endpoint fails every probe. Pin the wiring so neither half
+  // can be removed alone with the suite green.
+  it("is what the production compose healthcheck points at", () => {
+    const compose = readFileSync(
+      fileURLToPath(new URL("../../ops/prod/docker-compose.prod.yml", import.meta.url)),
       "utf8",
     );
-    expect(flyToml).toContain("[[http_service.checks]]");
-    expect(flyToml).toContain('path = "/health"');
-    expect(flyToml).toContain('method = "GET"');
+    expect(compose).toContain("healthcheck:");
+    expect(compose).toContain("fetch('http://127.0.0.1:3000/health')");
   });
 });
