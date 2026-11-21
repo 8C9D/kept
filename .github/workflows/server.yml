@@ -22,7 +22,9 @@ on:
 
 jobs:
   server:
-    runs-on: ubuntu-latest
+    # Pinned: the backup tests need the image's PostgreSQL 16 binaries, and
+    # ubuntu-latest moved to 26.04, which has no /usr/lib/postgresql/16/bin.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
