@@ -317,6 +317,14 @@ describe("the Worker", () => {
   });
 
   describe("the alarm that ticks it", () => {
+    // The Worker reads the real clock; the fixtures are dated against NOW.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     const stateWith = () => {
       const alarm = { at: null as number | null };
       return {
